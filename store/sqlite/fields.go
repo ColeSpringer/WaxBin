@@ -228,12 +228,12 @@ var itemFields = query.FieldMap{
 	"album":        {Expr: "COALESCE(NULLIF(t.album,''), srs.name, pod.title, '')", Kind: query.KindText},
 	"podcast":      {Expr: "COALESCE(pod.title, '')", Kind: query.KindText},
 	"genre":        {Expr: "COALESCE(NULLIF(t.genre,''), bk.genre, '')", Kind: query.KindText},
-	// The composer pair and the book author sort mirror their itemViewCols exprs
-	// (never NULL; '' for the kinds that lack them), so filter, sort, and display
-	// agree. composer_sort/author_sort are the collation keys a sorted list wants.
+	// composer_sort and author_sort read the keys beside the spellings the item view
+	// shows, so a sorted list collates (and an item with no spelling sorts by its name);
+	// never NULL, '' for the kinds that lack them.
 	"composer":      {Expr: "COALESCE(t.composer,'')", Kind: query.KindText},
-	"composer_sort": {Expr: "COALESCE(t.composer_sort,'')", Kind: query.KindText},
-	"author_sort":   {Expr: "COALESCE(bk.author_sort,'')", Kind: query.KindText},
+	"composer_sort": {Expr: "COALESCE(t.composer_sort_key,'')", Kind: query.KindText},
+	"author_sort":   {Expr: "COALESCE(bk.author_sort_key,'')", Kind: query.KindText},
 	"year":          {Expr: itemYearExpr, Kind: query.KindInt},
 	"track_no":      {Expr: "t.track_no", Kind: query.KindInt},
 	"disc_no":       {Expr: "t.disc_no", Kind: query.KindInt},

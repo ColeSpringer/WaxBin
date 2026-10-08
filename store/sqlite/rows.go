@@ -139,7 +139,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
 	t.track_no, t.track_total, t.disc_no, t.disc_total, ` + itemYearExpr + `,
-	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation,
+	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation, COALESCE(t.artist_sort,''),
 	COALESCE(t.composer,''), COALESCE(t.composer_sort,''),
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
 	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
@@ -195,7 +195,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 	return []any{
 		&v.PID, &v.Kind, &v.State, &v.Title,
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.trackTotal, &n.discNo, &n.discTotal, &n.year, &v.Genre, &n.compilation,
-		&v.Composer, &v.ComposerSort,
+		&v.ArtistSort, &v.Composer, &v.ComposerSort,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
 		&n.season, &n.pubDate, &n.explicit, &n.podcastExplicit, &v.Source,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
@@ -639,17 +639,20 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO track
-		(item_id, artist, artist_sort, album, album_artist, composer, composer_sort, comment,
-		 track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		(item_id, artist, artist_sort, artist_sort_key, album, album_artist, composer, composer_sort,
+		 composer_sort_key, comment, track_no, track_total, disc_no, disc_total, year, bpm, genre,
+		 compilation, isrc, mbid)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
-			artist=excluded.artist, artist_sort=excluded.artist_sort, album=excluded.album,
+			artist=excluded.artist, artist_sort=excluded.artist_sort,
+			artist_sort_key=excluded.artist_sort_key, album=excluded.album,
 			album_artist=excluded.album_artist, composer=excluded.composer,
-			composer_sort=excluded.composer_sort, comment=excluded.comment,
-			track_no=excluded.track_no, track_total=excluded.track_total, disc_no=excluded.disc_no,
-			disc_total=excluded.disc_total, year=excluded.year, bpm=excluded.bpm, genre=excluded.genre,
-			compilation=excluded.compilation, isrc=excluded.isrc, mbid=excluded.mbid`,
-		itemID, tr.Artist, tr.ArtistSort, tr.Album, tr.AlbumArtist, tr.Composer, tr.ComposerSort, tr.Comment,
+			composer_sort=excluded.composer_sort, composer_sort_key=excluded.composer_sort_key,
+			comment=excluded.comment, track_no=excluded.track_no, track_total=excluded.track_total,
+			disc_no=excluded.disc_no, disc_total=excluded.disc_total, year=excluded.year, bpm=excluded.bpm,
+			genre=excluded.genre, compilation=excluded.compilation, isrc=excluded.isrc, mbid=excluded.mbid`,
+		itemID, tr.Artist, tr.ArtistSort, artistSortKey(tr), tr.Album, tr.AlbumArtist, tr.Composer,
+		tr.ComposerSort, composerSortKey(tr), tr.Comment,
 		nullInt(tr.TrackNo), nullInt(tr.TrackTotal), nullInt(tr.DiscNo), nullInt(tr.DiscTotal),
 		nullInt(tr.Year), nullInt(tr.BPM), tr.Genre, boolInt(tr.Compilation), tr.ISRC, nullStr(tr.MBID))
 	return err

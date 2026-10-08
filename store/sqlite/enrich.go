@@ -1470,7 +1470,7 @@ func carriedAuxArt(entity model.ArtEntity, aux map[model.ArtRole]*model.ArtImage
 // id is asked about with the user's id rather than the one this phase would have used.
 //
 // It deliberately does not write media or country back from the matched release.
-// resolveAlbum is fill-when-empty, so an enrichment-written media=CD would permanently
+// The scan's album fill is fill-when-empty, so an enrichment-written media=CD would permanently
 // shadow the file's real MEDIA=Vinyl, the column would stop meaning "what the tags said",
 // and a setAlbumMBIDTx that declines on a lock or collision would leave the album queued
 // carrying enrichment's own output as evidence. Per-edition detail is album.mbid plus a

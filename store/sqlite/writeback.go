@@ -135,3 +135,54 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 	}
 	return out, nil
 }
+
+// FollowArtistSortWrite gives each track the artist is the primary artist of, whose primary
+// file is among files, the sort spelling a write-back just put in those files' ARTISTSORT,
+// as the next scan of them would read it, with the key folded from it. A spelling folds to
+// one key for all of them, so each batch is two statements; with none, each key folds its
+// own track's names.
+func (s *Store) FollowArtistSortWrite(ctx context.Context, artistPID model.PID, files []model.PID, spelling string) error {
+	const op = "store.FollowArtistSortWrite"
+	if len(files) == 0 {
+		return nil
+	}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		return chunkSlice(uniquePIDs(files), idBatchSize, func(chunk []model.PID) error {
+			args := []any{string(artistPID), spelling}
+			for _, p := range chunk {
+				args = append(args, string(p))
+			}
+			members := `SELECT t.item_id FROM track t JOIN artist a ON a.id = t.artist_id
+				JOIN item_file e ON e.item_id = t.item_id AND e.role = 'primary'
+				JOIN file f ON f.id = e.file_id
+				WHERE a.pid = ? AND t.artist_sort != ? AND f.pid IN ` + placeholders(len(chunk))
+			if _, err := tx.ExecContext(ctx, `INSERT INTO change_log(ts, entity_type, entity_pid, op)
+				SELECT ?, 'item', pi.pid, 'update' FROM playable_item pi WHERE pi.id IN (`+members+`)`,
+				append([]any{nowNS()}, args...)...); err != nil {
+				return err
+			}
+			if spelling != "" {
+				_, err := tx.ExecContext(ctx, "UPDATE track SET artist_sort = ?, artist_sort_key = ? WHERE item_id IN ("+members+")",
+					append([]any{spelling, model.SortKey(spelling)}, args...)...)
+				return err
+			}
+			ids, err := queryInt64sTx(ctx, tx, members, args...)
+			if err != nil {
+				return err
+			}
+			for _, id := range ids {
+				if _, err := tx.ExecContext(ctx, "UPDATE track SET artist_sort = '' WHERE item_id = ?", id); err != nil {
+					return err
+				}
+				if err := refreshSortSpellingKeysTx(ctx, tx, id, string(model.KindTrack)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return nil
+}

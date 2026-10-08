@@ -250,6 +250,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"trash", "list"}},
 		{args: []string{"organize"}},
 		{args: []string{"rm", p(fx.two)}},
+		{args: []string{"rm", p(fx.two), "--reason", "test"}},
 		{args: []string{"inbox", "import", asset("staging")}},
 
 		{args: []string{"user", "add", "carol"}},
@@ -310,6 +311,9 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"library", "remove", "ADDED"}},
 		{args: []string{"library", "remove", p(fx.library)}, wantErr: true},
 		{args: []string{"merge", "artist", p(fx.artist), p(fx.other)}},
+		{args: []string{"entity", "folds", "artist"}},
+		{args: []string{"entity", "unfold", "artist", "no such key"}, wantErr: true},
+		{args: []string{"entity", "unfold", "artist", "FOLD"}},
 		{args: []string{"db", "vacuum"}},
 		{args: []string{"db", "verify", "--fix"}},
 		{args: []string{"db", "migrate"}},
@@ -334,6 +338,10 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"rm", p(fx.two), "--apply"}},
 		{args: []string{"trash", "purge", "TRASH"}},
 		{args: []string{"organize", "--apply"}},
+		{args: []string{"organize", "history"}},
+		{args: []string{"organize", "undo", "ORGJOB"}},
+		{args: []string{"db", "vacuum", "--journal-days", "0"}},
+		{args: []string{"organize", "undo", "ORGJOB"}, wantErr: true},
 		{args: []string{"import", asset("acquired.mp3"), "--as", "track"}},
 		{args: []string{"inbox", "import", asset("staging"), "--apply"}},
 		{args: []string{"trash", "empty"}},
@@ -342,8 +350,9 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"db", "reset", "--yes"}},
 	}
 	for _, c := range cases {
-		// TRASH stands for the trash entry the last delete wrote, read off trash list, and
-		// ADDED for the library `library add` registered.
+		// TRASH stands for the trash entry the last delete wrote, read off trash list, ADDED
+		// for the library `library add` registered, FOLD for the first artist fold and
+		// ORGJOB for the newest organize job the journal holds.
 		for i, a := range c.args {
 			switch a {
 			case "TRASH":
@@ -352,6 +361,12 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 			case "ADDED":
 				c.args = append([]string(nil), c.args...)
 				c.args[i] = libraryAt(t, fx, added)
+			case "FOLD":
+				c.args = append([]string(nil), c.args...)
+				c.args[i] = firstListed(t, fx, "key", "entity", "folds", "artist")
+			case "ORGJOB":
+				c.args = append([]string(nil), c.args...)
+				c.args[i] = firstListed(t, fx, "jobPid", "organize", "history")
 			}
 		}
 		stdout, stderr, err := runJSONCommand(fx, c.args, c.bare)
@@ -400,6 +415,27 @@ func libraryAt(t *testing.T, fx *jsonFixture, root string) string {
 	}
 	t.Fatalf("no library at %s in %q", root, stdout)
 	return ""
+}
+
+// firstListed runs a listing command and returns field of its first row, or a pid no row
+// holds when it lists none, for a case that wants the refusal.
+func firstListed(t *testing.T, fx *jsonFixture, field string, args ...string) string {
+	t.Helper()
+	stdout, _, err := runJSONCommand(fx, args, false)
+	if err != nil {
+		t.Fatalf("%s: %v", strings.Join(args, " "), err)
+	}
+	var env struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("%s printed %q: %v", strings.Join(args, " "), stdout, err)
+	}
+	if len(env.Data) == 0 {
+		return string(model.NewPID())
+	}
+	v, _ := env.Data[0][field].(string)
+	return v
 }
 
 // lastTrashEntry reads the newest active trash entry's pid off `trash list --json`.

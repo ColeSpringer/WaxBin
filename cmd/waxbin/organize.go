@@ -25,7 +25,10 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 			"after it; a folder the moves leave empty is removed. A move that cannot happen is " +
 			"held and the plan says why: a destination another file holds, a file not on disk, " +
 			"an item with no artist, album artist or album, or a cue rip's shared file. --apply " +
-			"plans and moves in one go, and its report lists what it held and why.",
+			"plans and moves in one go, and its report lists what it held and why. `organize " +
+			"history` lists the organize jobs whose moves the journal holds, and `organize undo` " +
+			"moves one's files back.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Organize every item; the template engine picks the per-kind layout
 			// (music vs audiobook), so books are laid out by the audiobook template
@@ -93,6 +96,7 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&profile, "profile", "", "organization profile (default: the library's configured profile)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "execute the moves (default is a dry run)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "limit number of items (0 = all)")
+	cmd.AddCommand(newOrganizeUndoCmd(g), newOrganizeHistoryCmd(g))
 	return cmd
 }
 
@@ -120,9 +124,14 @@ func emitPlan(cmd *cobra.Command, g *globals, plan *organize.Plan) error {
 }
 
 func emitReport(cmd *cobra.Command, g *globals, profile string, rep *organize.Report) error {
+	return emitMoves(cmd, g, "Organized (profile "+profile+")", profile, rep)
+}
+
+// emitMoves prints an applied organize's report, or an undo's, under heading.
+func emitMoves(cmd *cobra.Command, g *globals, heading, profile string, rep *organize.Report) error {
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			Profile       string              `json:"profile"`
+			Profile       string              `json:"profile,omitempty"`
 			Moved         int                 `json:"moved"`
 			Skipped       int                 `json:"skipped"`
 			Held          int                 `json:"held"`
@@ -134,8 +143,8 @@ func emitReport(cmd *cobra.Command, g *globals, profile string, rep *organize.Re
 			Warnings      []organize.Warning  `json:"warnings,omitempty"`
 		}{profile, rep.Moved, rep.Skipped, rep.Held, rep.Errored, rep.SidecarsMoved, rep.DirsPruned, rep.Holds, rep.Failures, rep.Warnings})
 	}
-	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, held %d, errored %d, sidecars %d, pruned %s\n",
-		profile, rep.Moved, rep.Skipped, rep.Held, rep.Errored, rep.SidecarsMoved, plural(rep.DirsPruned, "folder"))
+	fmt.Fprintf(out(cmd), "%s: moved %d, skipped %d, held %d, errored %d, sidecars %d, pruned %s\n",
+		heading, rep.Moved, rep.Skipped, rep.Held, rep.Errored, rep.SidecarsMoved, plural(rep.DirsPruned, "folder"))
 	for _, h := range rep.Holds {
 		fmt.Fprintf(out(cmd), "  HOLD %s [%s] (%s)\n", h.Src, h.Code, h.Reason)
 	}

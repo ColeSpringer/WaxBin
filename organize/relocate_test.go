@@ -151,8 +151,8 @@ func TestExecuteSplitsADirectoryCoverAcrossDestinations(t *testing.T) {
 		{Src: plan.Actions[0].Src, Dst: plan.Actions[0].Dst},
 		{Src: plan.Actions[1].Src, Dst: plan.Actions[1].Dst},
 	}
-	if n := o.applyCoverMoves(fsx.NewSpeller(dir, nil), CoverMoves(moved, PruneOptions(dir, nil))); n != 2 {
-		t.Fatalf("covers placed = %d, want one per destination", n)
+	if took := o.applyCoverMoves(fsx.NewSpeller(dir, nil), CoverMoves(moved, PruneOptions(dir, nil))); len(took) != 2 {
+		t.Fatalf("covers placed = %+v, want one per destination", took)
 	}
 	for _, d := range []string{dstA, dstB} {
 		if _, err := os.Stat(filepath.Join(d, "cover.jpg")); err != nil {

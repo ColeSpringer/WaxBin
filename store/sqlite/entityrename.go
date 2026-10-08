@@ -175,7 +175,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, creditTargets, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, creditTargets, lock == model.LockOn, affected, op); err != nil {
 			return err
 		}
 		rep.MemberEdits = make([]model.ItemFieldEdit, 0, len(entries))
@@ -194,7 +194,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 		// still covers both. applyItemCreditsTx deliberately does not call it itself.
 		rep.CreditEdits = make([]model.ItemCreditEdit, 0, len(creditTargets))
 		for i, e := range creditTargets {
-			stored, err := applyItemCreditsTx(ctx, tx, e, attr, lock, affected, op)
+			stored, err := applyItemCreditsTx(ctx, tx, e, creditsBefore[i], attr, lock, affected, op)
 			if err != nil {
 				return err
 			}
@@ -782,16 +782,11 @@ func finishRenameReportTx(ctx context.Context, tx *sql.Tx, entityType model.Merg
 func renameSurvivorPIDTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity,
 	fields map[string]string, members []model.PID) (model.PID, error) {
 	// The artist rung is the one that knows its destination key outright, since the key
-	// is the name it was handed. The chain rungs derive theirs from tags and folder, so
-	// there the survivor is read from where the members ended up.
+	// is the name it was handed, held by a row or named by a fold. The chain rungs derive
+	// theirs from tags and folder, so there the survivor is read from where the members
+	// ended up.
 	if entityType == model.MergeArtist {
-		var pid string
-		err := tx.QueryRowContext(ctx, "SELECT pid FROM artist WHERE match_key = ?",
-			identity.MatchKey(fields["name"])).Scan(&pid)
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
-		}
-		return model.PID(pid), err
+		return keyHolderTx(ctx, tx, model.MergeArtist, identity.MatchKey(fields["name"]), 0)
 	}
 	col, table := "t.album_id", "album"
 	if entityType == model.MergeReleaseGroup {

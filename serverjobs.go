@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/jobs"
@@ -100,10 +101,16 @@ func (l *Library) scanWork(libs []*model.Library, req ScanRequest, out *ScanResu
 // only a message, so a failure to write it leaves the finished scan standing, as
 // scan.Scan treats its own.
 func (l *Library) scanLibraries(ctx context.Context, libs []*model.Library, req ScanRequest, out *ScanResult, beat func(float64, string) error) error {
+	// One rebuild's run state spans its libraries, since a stamped file and the copy read
+	// before it can sit in two roots.
+	var adoption *scan.Adoption
+	if req.AdoptStampedPIDs {
+		adoption = &scan.Adoption{}
+	}
 	for i, lib := range libs {
 		r, err := l.scanner.Scan(ctx, scan.Request{
 			Library: lib, SubPath: req.SubPath, Force: req.Force,
-			AdoptStampedPIDs: req.AdoptStampedPIDs, ForceReconcile: req.ForceReconcile,
+			AdoptStampedPIDs: req.AdoptStampedPIDs, Adoption: adoption, ForceReconcile: req.ForceReconcile,
 			IgnoreLocks: req.IgnoreLocks,
 		}, libraryBeat(i, len(libs), beat))
 		if err != nil {
@@ -310,6 +317,126 @@ func (l *Library) Organize(ctx context.Context, q query.Query, opts OrganizeOpti
 	var out *organize.RunResult
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, l.organizeWork(q, opts, &out))
 	return out, err
+}
+
+// UndoOrganize moves back what an organize job moved, under an "organize-undo" job whose
+// own journal runs the other way, so an undo can be undone in turn. Each file goes from
+// where it stands to where the job found it, its own sidecars with it, and the covers and
+// other folder companions the job carried come back as its journal records them: a move
+// goes back and a copy goes, while it still holds its original's bytes. Tags the organize
+// wrote stay. A file standing where the job found it already is in place; one moved again
+// since, one the catalog no longer holds, one whose old place another file now holds and
+// one gone from disk are held, and so is a move in a read-only library. The job
+// must be a finished organize or undo with committed moves in its journal: CodeNotFound
+// when there is no such job or nothing to undo, CodeInvalid for another kind of job and
+// CodeConflict while it still runs, all before the undo's job starts. The job reads the
+// journal again for its plan, as it finds it.
+func (l *Library) UndoOrganize(ctx context.Context, jobPID model.PID) (*organize.Report, error) {
+	if err := l.checkOrganizeUndo(ctx, jobPID); err != nil {
+		return nil, err
+	}
+	var out *organize.RunResult
+	_, err := l.jobs.Run(ctx, organizeUndoSpec(jobPID), l.organizeUndoWork(jobPID, &out))
+	if out == nil {
+		return nil, err
+	}
+	return &out.Report, err
+}
+
+// RunOrganizeUndo submits UndoOrganize as a background job and returns its PID, checking
+// the job it undoes first. The client tails it and reads the organize.RunResult summary
+// from Result, as for RunOrganize.
+func (l *Library) RunOrganizeUndo(ctx context.Context, jobPID model.PID) (model.PID, error) {
+	if err := l.checkOrganizeUndo(ctx, jobPID); err != nil {
+		return "", err
+	}
+	return l.startJob(ctx, organizeUndoSpec(jobPID), l.organizeUndoWork(jobPID, new(*organize.RunResult)))
+}
+
+func organizeUndoSpec(jobPID model.PID) jobs.Spec {
+	return jobs.Spec{Kind: "organize-undo", Scope: fsMutateScope, TargetType: "job", TargetPID: jobPID}
+}
+
+// checkOrganizeUndo checks that jobPID names a finished organize or undo whose journal
+// holds a committed move to undo, asking only whether one exists.
+func (l *Library) checkOrganizeUndo(ctx context.Context, jobPID model.PID) error {
+	const op = "Library.UndoOrganize"
+	job, err := l.store.JobByPID(ctx, jobPID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case job.Kind != "organize" && job.Kind != "organize-undo":
+		return waxerr.New(waxerr.CodeInvalid, op, "job "+string(jobPID)+" is a "+job.Kind+", not an organize")
+	case job.State == model.JobRunning:
+		return waxerr.New(waxerr.CodeConflict, op, "job "+string(jobPID)+" is still running")
+	}
+	moved, err := l.store.OrganizeJobMoved(ctx, jobPID)
+	if err != nil {
+		return err
+	}
+	if !moved {
+		return waxerr.New(waxerr.CodeNotFound, op,
+			"job "+string(jobPID)+" has no committed moves to undo (its journal may have been pruned)")
+	}
+	return nil
+}
+
+// organizeUndoMoves checks the job again (checkOrganizeUndo) and reads its committed
+// journal, inside the undo's job.
+func (l *Library) organizeUndoMoves(ctx context.Context, jobPID model.PID) ([]model.OrganizeMove, error) {
+	if err := l.checkOrganizeUndo(ctx, jobPID); err != nil {
+		return nil, err
+	}
+	return l.store.OrganizeJournalByJob(ctx, jobPID)
+}
+
+// organizeUndoWork moves the files of jobPID back inside a job, leaving the run's result
+// in out.
+func (l *Library) organizeUndoWork(jobPID model.PID, out **organize.RunResult) jobFn {
+	return func(jctx context.Context, h *jobs.Handle) error {
+		moves, err := l.organizeUndoMoves(jctx, jobPID)
+		if err != nil {
+			return err
+		}
+		libs, err := l.store.Libraries(jctx)
+		if err != nil {
+			return err
+		}
+		plan := organize.UndoPlan(moves)
+		for i := range plan.Actions {
+			if a := &plan.Actions[i]; !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
+				a.Skip, a.Code, a.Reason = true, organize.HoldReadOnly, "library is read-only"
+			}
+		}
+		if err := l.organizer.Hold(jctx, plan); err != nil {
+			return err
+		}
+		rep, err := l.organizer.Execute(jctx, plan, h.JobPID(),
+			func(p float64, msg string) error { return h.Heartbeat(jctx, p, msg) })
+		if rep != nil {
+			*out = &organize.RunResult{Report: *rep}
+			h.SetResult(l.jsonResult(**out))
+		}
+		return err
+	}
+}
+
+// OrganizeHistory lists the jobs whose moves the organize journal holds, newest first, with
+// their moves counted by state, the job pids UndoOrganize takes. A non-positive limit lists
+// them all.
+func (l *Library) OrganizeHistory(ctx context.Context, limit int) ([]model.OrganizeBatch, error) {
+	return l.store.OrganizeHistory(ctx, limit)
+}
+
+// PruneOrganizeJournal deletes the organize journal's rows of every job whose moves have
+// all settled and were made at least olderThan ago, keeping a running job's, and returns
+// how many went. A pruned job can no longer be undone. A negative age is refused.
+func (l *Library) PruneOrganizeJournal(ctx context.Context, olderThan time.Duration) (int, error) {
+	if olderThan < 0 {
+		return 0, waxerr.New(waxerr.CodeInvalid, "waxbin.PruneOrganizeJournal", "the age to prune past is negative")
+	}
+	return l.store.PruneOrganizeJournal(ctx, olderThan.Nanoseconds())
 }
 
 // organizeWork plans across the managed libraries and executes the plan inside a job,

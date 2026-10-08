@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 
@@ -28,6 +29,9 @@ type sortKeySource struct {
 	table   string // table holding the key
 	keyCol  string // the generated key column
 	textCol string // the display column it derives from
+	// textSQL, when set, is the expression over the row the key derives from in place
+	// of textCol: a sort spelling, else the name it sorts in place of.
+	textSQL string
 	idCol   string // primary key, the UPDATE target
 	pidExpr string // SQL for the pid a rewritten row's delta names
 	// pidJoin reaches pidExpr for a table with no pid of its own. Both joins below
@@ -62,6 +66,57 @@ var sortKeySources = []sortKeySource{
 	// The same plain derivation, over the series sequence rather than a name.
 	{table: "book", keyCol: "series_seq_sort", textCol: "series_seq", idCol: "item_id",
 		pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
+	// The keys beside the sort spellings, in the SQL form of artistSortKey and friends.
+	{table: "track", keyCol: "artist_sort_key", textSQL: "COALESCE(NULLIF(t.artist_sort, ''), NULLIF(t.artist, ''), t.album_artist)",
+		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
+	{table: "track", keyCol: "composer_sort_key", textSQL: "COALESCE(NULLIF(t.composer_sort, ''), t.composer)",
+		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
+	{table: "book", keyCol: "author_sort_key", textSQL: "COALESCE(NULLIF(t.author_sort, ''), t.author)",
+		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
+}
+
+// artistSortKey, composerSortKey and authorSortKey are the keys a stated sort spelling
+// orders by: the spelling folded, or with none the name it sorts in place of. Every
+// writer of a spelling or of that name stores the key beside it, and sortKeySources
+// states the same rule in SQL for the check and the repair.
+func artistSortKey(tr model.Track) string {
+	return model.SortKey(cmp.Or(tr.ArtistSort, tr.Artist, tr.AlbumArtist))
+}
+
+func composerSortKey(tr model.Track) string {
+	return model.SortKey(cmp.Or(tr.ComposerSort, tr.Composer))
+}
+
+func authorSortKey(spelling, author string) string {
+	return model.SortKey(cmp.Or(spelling, author))
+}
+
+// refreshSortSpellingKeysTx rewrites one item's spelling keys from its row, for a writer
+// that updates a spelling or the name behind it with a statement of its own rather than
+// through upsertTrack or upsertBook.
+func refreshSortSpellingKeysTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string) error {
+	switch kind {
+	case string(model.KindTrack):
+		var tr model.Track
+		if err := tx.QueryRowContext(ctx,
+			"SELECT artist_sort, artist, album_artist, composer_sort, composer FROM track WHERE item_id = ?", itemID).
+			Scan(&tr.ArtistSort, &tr.Artist, &tr.AlbumArtist, &tr.ComposerSort, &tr.Composer); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE track SET artist_sort_key = ?, composer_sort_key = ? WHERE item_id = ?",
+			artistSortKey(tr), composerSortKey(tr), itemID)
+		return err
+	case string(model.KindBook):
+		var spelling, author string
+		if err := tx.QueryRowContext(ctx, "SELECT author_sort, author FROM book WHERE item_id = ?", itemID).
+			Scan(&spelling, &author); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE book SET author_sort_key = ? WHERE item_id = ?",
+			authorSortKey(spelling, author), itemID)
+		return err
+	}
+	return nil
 }
 
 // textExpr is the SQL a row's sort key is regenerated from. For a curatable
@@ -71,6 +126,9 @@ var sortKeySources = []sortKeySource{
 // entity as the one thing that never folds. Clearing an override stores an empty
 // value rather than deleting the row, hence the NULLIF.
 func (src sortKeySource) textExpr() string {
+	if src.textSQL != "" {
+		return src.textSQL
+	}
 	if src.entityType == "" {
 		return "t." + src.textCol
 	}
@@ -88,39 +146,6 @@ func (src sortKeySource) query(lead string) (string, []any) {
 	if src.entityType != "" {
 		q += " LEFT JOIN entity_curation ec ON ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort'"
 		args = append(args, src.entityType)
-	}
-	return q, args
-}
-
-// sortKeyRefold is a column holding a key derived from a sort tag rather than a
-// display name. The tag is not recoverable from the catalog, so these are refolded
-// in place; recomputing from the display column would destroy a "Beatles, The"
-// style tag. All of them live on a playable_item subtype, so the delta is the
-// item's.
-type sortKeyRefold struct {
-	table string // subtype table, keyed by item_id
-	col   string
-	// lockField names the field_provenance field whose lock exempts a row. An
-	// explicit composer_sort or author_sort edit stores the literal user string
-	// rather than SortKey(value), so refolding a locked one would rewrite what the
-	// user typed. artist_sort has no lock to check (see credits.go).
-	lockField string
-}
-
-var sortKeyRefolds = []sortKeyRefold{
-	{table: "track", col: "artist_sort"},
-	{table: "track", col: "composer_sort", lockField: "composer_sort"},
-	{table: "book", col: "author_sort", lockField: "author_sort"},
-}
-
-func (r sortKeyRefold) query() (string, []any) {
-	q := "SELECT t.item_id, pi.pid, t." + r.col + " FROM " + r.table + " t" +
-		" JOIN playable_item pi ON pi.id = t.item_id WHERE t." + r.col + " <> ''"
-	var args []any
-	if r.lockField != "" {
-		q += " AND NOT EXISTS (SELECT 1 FROM field_provenance fp" +
-			" WHERE fp.item_id = t.item_id AND fp.field = ? AND fp.locked = 1)"
-		args = append(args, r.lockField)
 	}
 	return q, args
 }
@@ -145,11 +170,6 @@ func (s *Store) RefreshSortKeys(ctx context.Context) (int, error) {
 	p := &sortKeyPatch{store: s, op: op}
 	for _, src := range sortKeySources {
 		if err := s.recomputeSortKeys(ctx, p, src); err != nil {
-			return p.written, err
-		}
-	}
-	for _, r := range sortKeyRefolds {
-		if err := s.refoldSortKeys(ctx, p, r); err != nil {
 			return p.written, err
 		}
 	}
@@ -182,49 +202,6 @@ func (s *Store) recomputeSortKeys(ctx context.Context, p *sortKeyPatch, src sort
 		if err := p.add(ctx, sortKeyUpdate{
 			table: src.table, col: src.keyCol, idCol: src.idCol, id: id,
 			was: stored, key: want, deltaType: src.deltaType, pid: model.PID(pid),
-		}); err != nil {
-			return err
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-	}
-	return nil
-}
-
-// refoldSortKeys streams one tag-derived column and queues the rows whose folded
-// form differs from what is stored.
-//
-// RefoldKey, not Fold: padNumbers has only ever padded ASCII, so a "Track ٢" tag
-// sits in the column as "track ٢" and Fold alone would leave "track 2" where a
-// later rescan writes "track 0000000002". Not SortKey either, because
-// stripArticle is not idempotent.
-//
-// Two rare cases still will not match what a later rescan writes, and both
-// self-heal when the file is rescanned: a fullwidth "ｔｈｅ ｂｅａｔｌｅｓ" refolds to
-// "the beatles" while a rescan strips the now-ASCII article, and a run mixing
-// ASCII with non-ASCII digits folds wider than the pad width so it stays
-// unpadded.
-func (s *Store) refoldSortKeys(ctx context.Context, p *sortKeyPatch, r sortKeyRefold) error {
-	q, args := r.query()
-	rows, err := s.read.QueryContext(ctx, q, args...)
-	if err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int64
-		var pid, stored string
-		if err := rows.Scan(&id, &pid, &stored); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-		}
-		want := model.RefoldKey(stored)
-		if want == stored {
-			continue
-		}
-		if err := p.add(ctx, sortKeyUpdate{
-			table: r.table, col: r.col, idCol: "item_id", id: id,
-			was: stored, key: want, deltaType: "item", pid: model.PID(pid),
 		}); err != nil {
 			return err
 		}

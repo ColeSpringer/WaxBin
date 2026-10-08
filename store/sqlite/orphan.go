@@ -273,6 +273,11 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 		"DELETE FROM entity_play_state WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
 		return err
 	}
+	// Nothing is left for its folds to fold into.
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_fold WHERE entity_type = ? AND entity_pid = ?", k.entityType, string(o.pid)); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM "+k.table+" WHERE id = ?", o.id); err != nil {
 		return err
 	}

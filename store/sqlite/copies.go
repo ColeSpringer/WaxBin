@@ -452,7 +452,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	affected := newAffectedRollups()
-	promoted, folded, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
+	promoted, folded, _, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -501,19 +501,57 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 // part fills its gap) or otherwise keeps a primary, its rollups and book total are
 // recomputed, and it emits an update, marked missing when none of its files is on disk;
 // one left with none folds into the item the file joined (foldItemIntoTx) and is deleted.
-// It returns the files promoted and the pids of the items folded.
-func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, []model.PID, error) {
+// It returns the files promoted, the pids of the items folded, less an opener whose pid
+// the joined item took, and that pid.
+func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, []model.PID, model.PID, error) {
 	var promoted []model.PromotedFile
 	var folded []model.PID
+	var handed model.PID
 	// The playlists and queues the folds and deletes change are settled once at the end.
 	var batch entryHolders
+	// A rip's track that opens the file, folding into an item this put minted, hands it
+	// its pid, so the file read back as one item keeps the identity it had going in.
+	opener := int64(0)
+	if dep.into != 0 && dep.intoPID != "" {
+		for _, oid := range orphans {
+			e := dep.lost[oid]
+			if e.start.Valid && (opener == 0 || e.start.Int64 < dep.lost[opener].start.Int64) {
+				opener = oid
+			}
+		}
+	}
+	// A listener who finished every window the file played heard the whole of it, and so
+	// the item it joined when the file is all of that item: a part of a larger book was
+	// heard, the book was not.
+	var whole map[int64]sql.NullInt64
+	if dep.into != 0 {
+		var windows []int64
+		for id, e := range dep.lost {
+			if e.start.Valid {
+				windows = append(windows, id)
+			}
+		}
+		var parts int
+		if len(windows) > 0 {
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_file WHERE item_id = ? AND role IN ('primary', 'part')",
+				dep.into).Scan(&parts); err != nil {
+				return nil, nil, "", err
+			}
+		}
+		if parts == 1 {
+			var err error
+			if whole, err = finishedByTx(ctx, tx, windows); err != nil {
+				return nil, nil, "", err
+			}
+		}
+	}
 	for _, oid := range orphans {
 		has, err := itemHasAnyFile(ctx, tx, oid)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		if err := affected.collect(ctx, tx, oid); err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		if has {
 			p, err := promoteLostTx(ctx, tx, oid, dep.books[oid], dep.lost[oid])
@@ -522,7 +560,7 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 				p, err = ensurePrimary(ctx, tx, oid)
 			}
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, "", err
 			}
 			if p != nil {
 				promoted = append(promoted, *p)
@@ -531,41 +569,56 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 			// or another encoding of it took its place.
 			if span, ok := dep.spans[oid]; ok && !filled {
 				if err := moveDepartedPositionsTx(ctx, tx, oid, dep.into, dep.file, span); err != nil {
-					return nil, nil, err
+					return nil, nil, "", err
 				}
 			}
 			if err := refreshBookDuration(ctx, tx, oid); err != nil {
-				return nil, nil, err
+				return nil, nil, "", err
 			}
 			marked, err := markUnreachableMissingTx(ctx, tx, oid, nil)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, "", err
 			}
 			if !marked {
 				if err := appendItemUpdateTx(ctx, tx, oid); err != nil {
-					return nil, nil, err
+					return nil, nil, "", err
 				}
 			}
 			continue
 		}
-		fold := dep.into != 0 && !dep.lost[oid].start.Valid
+		fold := dep.into != 0
 		if fold {
-			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file, dep.preserveLocks, &batch); err != nil {
-				return nil, nil, err
+			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file, dep.lost[oid].window(), dep.preserveLocks, &batch); err != nil {
+				return nil, nil, "", err
 			}
 		}
 		opid, err := deleteItemCascade(ctx, tx, oid, &batch)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
+		}
+		if oid == opener {
+			// The minted item carries on as the opener, so the caller's own delta updates
+			// the pid it now carries.
+			took, err := handPIDTx(ctx, tx, dep.intoPID, opid, false)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			if took {
+				handed = opid
+				continue
+			}
 		}
 		if fold {
 			folded = append(folded, opid)
 		}
 		if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 	}
-	return promoted, folded, batch.settleTx(ctx, tx)
+	if err := finishTx(ctx, tx, []int64{dep.into}, whole, nowNS()); err != nil {
+		return nil, nil, "", err
+	}
+	return promoted, folded, handed, batch.settleTx(ctx, tx)
 }
 
 // appendItemUpdateTx appends an item update delta by item id.
@@ -584,6 +637,20 @@ type lostEdge struct {
 	position   int
 	start, end sql.NullInt64
 	file       model.File
+}
+
+// window is the stretch of the file a rip's track played, in milliseconds, as the span a
+// fold places that track's places in; zero for a whole-file edge. An open end leaves the
+// length 0.
+func (e lostEdge) window() partSpan {
+	if !e.start.Valid {
+		return partSpan{}
+	}
+	w := partSpan{offset: model.FramesToMS(e.start.Int64)}
+	if e.end.Valid && e.end.Int64 > e.start.Int64 {
+		w.length = model.FramesToMS(e.end.Int64) - w.offset
+	}
+	return w
 }
 
 // lostFileCols reads what lostEdge.file holds from the file alias f.

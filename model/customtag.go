@@ -37,7 +37,7 @@ var reservedTagKeys = map[string]bool{
 	// Sort names. COMPOSERSORT is reserved globally, so an audiobook file carrying
 	// it loses the frame as a custom tag even though books do not consume the
 	// field (m4b narrator conventionally rides COMPOSER, not its sort). The
-	// scalar composer_sort surface owns the key for every kind.
+	// scalar composer_sort surface owns the spelling for every kind.
 	"ARTISTSORT": true, "ALBUMSORT": true, "ALBUMARTISTSORT": true, "COMPOSERSORT": true,
 	// Contributor roles (owned by the credit surface / item_contributor).
 	"LYRICIST": true, "CONDUCTOR": true, "PERFORMER": true, "REMIXER": true, "PRODUCER": true,

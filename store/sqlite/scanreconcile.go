@@ -46,7 +46,10 @@ import (
 //   - the file's newest committed organize_journal row runs from the old key's folder to
 //     the new key's, which is the organize this scan is catching up with. Both ends are
 //     compared, so a row left by some earlier hop corroborates nothing, which is what
-//     the journal needs given that nothing ever prunes it.
+//     the journal needs given that it keeps every move until `db vacuum --journal-days`
+//     prunes a job. A job pruned before the scan that catches up with it vouches for
+//     nothing, so an album whose release group the organize also re-keyed (the one other
+//     signal gone) is left behind and a new one minted, as PruneOrganizeJournal says.
 //
 // The comparison is fuzzy rather than exact. It runs on match keys, which fold
 // punctuation and separators to single spaces, so two genuinely different folders can
@@ -189,7 +192,7 @@ func reconcileAlbumRekeyTx(ctx context.Context, tx *sql.Tx, priorAlbumID, newAlb
 		// folder that already holds a release: without it the old row's curation would
 		// be dropped on the floor rather than merged.
 		if _, err := mergeEntityTx(ctx, tx, model.MergeAlbum, "album",
-			model.PID(dest.pid), model.PID(prior.pid)); err != nil {
+			model.PID(dest.pid), model.PID(prior.pid), false); err != nil {
 			return err
 		}
 		return foldDrainedReleaseGroupTx(ctx, tx, prior, dest, affected)
@@ -203,7 +206,7 @@ func reconcileAlbumRekeyTx(ctx context.Context, tx *sql.Tx, priorAlbumID, newAlb
 	// included) onto the survivor and deletes the other row, which frees the key for the
 	// rewrite below.
 	if _, err := mergeEntityTx(ctx, tx, model.MergeAlbum, "album",
-		model.PID(prior.pid), model.PID(dest.pid)); err != nil {
+		model.PID(prior.pid), model.PID(dest.pid), false); err != nil {
 		return err
 	}
 	// The release group goes with the key. Nothing else moves it (an album merge repoints
@@ -217,6 +220,9 @@ func reconcileAlbumRekeyTx(ctx context.Context, tx *sql.Tx, priorAlbumID, newAlb
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE album SET match_key=?, title=?, release_group_id=? WHERE id=?",
 		dest.key, dest.title, rgID, prior.id); err != nil {
+		return err
+	}
+	if err := dropFoldTx(ctx, tx, model.MergeAlbum, dest.key); err != nil {
 		return err
 	}
 	if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, "album", prior.id); err != nil {
@@ -255,10 +261,11 @@ func rekeyCorroboratedTx(ctx context.Context, tx *sql.Tx, prior, dest *rekeyAlbu
 }
 
 // organizeMovedFolderTx reports whether the file's newest committed organize move runs
-// from priorFolder to destFolder. The journal keeps every move ever made, so only the
-// newest row can describe the hop this re-key is catching up with, and both of its ends
-// are compared to keep an older one from corroborating on its own. A row whose file was
-// deleted holds a NULL file_id and is never read.
+// from priorFolder to destFolder. The journal keeps every move until a vacuum prunes its
+// job, so only the newest row can describe the hop this re-key is catching up with, and
+// both of its ends are compared to keep an older one from corroborating on its own. A row
+// whose file was deleted holds a NULL file_id and is never read, nor is a companion step,
+// which names no file.
 func organizeMovedFolderTx(ctx context.Context, tx *sql.Tx, fileID int64, priorFolder, destFolder string) (bool, error) {
 	if fileID == 0 {
 		return false, nil
@@ -325,13 +332,13 @@ func foldDrainedReleaseGroupTx(ctx context.Context, tx *sql.Tx, prior, dest *rek
 	}
 	if !fresh {
 		_, err := mergeEntityTx(ctx, tx, model.MergeReleaseGroup, "release_group",
-			model.PID(destGroup.pid), model.PID(priorGroup.pid))
+			model.PID(destGroup.pid), model.PID(priorGroup.pid), false)
 		return err
 	}
 	// The merge repoints the carried album back onto the old group and frees the fresh
 	// row's unique match_key, which the rewrite below then takes.
 	if _, err := mergeEntityTx(ctx, tx, model.MergeReleaseGroup, "release_group",
-		model.PID(priorGroup.pid), model.PID(destGroup.pid)); err != nil {
+		model.PID(priorGroup.pid), model.PID(destGroup.pid), false); err != nil {
 		return err
 	}
 	// The rewrite below flips the survivor's primary artist after the merge already
@@ -348,6 +355,9 @@ func foldDrainedReleaseGroupTx(ctx context.Context, tx *sql.Tx, prior, dest *rek
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE release_group SET match_key=?, title=?, primary_artist_id=? WHERE id=?",
 		destGroup.key, destGroup.title, destGroup.artistID, priorGroup.id); err != nil {
+		return err
+	}
+	if err := dropFoldTx(ctx, tx, model.MergeReleaseGroup, destGroup.key); err != nil {
 		return err
 	}
 	return refreshEntitySortKeyTx(ctx, tx, model.MergeReleaseGroup, "release_group", priorGroup.id)

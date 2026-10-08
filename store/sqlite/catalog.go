@@ -581,13 +581,18 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		if created {
+			dep.intoPID = itemPID
+		}
 		orphans, err := linkPrimaryFile(ctx, tx, itemID, fileID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if res.Promoted, res.Folded, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
+		var took model.PID
+		if res.Promoted, res.Folded, took, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		handed := carryHandedPID(res, &itemPID, took)
 		if demoted {
 			if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -636,7 +641,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// metadata/art after any real change. acqAdded is true only when a row was actually
 		// inserted, so a rescan of an already-attributed item stays silent.
 		if created || res.ContentChanged || res.MetadataChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged || demoted || kindLocked {
-			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
+			if err := appendChange(ctx, tx, "item", itemPID, putItemOp(created, handed)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -1130,6 +1135,30 @@ func (s *Store) FileByEssence(ctx context.Context, essence string) (*model.File,
 	return f, nil
 }
 
+// AdoptItemPID gives the item at from the pid to, unless to is not a valid pid or another
+// item holds it, and reports whether it did. The rebuild calls it for an item it made this
+// run under a fresh pid, before anything outside the catalog could know that pid, when a
+// stamped file joins it; the change log reads as the fresh pid going and the stamped one
+// arriving.
+func (s *Store) AdoptItemPID(ctx context.Context, from, to model.PID) (bool, error) {
+	const op = "store.AdoptItemPID"
+	if !to.Valid() {
+		return false, nil
+	}
+	adopted := false
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if adopted, err = handPIDTx(ctx, tx, from, to, true); err != nil || !adopted {
+			return err
+		}
+		return appendChange(ctx, tx, "item", to, model.OpCreate)
+	})
+	if err != nil {
+		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return adopted, nil
+}
+
 // PlanMove records a 'planned' organize_journal row before the on-disk move,
 // returning its journal pid.
 func (s *Store) PlanMove(ctx context.Context, in model.RelocateInput) (model.PID, error) {
@@ -1322,6 +1351,25 @@ func appendChange(ctx context.Context, tx *sql.Tx, entityType string, pid model.
 	return err
 }
 
+// carryHandedPID makes a put's new item carry on under took, the pid a rip's opening track
+// handed it (reconcileOrphansTx), so the put reports and logs it as that item changed
+// rather than one created, a track's and a book's put alike. It reports whether there was
+// one.
+func carryHandedPID(res *model.ScanItemResult, itemPID *model.PID, took model.PID) bool {
+	if took == "" {
+		return false
+	}
+	*itemPID = took
+	res.ItemPID, res.ItemCreated, res.MetadataChanged = took, false, true
+	return true
+}
+
+// putItemOp is the change a put logs for its item: a create for one it made, unless a pid
+// was handed to it (carryHandedPID), and an update otherwise.
+func putItemOp(created, handed bool) model.ChangeOp {
+	return opFor(created && !handed)
+}
+
 func opFor(created bool) model.ChangeOp {
 	if created {
 		return model.OpCreate
@@ -1386,10 +1434,7 @@ func (s *Store) RespellFolder(ctx context.Context, from, to string) (int, error)
 			if strings.HasPrefix(f.display, from) {
 				display = to + f.display[len(from):]
 			}
-			rel, err := filepath.Rel(f.root, path)
-			if err != nil {
-				rel = filepath.Base(path)
-			}
+			rel := pathx.RelUnder(f.root, path)
 			if _, err := tx.ExecContext(ctx, "UPDATE file SET path=?, display_path=?, rel_path=? WHERE id=?",
 				[]byte(path), display, []byte(rel), f.id); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -1402,6 +1447,18 @@ func (s *Store) RespellFolder(ctx context.Context, from, to string) (int, error)
 			}
 		}
 		n = len(files)
+		// The other paths that say where things stand go with the folder, as they do with
+		// a root move: the sidecars a scan observed and the places trashed files return
+		// to. The organize journal keeps the spelling each move was made under, which an
+		// undo compares by pathx.CollisionKey and which lets it respell the folder back.
+		span := []any{lo, prefixUpperBound(lo)}
+		if err := relocateBlobsTx(ctx, tx, "SELECT rowid, path FROM file_aux_state WHERE path >= ? AND path < ?", span,
+			"UPDATE file_aux_state SET path = ? WHERE rowid = ?", 1, from, to); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := relocateTrashTx(ctx, tx, "orig_path >= ? AND orig_path < ?", span, from, from, to); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		return nil
 	})
 	return n, err

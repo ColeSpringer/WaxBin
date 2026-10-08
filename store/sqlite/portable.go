@@ -92,6 +92,11 @@ func (s *Store) ItemsByRecordingMBID(ctx context.Context, mbid string) ([]*model
 	return collectItems(rows, op)
 }
 
+// artistByKeySQL is the id of the artist holding match key ?1, or of the one a fold of it
+// names, as a scan of that spelling resolves it.
+const artistByKeySQL = `COALESCE((SELECT id FROM artist WHERE match_key = ?1),
+	(SELECT a.id FROM entity_fold f JOIN artist a ON a.pid = f.entity_pid WHERE f.entity_type = 'artist' AND f.key = ?1))`
+
 // ItemsByArtistKey returns the track items whose artist entity has the given match key,
 // the seed set for the track descriptive rung. The artist entity is joinable and its
 // match_key is portable (identity.MatchKey of the name); the caller filters the seed by
@@ -103,8 +108,7 @@ func (s *Store) ItemsByArtistKey(ctx context.Context, artistMatchKey string) ([]
 		return nil, nil
 	}
 	rows, err := s.read.QueryContext(ctx,
-		itemSelect+" WHERE pi.kind = 'track' AND t.artist_id = (SELECT id FROM artist WHERE match_key = ?)",
-		artistMatchKey)
+		itemSelect+" WHERE pi.kind = 'track' AND t.artist_id = "+artistByKeySQL, artistMatchKey)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -143,8 +147,7 @@ func (s *Store) ItemsByAuthorKey(ctx context.Context, authorMatchKey string) ([]
 		return nil, nil
 	}
 	rows, err := s.read.QueryContext(ctx,
-		itemSelect+" WHERE pi.kind = 'book' AND bk.author_id = (SELECT id FROM artist WHERE match_key = ?)",
-		authorMatchKey)
+		itemSelect+" WHERE pi.kind = 'book' AND bk.author_id = "+artistByKeySQL, authorMatchKey)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

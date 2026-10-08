@@ -248,8 +248,14 @@ func withCreditRiders(e editEntry, byItemRole map[int64]map[string]string) editE
 // overlay the book members built here, for the reason renameArtistsForCreditsTx overlays
 // its own: without it the fold-back guard reads a narrator list the batch is about to
 // replace, still spelling the old name, and refuses a rename that is in fact covered.
+//
+// fold has each rename fold the key it leaves, so a file arriving later under the old
+// spelling joins the renamed entity. Only an entity rename that locks asks for it: it says
+// the entity is now called otherwise. An item or credit edit that happens to cover all of
+// an entity's members renames it in place to keep its pid and curation, but it said what
+// those items are, not that the old name is an alias, so it folds nothing.
 func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry,
-	credits []creditEntry, affected *affectedRollups, op string) error {
+	credits []creditEntry, fold bool, affected *affectedRollups, op string) error {
 	byItemRole := creditOverlayByItem(credits)
 	var members []*renameMember
 	var books []*bookRenameMember
@@ -297,13 +303,13 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entri
 	// the album groups and executes first, then the release-group stage (batch-level,
 	// since one group can back several of the batch's albums), then the album groups.
 	// The series stage follows the artist stage, the book chain's own second rung.
-	if err := renameArtistsForEditsTx(ctx, tx, members, books, creditMembers, groups, affected, op); err != nil {
+	if err := renameArtistsForEditsTx(ctx, tx, members, books, creditMembers, groups, fold, affected, op); err != nil {
 		return err
 	}
-	if err := renameSeriesForEditsTx(ctx, tx, books, op); err != nil {
+	if err := renameSeriesForEditsTx(ctx, tx, books, fold, op); err != nil {
 		return err
 	}
-	if err := renameReleaseGroupsForEditsTx(ctx, tx, groups, affected, op); err != nil {
+	if err := renameReleaseGroupsForEditsTx(ctx, tx, groups, fold, affected, op); err != nil {
 		return err
 	}
 	ids := make([]int64, 0, len(groups))
@@ -312,7 +318,7 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entri
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
-		if err := renameAlbumChainTx(ctx, tx, log, id, groups[id], affected, op); err != nil {
+		if err := renameAlbumChainTx(ctx, tx, log, id, groups[id], fold, affected, op); err != nil {
 			return err
 		}
 	}
@@ -415,7 +421,7 @@ func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []credit
 			groups[m.curAlbumID] = append(groups[m.curAlbumID], m)
 		}
 	}
-	return renameArtistsForEditsTx(ctx, tx, members, books, credits, groups, affected, op)
+	return renameArtistsForEditsTx(ctx, tx, members, books, credits, groups, false, affected, op)
 }
 
 // renameReleaseGroupsForEditsTx is the release-group stage of the pre-pass, planned
@@ -431,7 +437,7 @@ func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []credit
 // search text. Partial coverage falls through to renameAlbumChainTx's per-album
 // fallback, which moves the covered album under a found-or-created group and leaves
 // the old one with its remaining albums.
-func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[int64][]*renameMember, affected *affectedRollups, op string) error {
+func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[int64][]*renameMember, fold bool, affected *affectedRollups, op string) error {
 	// Qualify each album group for RG purposes: the batch covers every track of the
 	// album and every member computes one non-empty new RG key. Album-key uniformity
 	// is deliberately not required: the folder is an album-key segment but not an RG
@@ -535,17 +541,18 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 			}
 			continue
 		}
-		var incPID string
-		err = tx.QueryRowContext(ctx,
-			"SELECT pid FROM release_group WHERE match_key=?", newKey).Scan(&incPID)
+		incPID, err := keyHolderTx(ctx, tx, model.MergeReleaseGroup, newKey, rgID)
 		switch {
-		case err == nil:
-			// Taken: auto-merge into the incumbent, which repoints every album.
+		case err != nil:
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		case incPID != "":
+			// Taken, or folded into another group: auto-merge into the incumbent, which
+			// repoints every album.
 			if _, err := mergeEntityTx(ctx, tx, model.MergeReleaseGroup, "release_group",
-				model.PID(incPID), model.PID(pid)); err != nil {
+				incPID, model.PID(pid), fold); err != nil {
 				return err
 			}
-		case errors.Is(err, sql.ErrNoRows):
+		default:
 			// Free: rewrite the row in place. The unmatched enrichment marker is
 			// deleted so the rename re-queues an entity that never matched: RG
 			// resolution text-searches by title plus artist, and a key move is new
@@ -559,6 +566,9 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 			}
 			if _, err := tx.ExecContext(ctx,
 				"UPDATE release_group SET title=?, match_key=? WHERE id=?", rgTitle, newKey, rgID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := renameFoldsTx(ctx, tx, model.MergeReleaseGroup, curKey, newKey, model.PID(pid), fold); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeReleaseGroup, "release_group", rgID); err != nil {
@@ -575,8 +585,6 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 			if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtReleaseGroup, rgID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-		default:
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
 	return nil
@@ -591,7 +599,7 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 // the role credits now), and the coverage checks below require every reference the
 // catalog holds to be part of the move. Any failure falls back to today's
 // split-and-ghost behavior for that artist.
-func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameMember, books []*bookRenameMember, credits []*creditRenameMember, groups map[int64][]*renameMember, affected *affectedRollups, op string) error {
+func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameMember, books []*bookRenameMember, credits []*creditRenameMember, groups map[int64][]*renameMember, fold bool, affected *affectedRollups, op string) error {
 	type artistRow struct {
 		name, matchKey, pid string
 	}
@@ -740,7 +748,7 @@ func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameM
 		if !ok {
 			continue
 		}
-		if err := renameArtistTx(ctx, tx, id, r.name, r.matchKey, r.pid, n, affected, op); err != nil {
+		if err := renameArtistTx(ctx, tx, id, r.name, r.matchKey, r.pid, n, fold, affected, op); err != nil {
 			return err
 		}
 	}
@@ -911,7 +919,7 @@ func contributorRefsTx(ctx context.Context, tx *sql.Tx, artistID int64) ([]contr
 // the same rule as the RG step: artist resolution text-searches by name, and MatchKey
 // folds exactly what that search is insensitive to, so a same-key respelling is by
 // construction not new evidence and must not re-queue a rate-limited lookup.
-func renameArtistTx(ctx context.Context, tx *sql.Tx, id int64, curName, curKey, pid, n string, affected *affectedRollups, op string) error {
+func renameArtistTx(ctx context.Context, tx *sql.Tx, id int64, curName, curKey, pid, n string, fold bool, affected *affectedRollups, op string) error {
 	newKey := identity.MatchKey(n)
 	if newKey == curKey {
 		if n == curName {
@@ -922,26 +930,27 @@ func renameArtistTx(ctx context.Context, tx *sql.Tx, id int64, curName, curKey, 
 		}
 		return finishArtistRenameTx(ctx, tx, id, pid, false, affected, op)
 	}
-	var incPID string
-	err := tx.QueryRowContext(ctx, "SELECT pid FROM artist WHERE match_key=?", newKey).Scan(&incPID)
-	switch {
-	case err == nil:
-		_, err := mergeEntityTx(ctx, tx, model.MergeArtist, "artist", model.PID(incPID), model.PID(pid))
-		return err
-	case errors.Is(err, sql.ErrNoRows):
-		if _, err := tx.ExecContext(ctx,
-			"INSERT OR IGNORE INTO artist_alias(artist_id, name, sort_key, is_primary) VALUES (?,?,?,0)",
-			id, curName, model.SortKey(curName)); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE artist SET name=?, match_key=? WHERE id=?", n, newKey, id); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		return finishArtistRenameTx(ctx, tx, id, pid, true, affected, op)
-	default:
+	incPID, err := keyHolderTx(ctx, tx, model.MergeArtist, newKey, id)
+	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	if incPID != "" {
+		_, err := mergeEntityTx(ctx, tx, model.MergeArtist, "artist", incPID, model.PID(pid), fold)
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT OR IGNORE INTO artist_alias(artist_id, name, sort_key, is_primary) VALUES (?,?,?,0)",
+		id, curName, model.SortKey(curName)); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE artist SET name=?, match_key=? WHERE id=?", n, newKey, id); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := renameFoldsTx(ctx, tx, model.MergeArtist, curKey, newKey, model.PID(pid), fold); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return finishArtistRenameTx(ctx, tx, id, pid, true, affected, op)
 }
 
 // finishArtistRenameTx is the shared tail of the two name-writing branches: sort
@@ -974,7 +983,7 @@ func finishArtistRenameTx(ctx context.Context, tx *sql.Tx, id int64, pid string,
 // but the pid and the deltas that reference it: a series row holds no art, curation,
 // play state, or enrichment marker. A taken key folds the old row into the incumbent
 // through the series merge primitive.
-func renameSeriesForEditsTx(ctx context.Context, tx *sql.Tx, books []*bookRenameMember, op string) error {
+func renameSeriesForEditsTx(ctx context.Context, tx *sql.Tx, books []*bookRenameMember, fold bool, op string) error {
 	// One uniform target name per old series; a conflicting pair blocks it.
 	targets := map[int64]string{}
 	blocked := map[int64]bool{}
@@ -1029,7 +1038,7 @@ func renameSeriesForEditsTx(ctx context.Context, tx *sql.Tx, books []*bookRename
 		if kept {
 			continue
 		}
-		if err := renameSeriesTx(ctx, tx, id, n, op); err != nil {
+		if err := renameSeriesTx(ctx, tx, id, n, fold, op); err != nil {
 			return err
 		}
 	}
@@ -1065,7 +1074,7 @@ func seriesNameKeptByBatchTx(ctx context.Context, tx *sql.Tx, id int64, n string
 // auto-merges into the incumbent, the same three branches renameArtistTx has. Either
 // write emits one series OpUpdate; the merge branch emits its own deltas instead, the
 // loser's being a delete.
-func renameSeriesTx(ctx context.Context, tx *sql.Tx, id int64, n, op string) error {
+func renameSeriesTx(ctx context.Context, tx *sql.Tx, id int64, n string, fold bool, op string) error {
 	var curName, curKey, pid string
 	err := tx.QueryRowContext(ctx,
 		"SELECT name, match_key, pid FROM series WHERE id=?", id).Scan(&curName, &curKey, &pid)
@@ -1085,22 +1094,24 @@ func renameSeriesTx(ctx context.Context, tx *sql.Tx, id int64, n, op string) err
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	} else {
-		var incPID string
-		err := tx.QueryRowContext(ctx, "SELECT pid FROM series WHERE match_key=?", newKey).Scan(&incPID)
-		switch {
-		case err == nil:
-			// Taken: fold this row into the incumbent, which re-points every book and
-			// emits the loser's delete. Returning here rather than falling through is
-			// what keeps the tail from also emitting an update for a deleted pid.
-			_, err := mergeEntityTx(ctx, tx, model.MergeSeries, "series", model.PID(incPID), model.PID(pid))
+		incPID, err := keyHolderTx(ctx, tx, model.MergeSeries, newKey, id)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if incPID != "" {
+			// Taken, or folded into another series: fold this row into the incumbent,
+			// which re-points every book and emits the loser's delete. Returning here
+			// rather than falling through is what keeps the tail from also emitting an
+			// update for a deleted pid.
+			_, err := mergeEntityTx(ctx, tx, model.MergeSeries, "series", incPID, model.PID(pid), fold)
 			return err
-		case errors.Is(err, sql.ErrNoRows):
-			if _, err := tx.ExecContext(ctx,
-				"UPDATE series SET name=?, sort_key=?, match_key=? WHERE id=?",
-				n, model.SortKey(n), newKey, id); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-		default:
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE series SET name=?, sort_key=?, match_key=? WHERE id=?",
+			n, model.SortKey(n), newKey, id); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := renameFoldsTx(ctx, tx, model.MergeSeries, curKey, newKey, model.PID(pid), fold); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -1146,7 +1157,7 @@ func uniformValue[T comparable](group []*renameMember, proj func(*renameMember) 
 // returns nil, and the per-item apply loop afterwards splits the members off exactly
 // as it does today; on success that loop is transparent, since it computes the same
 // keys through the same helpers and hits the renamed or merged rows.
-func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, group []*renameMember, affected *affectedRollups, op string) error {
+func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, group []*renameMember, fold bool, affected *affectedRollups, op string) error {
 	// All-members: the batch must cover every track the album has.
 	var total int
 	if err := tx.QueryRowContext(ctx,
@@ -1227,7 +1238,7 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		// resolveAlbum on a hit never repoints the FK, so move it explicitly, and
+		// resolveAlbumChain on a hit never repoints the FK, so move it explicitly, and
 		// say so in the change log: the album's group membership is readable state
 		// (entity info serves the group pid), so a consumer needs a delta to refetch.
 		if _, err := tx.ExecContext(ctx,
@@ -1269,21 +1280,21 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 				return nil
 			}
 		}
-		var incID int64
-		var incPID string
-		err := tx.QueryRowContext(ctx,
-			"SELECT id, pid FROM album WHERE match_key=?", newAlbumKey).Scan(&incID, &incPID)
+		incPID, err := keyHolderTx(ctx, tx, model.MergeAlbum, newAlbumKey, albumID)
 		switch {
-		case err == nil:
-			// Taken: auto-merge into the incumbent, which repoints the members; the
-			// per-item loop then resolves onto it by the shared key. Collisions are
-			// only ever heuristic against heuristic, since an mbid-keyed album's new
-			// key is its own unchanged key under the loader's mbid carryover.
+		case err != nil:
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		case incPID != "":
+			// Taken, or folded into another album: auto-merge into the incumbent, which
+			// repoints the members; the per-item loop then resolves onto it by the shared
+			// key or its fold. Collisions are only ever heuristic against heuristic, since
+			// an mbid-keyed album's new key is its own unchanged key under the loader's
+			// mbid carryover.
 			if _, err := mergeEntityTx(ctx, tx, model.MergeAlbum, "album",
-				model.PID(incPID), model.PID(curPID)); err != nil {
+				incPID, model.PID(curPID), fold); err != nil {
 				return err
 			}
-		case errors.Is(err, sql.ErrNoRows):
+		default:
 			// Free: rewrite the row in place; the title keeps its current value unless
 			// the batch edited it.
 			title := curTitle
@@ -1295,14 +1306,15 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 				newAlbumKey, title, albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+			if err := renameFoldsTx(ctx, tx, model.MergeAlbum, curKey, newAlbumKey, model.PID(curPID), fold); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, "album", albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := appendChange(ctx, tx, "album", model.PID(curPID), model.OpUpdate); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-		default:
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
 

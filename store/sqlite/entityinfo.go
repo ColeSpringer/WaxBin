@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"maps"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
@@ -304,15 +305,41 @@ func (s *Store) EntityNames(ctx context.Context, kind read.EntityKind, pids []mo
 }
 
 // ArtistNames returns the name the catalog keeps for each artist it holds under the given
-// match keys (identity.MatchKey).
+// match keys (identity.MatchKey), a key a merge folded answering with its survivor's.
 func (s *Store) ArtistNames(ctx context.Context, matchKeys []string) (map[string]string, error) {
-	return s.namesByKey(ctx, "store.ArtistNames", "SELECT match_key, name FROM artist WHERE match_key IN ", matchKeys)
+	return s.foldedNamesByKey(ctx, "store.ArtistNames", "artist", "name", matchKeys)
 }
 
 // AlbumTitles returns the title of each album the catalog holds under the given identity
-// keys (identity.AlbumKey).
+// keys (identity.AlbumKey), a key a merge folded answering with its survivor's.
 func (s *Store) AlbumTitles(ctx context.Context, keys []string) (map[string]string, error) {
-	return s.namesByKey(ctx, "store.AlbumTitles", "SELECT match_key, title FROM album WHERE match_key IN ", keys)
+	return s.foldedNamesByKey(ctx, "store.AlbumTitles", "album", "title", keys)
+}
+
+// foldedNamesByKey reads the name column of the table's rows under keys, and for a key no
+// row holds, the name of the entity a fold of it names, as a scan of that key resolves it.
+// table is a caller constant.
+func (s *Store) foldedNamesByKey(ctx context.Context, op, table, name string, keys []string) (map[string]string, error) {
+	out, err := s.namesByKey(ctx, op, "SELECT match_key, "+name+" FROM "+table+" WHERE match_key IN ", keys)
+	if err != nil {
+		return nil, err
+	}
+	var missed []string
+	for _, k := range keys {
+		if _, ok := out[k]; !ok {
+			missed = append(missed, k)
+		}
+	}
+	if len(missed) == 0 {
+		return out, nil
+	}
+	folded, err := s.namesByKey(ctx, op, "SELECT f.key, e."+name+" FROM entity_fold f JOIN "+table+
+		" e ON e.pid = f.entity_pid WHERE f.entity_type = '"+table+"' AND f.key IN ", missed)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(out, folded)
+	return out, nil
 }
 
 // FilePIDsByPath returns the pid of the file the catalog holds at each path it holds,

@@ -31,7 +31,8 @@ CREATE TABLE book (
   item_id         INTEGER PRIMARY KEY REFERENCES playable_item(id) ON DELETE CASCADE,
   subtitle        TEXT    NOT NULL DEFAULT '',
   author          TEXT    NOT NULL DEFAULT '',   -- primary author display
-  author_sort     TEXT    NOT NULL DEFAULT '',
+  author_sort     TEXT    NOT NULL DEFAULT '',   -- the sort spelling stated, '' when none
+  author_sort_key TEXT    NOT NULL DEFAULT '',   -- author_sort, else author, folded
   author_id       INTEGER REFERENCES artist(id), -- primary author entity
   narrator        TEXT    NOT NULL DEFAULT '',   -- joined narrator display
   series_id       INTEGER REFERENCES series(id) ON DELETE SET NULL,

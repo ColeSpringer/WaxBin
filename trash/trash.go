@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
@@ -72,6 +74,9 @@ type Action struct {
 type Plan struct {
 	Mode    model.DeleteMode
 	Actions []Action
+	// Reason is what each trash row the plan writes records, in place of the mode's own
+	// (see CheckReason); empty takes the mode's. A bypass mode writes no row.
+	Reason string
 	// SkippedPodcast counts items a caller dropped before planning because they are
 	// podcast episodes, where `podcast unfetch` owns the bytes. Plan never sets it; the
 	// caller does (see Library.PlanDelete), and the guard stays there rather than
@@ -92,6 +97,38 @@ type Plan struct {
 	// matched only some of the tracks a cue sheet carves out of their file (DropPartialRips),
 	// carried to Report like SkippedPodcast.
 	SkippedRipTracks int
+}
+
+// MaxReasonBytes bounds a caller's delete reason.
+const MaxReasonBytes = 64
+
+// CheckReason validates a caller's delete reason under mode: valid UTF-8, at most
+// MaxReasonBytes, and no control, format or line-breaking characters (a right-to-left
+// override, a zero-width space or joiner, a line or paragraph separator), since it is a
+// label printed in one column of one `trash list` row and those would reorder, hide or
+// break what it says; and none at all beside a mode that bypasses the trash, which writes
+// no row to record it on.
+func CheckReason(mode model.DeleteMode, reason string) error {
+	const op = "trash.CheckReason"
+	switch {
+	case reason != "" && mode.BypassesTrash():
+		return waxerr.New(waxerr.CodeInvalid, op, "a delete reason is recorded in the trash, which a "+string(mode)+" delete bypasses")
+	case len(reason) > MaxReasonBytes:
+		return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("a delete reason is at most %d bytes, got %d", MaxReasonBytes, len(reason)))
+	case !utf8.ValidString(reason):
+		return waxerr.New(waxerr.CodeInvalid, op, "a delete reason must be valid UTF-8")
+	case strings.IndexFunc(reason, func(r rune) bool { return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) }) >= 0:
+		return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("a delete reason cannot hold a control, format or line-breaking character: %q", reason))
+	}
+	return nil
+}
+
+// reason is what the plan's trash rows record.
+func (p *Plan) reason() string {
+	if p.Reason != "" {
+		return p.Reason
+	}
+	return p.Mode.Reason()
 }
 
 // Pending returns the number of actions that would actually delete.
@@ -378,6 +415,9 @@ func planFile(libs []*model.Library, item model.PID, fl model.ItemFileRef, mode 
 // pruning/permanent deletes remove the file outright and tally reclaimed bytes. The
 // folders the run empties are removed once it ends, a canceled run included.
 func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
+	if err := CheckReason(plan.Mode, plan.Reason); err != nil {
+		return nil, err
+	}
 	rep := &Report{SkippedPodcast: plan.SkippedPodcast, SkippedReadOnly: plan.SkippedReadOnly, SkippedRipTracks: plan.SkippedRipTracks}
 	emptied := map[string]*Action{}
 	sib := organize.NewSiblings()
@@ -391,7 +431,7 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Skipped++
 			continue
 		}
-		size, promoted, err := s.apply(ctx, a, plan.Mode, sib)
+		size, promoted, err := s.apply(ctx, a, plan.Mode, plan.reason(), sib)
 		rep.Promoted = append(rep.Promoted, promoted...)
 		if err != nil {
 			rep.Errored++
@@ -481,7 +521,7 @@ func moveUnder(root, dir string) (dispose, undo func(string) error) {
 // move, the file is moved back so disk and catalog stay consistent. For a bypass
 // mode it removes the file and then detaches it. It returns the alternates promoted in
 // the file's place.
-func (s *Service) apply(ctx context.Context, a *Action, mode model.DeleteMode, sib *organize.Siblings) (int64, []model.PromotedFile, error) {
+func (s *Service) apply(ctx context.Context, a *Action, mode model.DeleteMode, reason string, sib *organize.Siblings) (int64, []model.PromotedFile, error) {
 	size := onDiskSize(a.Src)
 	if mode.BypassesTrash() {
 		if err := os.Remove(pathx.Long(a.Src)); err != nil && !os.IsNotExist(err) {
@@ -500,7 +540,7 @@ func (s *Service) apply(ctx context.Context, a *Action, mode model.DeleteMode, s
 		return 0, nil, waxerr.Wrap(waxerr.CodeIO, "trash.move", err)
 	}
 	res, err := s.store.TrashFile(ctx, model.TrashFileInput{
-		FilePID: a.FilePID, Reason: mode.Reason(),
+		FilePID: a.FilePID, Reason: reason,
 		TrashPath: []byte(a.TrashDst), TrashDisplay: a.TrashDst,
 	})
 	if err != nil {

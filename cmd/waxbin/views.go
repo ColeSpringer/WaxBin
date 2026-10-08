@@ -138,8 +138,10 @@ type itemView struct {
 	ReleaseGroupMBID string `json:"releaseGroupMbid,omitempty"`
 	ArtistMBID       string `json:"artistMbid,omitempty"`
 	AlbumArtistMBID  string `json:"albumArtistMbid,omitempty"`
-	// Composer and its collation key, present for track items.
+	// The composer and the artist and composer sort spellings as stated, present for
+	// track items.
 	Composer     string `json:"composer,omitempty"`
+	ArtistSort   string `json:"artistSort,omitempty"`
 	ComposerSort string `json:"composerSort,omitempty"`
 	// The track's stated tempo, a whole number, absent when the file states none.
 	BPM int `json:"bpm,omitempty"`
@@ -192,7 +194,7 @@ func toItemView(v *model.ItemView) itemView {
 		MBID: v.MBID, ISRC: v.ISRC, AlbumMBID: v.AlbumMBID,
 		ReleaseGroupMBID: v.ReleaseGroupMBID,
 		ArtistMBID:       v.ArtistMBID, AlbumArtistMBID: v.AlbumArtistMBID,
-		Composer: v.Composer, ComposerSort: v.ComposerSort, BPM: v.BPM,
+		ArtistSort: v.ArtistSort, Composer: v.Composer, ComposerSort: v.ComposerSort, BPM: v.BPM,
 		Explicit: v.Explicit, PodcastExplicit: v.PodcastExplicit,
 		Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),

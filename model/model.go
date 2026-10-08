@@ -120,14 +120,16 @@ type PlayableItem struct {
 // denormalized display columns; normalized artist/album/genre entities are
 // resolved and linked alongside during persistence.
 type Track struct {
-	ItemID      int64
-	Artist      string
-	ArtistSort  string
-	Album       string
-	AlbumArtist string
-	Composer    string
-	// ComposerSort is the composer's collation key, derived like ArtistSort: a
-	// tagged COMPOSERSORT wins as input, else it is generated from the composer.
+	ItemID int64
+	Artist string
+	// ArtistSort and ComposerSort are the sort spellings the file (ARTISTSORT,
+	// COMPOSERSORT) or an edit states, "" when none. The store keeps the key a sorted
+	// list compares beside each: the spelling folded through SortKey, or with none the
+	// artist (else the album artist) or the composer.
+	ArtistSort   string
+	Album        string
+	AlbumArtist  string
+	Composer     string
 	ComposerSort string
 	Comment      string
 	TrackNo      int
@@ -408,9 +410,12 @@ type ItemView struct {
 	ArtistMBID       string
 	AlbumArtistMBID  string
 
-	// Composer and its collation key, populated for track items (empty for
-	// books/episodes; a book with no NARRATOR takes its composer as the narrator
-	// when the scan promotes its book fields, and that is not surfaced here).
+	// ArtistSort is the artist's sort spelling as stated, "" when none, for track items.
+	ArtistSort string
+	// Composer and its sort spelling as stated ("" when none; the composer_sort query
+	// field orders by the key folded from it), populated for track items (empty for
+	// books/episodes; a book with no NARRATOR takes its composer as the narrator when
+	// the scan promotes its book fields, and that is not surfaced here).
 	Composer     string
 	ComposerSort string
 	// BPM is the track's stated tempo, whole (see Tags.BPM), and 0 for an item that
@@ -420,7 +425,8 @@ type ItemView struct {
 
 	// Audiobook fields, populated for book items (empty for tracks). Author maps
 	// onto Artist for the shared read/organize paths; these carry the extras the
-	// audiobook layout and detail view need.
+	// audiobook layout and detail view need. AuthorSort is the author's sort spelling
+	// as stated, like ComposerSort.
 	AuthorSort string
 	Narrator   string
 	Series     string

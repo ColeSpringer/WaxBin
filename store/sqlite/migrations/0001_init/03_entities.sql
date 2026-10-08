@@ -128,3 +128,18 @@ CREATE TABLE item_contributor (
   PRIMARY KEY (item_id, role, artist_id)
 );
 CREATE INDEX item_contributor_artist ON item_contributor(artist_id);
+
+-- The keys merges retired, each naming the entity it folded into, so a scan of a file
+-- still carrying a merged spelling resolves to the survivor rather than minting the loser
+-- again. key is what the resolver of entity_type looks up: the match key, and for a genre
+-- its facet before it ("genre:hip hop"). The target is a pid rather than a row id, since
+-- entity rowids are reused and a fold must never reach a stranger; every delete of an
+-- entity takes its folds with it, and a merge carries the loser's onto the survivor.
+CREATE TABLE entity_fold (
+  entity_type TEXT    NOT NULL,
+  key         TEXT    NOT NULL,
+  entity_pid  TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (entity_type, key)
+);
+CREATE INDEX entity_fold_entity ON entity_fold(entity_type, entity_pid);

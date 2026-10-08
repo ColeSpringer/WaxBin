@@ -651,9 +651,10 @@ func trackAnchorArtistTx(ctx context.Context, tx *sql.Tx, itemID int64) (int64, 
 }
 
 // rewriteOrMergeEntityKeyTx moves one entity onto a new match key. A free key is rewritten
-// in place, so the row keeps its id, pid, and everything hanging off them; a taken key
-// folds the row into the incumbent through mergeEntityTx, since refusing would leave the
-// entity on the key the caller is undoing and the clear half-applied. It returns the
+// in place, so the row keeps its id, pid, and everything hanging off them; a taken key,
+// held by another row or folded into one (keyHolderTx), merges the row into the
+// incumbent through mergeEntityTx, since refusing would leave the entity on the key the
+// caller is undoing and the clear half-applied. It returns the
 // incumbent's pid when the row merged away, and an empty pid when it was rewritten.
 //
 // The table comes from the entity type rather than the caller, so a mismatched pair
@@ -664,21 +665,20 @@ func rewriteOrMergeEntityKeyTx(ctx context.Context, tx *sql.Tx, et model.MergeEn
 	if !ok {
 		return "", errors.New("rewriteOrMergeEntityKeyTx: no table for a " + string(et) + " entity")
 	}
-	var incPID string
-	err := tx.QueryRowContext(ctx,
-		"SELECT pid FROM "+table+" WHERE match_key=? AND id<>?", newKey, id).Scan(&incPID)
-	switch {
-	case err == nil:
-		if _, err := mergeEntityTx(ctx, tx, et, table, model.PID(incPID), pid); err != nil {
-			return "", err
-		}
-		return model.PID(incPID), nil
-	case errors.Is(err, sql.ErrNoRows):
-		_, err := tx.ExecContext(ctx, "UPDATE "+table+" SET match_key=? WHERE id=?", newKey, id)
-		return "", err
-	default:
+	incPID, err := keyHolderTx(ctx, tx, et, newKey, id)
+	if err != nil {
 		return "", err
 	}
+	if incPID != "" {
+		if _, err := mergeEntityTx(ctx, tx, et, table, incPID, pid, false); err != nil {
+			return "", err
+		}
+		return incPID, nil
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE "+table+" SET match_key=? WHERE id=?", newKey, id); err != nil {
+		return "", err
+	}
+	return "", dropFoldTx(ctx, tx, et, newKey)
 }
 
 // entityOwedKeysTx names what an entity edit owes its member files ("album.label"): each

@@ -39,7 +39,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		fileID, filePID, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, key.accept(), now, res)
+		fileID, filePID, priorMS, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, key.accept(), now, res)
 		if err != nil {
 			return err
 		}
@@ -113,6 +113,9 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		if created {
+			dep.intoPID = itemPID
+		}
 		// A track turned into a book has one part, so every alternate it kept copies or
 		// encodes that part and sits at its position.
 		if rekinded {
@@ -121,11 +124,55 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		// A part read again under another number or at another length moves within the
+		// book, and its places go with it and with the parts after it (remapPlacesTx). Its
+		// old place is noted here, and the timelines are read only when it moved.
+		var was *partWas
+		if e, ok := dep.lost[itemID]; ok && e.role != alternateRole && !e.start.Valid {
+			was = &partWas{position: e.position}
+		}
 		link, err := linkBookFile(ctx, tx, itemID, fileID, position, in.File, in.LibraryID, wasMissing)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		role := link.role
+		// Chapters sync OUTSIDE the audio-change gate (idempotent): an external .cue can
+		// change independently of the audio, and a forced rescan must re-import chapters
+		// even when the content is unchanged. It no-ops when the stored chapters already
+		// match, so a true no-op rescan stays silent. A part's chapters can set its length,
+		// so they sync before anything places a position on the book's timeline. A copy of
+		// a part keeps none.
+		chaptersChanged, priorExtent := false, int64(0)
+		if role != alternateRole {
+			if chaptersChanged, priorExtent, err = syncChaptersForFile(ctx, tx, itemID, fileID, in.ChapterSource, in.Chapters); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		// The part's lengths are read only when its number, its duration or its chapters
+		// changed, which a plain re-read changes none of.
+		if was != nil && role != alternateRole && (position != was.position || priorMS != in.File.DurationMS || chaptersChanged) {
+			extent, err := chapterExtentTx(ctx, tx, itemID, fileID)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			was.length = max(priorMS, extent)
+			if chaptersChanged {
+				was.length = max(priorMS, priorExtent)
+			}
+			if length := max(in.File.DurationMS, extent); position != was.position || length != was.length {
+				before, err := bookTimelineTx(ctx, tx, itemID, map[int64]partWas{fileID: *was})
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				after, err := bookTimelineTx(ctx, tx, itemID, nil)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if err := remapPlacesTx(ctx, tx, itemID, before, after); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+		}
 		res.Joined = link.changed
 		res.Promoted = append(res.Promoted, link.promoted...)
 		if link.demoted {
@@ -133,13 +180,15 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// A part another item brought in moves the places from where it lands on, so they
-		// keep their audio, a place where a part starts being that part's. One landing at
-		// the end moves nothing: a place at the old end has heard the book, and the new
-		// part comes next. The places the other item held come across with the fold below,
-		// each inside its own part, and the book stays finished only for a listener who
-		// finished that item too.
-		if link.changed && role != alternateRole && !link.replaced && dep.arrived(itemID) {
+		// A part another item brought in, or a file new to the catalog joining a book that
+		// stood before this put, moves the places from where it lands on, so they keep
+		// their audio, a place where a part starts being that part's. One landing at the
+		// end moves nothing: a place at the old end has heard the book, and the new part
+		// comes next. The places the other item held come across with the fold below, each
+		// inside its own part, and the book stays finished only for a listener who
+		// finished that item too, so for no one when the part is new.
+		arrived := dep.arrived(itemID) || (len(dep.lost) == 0 && !created)
+		if link.changed && role != alternateRole && !link.replaced && arrived {
 			span, ok, err := partSpanTx(ctx, tx, itemID, fileID)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -155,11 +204,12 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 		// A surviving item lost a file (e.g. a multi-file book whose part was retagged
 		// into another book): it keeps a primary and its rollups and total are refreshed.
-		promoted, folded, err := reconcileOrphansTx(ctx, tx, link.orphans, dep, affected)
+		promoted, folded, took, err := reconcileOrphansTx(ctx, tx, link.orphans, dep, affected)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		res.Promoted, res.Folded = append(res.Promoted, promoted...), folded
+		handed := carryHandedPID(res, &itemPID, took)
 		// A book a file the folder rule kept alone makes up takes the key the file's tags
 		// give it now (a retitled book with no ALBUM, one named for a renamed folder), so a
 		// book found later under the old key is a book of its own.
@@ -273,14 +323,6 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// Chapters sync OUTSIDE the audio-change gate (idempotent): an external .cue can
-		// change independently of the audio, and a forced rescan must re-import chapters
-		// even when the content is unchanged. It no-ops when the stored chapters already
-		// match, so a true no-op rescan stays silent.
-		chaptersChanged, err := syncChaptersForFile(ctx, tx, itemID, fileID, in.ChapterSource, in.Chapters)
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
 		if changed || chaptersChanged {
 			// The book row exists now (the primary created it); refresh its denormalized
 			// total duration so a new part or a changed chapter span is reflected.
@@ -346,7 +388,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// change_log tailer would never refresh the existing book. An externally-changed
 		// .cue (chaptersChanged with unchanged audio) also warrants a delta.
 		if created || res.ContentChanged || res.FileCreated || res.Relinked || link.changed || res.MetadataChanged || chaptersChanged || stateChanged || artChanged || acqAdded || tagsChanged || kindLocked {
-			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
+			if err := appendChange(ctx, tx, "item", itemPID, putItemOp(created, handed)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -368,42 +410,44 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 // essence-algorithm change re-keys the whole set and forks the tracks, the way a
 // whole-file track without an MBID would if PutScannedTrack did not preserve it in
 // place. That is a known limitation, unreachable before 1.0 (the essence version is
-// frozen); a real re-encode changes the bytes and reconciles normally.
-func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, accept map[int64]bool, now int64, res *model.ScanItemResult) (int64, model.PID, error) {
+// frozen); a real re-encode changes the bytes and reconciles normally. It also returns the
+// duration the row held before this read (0 for a new row), where a book part's old place
+// on its timeline ends.
+func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, accept map[int64]bool, now int64, res *model.ScanItemResult) (int64, model.PID, int64, error) {
 	if existing, err := fileByPathTx(ctx, tx, file.Path); err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	} else if existing != nil {
 		res.ContentChanged = existing.ContentHash != file.ContentHash
 		if err := updateFileRow(ctx, tx, existing.ID, file, now); err != nil {
-			return 0, "", err
+			return 0, "", 0, err
 		}
-		return existing.ID, existing.PID, nil
+		return existing.ID, existing.PID, existing.DurationMS, nil
 	}
 	if file.EssenceHash != "" {
 		relink, err := fileByEssenceGoneTx(ctx, tx, file.EssenceHash, file.ContentHash, libraryID, accept)
 		if err != nil {
-			return 0, "", err
+			return 0, "", 0, err
 		}
 		if relink != nil {
 			res.Relinked = true
 			res.RelinkedFrom = string(relink.Path)
 			res.ContentChanged = relink.ContentHash != file.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, file, now); err != nil {
-				return 0, "", err
+				return 0, "", 0, err
 			}
 			if err := renameCopyDetailsTx(ctx, tx, relink.ID, relink.DisplayPath, file.DisplayPath); err != nil {
-				return 0, "", err
+				return 0, "", 0, err
 			}
-			return relink.ID, relink.PID, nil
+			return relink.ID, relink.PID, relink.DurationMS, nil
 		}
 	}
 	res.FileCreated = true
 	pid := model.NewPID()
 	id, err := insertFileRow(ctx, tx, libraryID, pid, file, now)
 	if err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	}
-	return id, pid, nil
+	return id, pid, 0, nil
 }
 
 // upsertBook writes the book subtype row, resolving its series and contributor
@@ -428,24 +472,21 @@ func upsertBook(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, aff
 	if author == "" {
 		author = b.Author
 	}
-	authorSort := b.AuthorSort
-	if authorSort == "" {
-		authorSort = model.SortKey(author)
-	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO book
-		(item_id, subtitle, author, author_sort, author_id, narrator, series_id, series_seq,
+		(item_id, subtitle, author, author_sort, author_sort_key, author_id, narrator, series_id, series_seq,
 		 series_seq_sort, year, publisher, asin, isbn, isbn_key, edition, abridged, description, genre, mbid,
 		 track_total)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			subtitle=excluded.subtitle, author=excluded.author, author_sort=excluded.author_sort,
+			author_sort_key=excluded.author_sort_key,
 			author_id=excluded.author_id, narrator=excluded.narrator, series_id=excluded.series_id,
 			series_seq=excluded.series_seq, series_seq_sort=excluded.series_seq_sort, year=excluded.year,
 			publisher=excluded.publisher, asin=excluded.asin, isbn=excluded.isbn,
 			isbn_key=excluded.isbn_key, edition=excluded.edition,
 			abridged=excluded.abridged, description=excluded.description, genre=excluded.genre, mbid=excluded.mbid,
 			track_total=excluded.track_total`,
-		itemID, b.Subtitle, author, authorSort, nullInt64(authorID), b.Narrator, nullInt64(seriesID),
+		itemID, b.Subtitle, author, b.AuthorSort, authorSortKey(b.AuthorSort, author), nullInt64(authorID), b.Narrator, nullInt64(seriesID),
 		b.SeriesSeq, model.SortKey(b.SeriesSeq), nullInt(b.Year), b.Publisher, b.ASIN, b.ISBN,
 		identity.ISBNKey(b.ISBN), b.Edition, nullBool(b.Abridged), b.Description, b.Genre,
 		nullStr(b.MBID), nullInt(b.TrackTotal)); err != nil {
@@ -557,6 +598,9 @@ func resolveSeries(ctx context.Context, tx *sql.Tx, name string) (int64, error) 
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
+	}
+	if folded, err := foldedEntityTx(ctx, tx, model.MergeSeries, mk); err != nil || folded != 0 {
+		return folded, err
 	}
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,
@@ -1048,8 +1092,9 @@ func preferredChapters(bySource map[string][]model.Chapter) []model.Chapter {
 // source that no longer applies (a synthetic single chapter superseded by embedded
 // chapters, or vice versa) is cleared. It is idempotent, so the book scan can call it
 // unconditionally (a forced rescan or an externally-changed .cue re-imports chapters
-// even when the audio is unchanged) without churning a true no-op rescan.
-func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, error) {
+// even when the audio is unchanged) without churning a true no-op rescan. When it changes
+// them it also returns how far the file's chapters ran before (chapterExtentTx).
+func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, int64, error) {
 	if source == "" {
 		source = "embedded"
 	}
@@ -1061,20 +1106,25 @@ func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int
 // intact. It serves the sources that arrive without a scan of the audio: a podcast's
 // chapter URL and a user's own chapters.
 func syncChaptersForFileSource(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, error) {
-	return syncChapters(ctx, tx, bookItemID, fileID, source, chapters, true)
+	changed, _, err := syncChapters(ctx, tx, bookItemID, fileID, source, chapters, true)
+	return changed, err
 }
 
 // syncChapters replaces a file's chapters with the desired set tagged with source,
-// reporting whether it changed anything. scopeToSource limits the replace (and the
-// no-op comparison) to rows of that source; otherwise it replaces every source's
-// rows for the file. It no-ops (no write, no change) when the stored rows already
-// match, so a no-op rescan stays change_log-silent.
-func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter, scopeToSource bool) (bool, error) {
+// reporting whether it changed anything and, when it did, how far the file's chapters
+// ran before. scopeToSource limits the replace (and the no-op comparison) to rows of that
+// source; otherwise it replaces every source's rows for the file. It no-ops (no write, no
+// change) when the stored rows already match, so a no-op rescan stays change_log-silent.
+func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter, scopeToSource bool) (bool, int64, error) {
 	chapters = normalizeChapterStarts(chapters)
 	if same, err := chaptersInSync(ctx, tx, bookItemID, fileID, source, chapters, scopeToSource); err != nil {
-		return false, err
+		return false, 0, err
 	} else if same {
-		return false, nil
+		return false, 0, nil
+	}
+	prior, err := chapterExtentTx(ctx, tx, bookItemID, fileID)
+	if err != nil {
+		return false, 0, err
 	}
 	del := "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?"
 	args := []any{bookItemID, fileID}
@@ -1087,16 +1137,16 @@ func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, sou
 		del += " AND source <> 'user'"
 	}
 	if _, err := tx.ExecContext(ctx, del, args...); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	for _, c := range chapters {
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms, source) VALUES (?,?,?,?,?,?,?)",
 			bookItemID, fileID, c.Position, c.Title, c.FileStartMS, c.FileEndMS, source); err != nil {
-			return false, err
+			return false, 0, err
 		}
 	}
-	return true, nil
+	return true, prior, nil
 }
 
 // normalizeChapterStarts puts one file's chapters in start order and collapses any
@@ -1349,18 +1399,23 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// The query has no ORDER BY, and folding can give two part names one key, so the
-	// file id breaks the last tie rather than leaving reading order to row order.
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Position != out[j].Position {
-			return out[i].Position < out[j].Position
-		}
-		if out[i].sortKey != out[j].sortKey {
-			return out[i].sortKey < out[j].sortKey
-		}
-		return out[i].fileID < out[j].fileID
-	})
+	sortBookParts(out)
 	return out, nil
+}
+
+// sortBookParts puts a book's parts in reading order: position, then part name, then file
+// id. The query has no ORDER BY, and folding can give two part names one key, so the file
+// id breaks the last tie rather than leaving reading order to row order.
+func sortBookParts(parts []bookPart) {
+	sort.SliceStable(parts, func(i, j int) bool {
+		if parts[i].Position != parts[j].Position {
+			return parts[i].Position < parts[j].Position
+		}
+		if parts[i].sortKey != parts[j].sortKey {
+			return parts[i].sortKey < parts[j].sortKey
+		}
+		return parts[i].fileID < parts[j].fileID
+	})
 }
 
 // bookChapters resolves a book's chapters into book-timeline order and offsets. It

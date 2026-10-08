@@ -54,14 +54,6 @@ func SortKey(s string) string {
 	return padNumbers(stripArticle(collapseSpaces(Fold(s))))
 }
 
-// RefoldKey re-derives an already-stored sort key, for the columns whose input
-// was a sort tag the catalog does not keep (track.artist_sort and friends). It
-// folds and pads but does not strip an article, because stripArticle is not
-// idempotent: "The A Team" stored as "a team" would re-strip to "team".
-func RefoldKey(s string) string {
-	return padNumbers(collapseSpaces(Fold(s)))
-}
-
 // Fold reduces a display string to a plain lowercase form for ordering: NFKC
 // compatibility folding (fullwidth Latin, ligatures, superscripts, unit forms),
 // lowercasing, combining diacritics dropped so "é" orders as "e" (see

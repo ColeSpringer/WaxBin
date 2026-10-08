@@ -49,7 +49,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				accept[r.id] = true
 			}
 		}
-		fileID, filePID, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, accept, now, res)
+		fileID, filePID, _, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, accept, now, res)
 		if err != nil {
 			return err
 		}
@@ -67,6 +67,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 
 		affected := newAffectedRollups()
 		anyCreated := false
+		fresh := map[int64]model.PID{} // the tracks this put made, by row id
 		// setChanged tracks whether this scan changed the file's virtual-track set at all:
 		// a track deleted, a whole-file item detached, or a track created or updated. It
 		// has to cover the delete and detach paths too, or a cue edit that only removes a
@@ -127,9 +128,10 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 
 		// Detach any NON-virtual item still backing this file (a plain track or a book
 		// part catalogued before the .cue existed): the file is now a virtual-track
-		// container, so those whole-file edges must go. This is the forward conversion
-		// plain-track -> virtual-tracks; it is a no-op on every later scan.
-		detached, promoted, err := detachWholeFileItems(ctx, tx, fileID, in.File.EssenceHash, affected)
+		// container, so those whole-file edges must go, and an item left with no file folds
+		// into the tracks once they are written (foldIntoRipTx). This is the forward
+		// conversion plain-track -> virtual-tracks; it is a no-op on every later scan.
+		detached, promoted, gone, err := detachWholeFileItems(ctx, tx, fileID, in.File.EssenceHash, affected)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -239,6 +241,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			}
 			if created {
 				anyCreated = true
+				fresh[itemID] = itemPID
 			}
 			setChanged = true
 			// An item the catalog holds that this file did not back yet (a copy of the rip)
@@ -289,6 +292,10 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+		}
+
+		if err := foldIntoRipTx(ctx, tx, gone, fileID, fresh, in.PreserveLocks, affected); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
 		if !affected.empty() {
@@ -556,26 +563,195 @@ func dropUndeclaredVirtualAlternatesTx(ctx context.Context, tx *sql.Tx, fileID i
 
 // detachWholeFileItems removes any item that backs fileID through a whole-file edge
 // (start_frames IS NULL), such as a plain track or a book part catalogued before this
-// file became a virtual-track container. It detaches those edges and cleans up: an item
-// left with no files is deleted; a multi-file book that lost a part keeps a primary,
-// refreshes its duration, and gets an update delta (symmetric with the attach side).
-// The affected entities are collected so their rollups stay current. It reports
-// whether it removed anything, so the caller can count the conversion as a change, and
-// the files promoted in place of a lost primary.
-func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence string, affected *affectedRollups) (bool, []model.PromotedFile, error) {
+// file became a virtual-track container. It detaches those edges and cleans up: a
+// multi-file book that lost a part keeps a primary, refreshes its duration, and gets an
+// update delta (symmetric with the attach side), and an item left with no file is
+// returned for the caller to fold into the rip's tracks once they exist
+// (foldIntoRipTx). The affected entities are collected so their rollups stay current. It
+// reports whether it removed anything, so the caller can count the conversion as a
+// change, and the files promoted in place of a lost primary.
+func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence string, affected *affectedRollups) (bool, []model.PromotedFile, []int64, error) {
 	prev, err := queryInt64sTx(ctx, tx,
 		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID)
 	if err != nil || len(prev) == 0 {
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	dep, err := departingTx(ctx, tx, fileID, essence, 0, false)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID); err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	promoted, _, err := reconcileOrphansTx(ctx, tx, prev, dep, affected)
-	return true, promoted, err
+	var kept, gone []int64
+	for _, id := range prev {
+		has, err := itemHasAnyFile(ctx, tx, id)
+		if err != nil {
+			return false, nil, nil, err
+		}
+		if has {
+			kept = append(kept, id)
+		} else {
+			gone = append(gone, id)
+		}
+	}
+	promoted, _, _, err := reconcileOrphansTx(ctx, tx, kept, dep, affected)
+	return true, promoted, gone, err
+}
+
+// ripWindow is one track's window on a rip's file, in milliseconds; end is -1 for the
+// last track, which runs to the end of the file.
+type ripWindow struct {
+	item       int64
+	start, end int64
+}
+
+// span is the window as a span of its file, of unknown length when it runs to the end.
+func (w ripWindow) span() partSpan {
+	s := partSpan{offset: w.start}
+	if w.end > w.start {
+		s.length = w.end - w.start
+	}
+	return s
+}
+
+// holding returns the window a place in the file falls in and the place as an offset into
+// it, by the rule a book's parts follow (spanAt, partSpan.within).
+func holding(ws []ripWindow, pos int64) (ripWindow, int64) {
+	spans := make([]partSpan, len(ws))
+	for i, w := range ws {
+		spans[i] = w.span()
+	}
+	i := spanAt(spans, pos)
+	return ws[i], spans[i].within(pos)
+}
+
+// foldIntoRipTx folds the items a file's turn into a cue rip left with no file into the
+// rip's tracks, so what was done with a book (or a plain track) the file held outlives the
+// conversion. A resume position and a bookmark go to the track whose window holds them, as
+// an offset into it; everything else foldItemIntoTx carries (plays, stars, the rating,
+// sessions, queue and playlist entries, acquisition, kept custom tags) goes to the track
+// that opens the file, which also takes the item's pid when this put made it (fresh), so
+// a reference to the item names that track from then on. Then each item goes.
+func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, fresh map[int64]model.PID, preserveLocks bool, affected *affectedRollups) error {
+	if len(gone) == 0 {
+		return nil
+	}
+	// A copy of a rip backs its tracks through alternate edges over the same windows, so
+	// every windowed edge counts.
+	rows, err := tx.QueryContext(ctx, `SELECT item_id, MIN(start_frames), COALESCE(MAX(end_frames), -1) FROM item_file
+		WHERE file_id = ? AND start_frames IS NOT NULL GROUP BY item_id ORDER BY 2`, fileID)
+	if err != nil {
+		return err
+	}
+	var ws []ripWindow
+	for rows.Next() {
+		var w ripWindow
+		var start, end int64
+		if err := rows.Scan(&w.item, &start, &end); err != nil {
+			rows.Close()
+			return err
+		}
+		w.start, w.end = model.FramesToMS(start), -1
+		if end > 0 {
+			w.end = model.FramesToMS(end)
+		}
+		ws = append(ws, w)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	var batch entryHolders
+	if len(ws) == 0 {
+		// Nothing to fold into: the items go as they did before a rip could take them.
+		for _, id := range gone {
+			if err := affected.collect(ctx, tx, id); err != nil {
+				return err
+			}
+			pid, err := deleteItemCascade(ctx, tx, id, &batch)
+			if err != nil {
+				return err
+			}
+			if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
+				return err
+			}
+		}
+		return batch.settleTx(ctx, tx)
+	}
+	opener := ws[0].item
+	tracks := make([]int64, len(ws))
+	for i, w := range ws {
+		tracks[i] = w.item
+	}
+	for i, id := range gone {
+		if err := movePlacesIntoRipTx(ctx, tx, id, ws); err != nil {
+			return err
+		}
+		// A whole heard to its end heard every track of it; its plays stay with the opener.
+		by, err := finishedByTx(ctx, tx, []int64{id})
+		if err != nil {
+			return err
+		}
+		if err := finishTx(ctx, tx, tracks, by, nowNS()); err != nil {
+			return err
+		}
+		if err := foldItemIntoTx(ctx, tx, id, opener, fileID, partSpan{}, preserveLocks, &batch); err != nil {
+			return err
+		}
+		if err := affected.collect(ctx, tx, id); err != nil {
+			return err
+		}
+		pid, err := deleteItemCascade(ctx, tx, id, &batch)
+		if err != nil {
+			return err
+		}
+		freshPID, made := fresh[opener]
+		if i > 0 || !made {
+			if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := handPIDTx(ctx, tx, freshPID, pid, true); err != nil {
+			return err
+		}
+		if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
+			return err
+		}
+	}
+	return batch.settleTx(ctx, tx)
+}
+
+// movePlacesIntoRipTx moves an item's resume positions and bookmarks onto the rip
+// track whose window holds each, as an offset into it; a resume position replaces the
+// track's own only when it is the later listening.
+func movePlacesIntoRipTx(ctx context.Context, tx *sql.Tx, itemID int64, ws []ripWindow) error {
+	states, marks, err := itemPlacesTx(ctx, tx, itemID)
+	if err != nil {
+		return err
+	}
+	for _, p := range states {
+		w, off := holding(ws, p.pos)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO play_state(user_id, item_id, position_ms, last_progress_at, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(user_id, item_id) DO UPDATE SET position_ms = excluded.position_ms,
+				last_progress_at = excluded.last_progress_at, updated_at = MAX(play_state.updated_at, excluded.updated_at)
+			WHERE play_state.last_progress_at IS NULL OR play_state.last_progress_at < excluded.last_progress_at`,
+			p.key, w.item, off, p.at, p.updated); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE play_state SET position_ms = 0, last_progress_at = NULL
+		WHERE item_id = ? AND last_progress_at IS NOT NULL`, itemID); err != nil {
+		return err
+	}
+	for _, m := range marks {
+		w, off := holding(ws, m.pos)
+		if _, err := tx.ExecContext(ctx, "UPDATE bookmark SET item_id = ?, position_ms = ? WHERE id = ?", w.item, off, m.key); err != nil {
+			return err
+		}
+	}
+	return nil
 }

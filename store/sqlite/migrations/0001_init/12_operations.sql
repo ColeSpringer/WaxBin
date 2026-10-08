@@ -36,7 +36,10 @@ CREATE TABLE lease (
   heartbeat_at INTEGER NOT NULL
 );
 
--- Organize move audit/recovery trail.
+-- Organize move audit/recovery trail. A file row is an audio file's move; a companion
+-- row is a folder companion (a cover, a booklet) the job carried after its moves, moved
+-- or copied from src to dst, or a copy at dst of the one at src that an undo removed.
+-- Companion rows name no file and are written committed.
 CREATE TABLE organize_journal (
   id         INTEGER PRIMARY KEY,
   pid        TEXT    NOT NULL UNIQUE,
@@ -45,6 +48,7 @@ CREATE TABLE organize_journal (
   src        BLOB    NOT NULL,
   dst        BLOB    NOT NULL,
   state      TEXT    NOT NULL,          -- planned|committed|rolled_back
+  kind       TEXT    NOT NULL DEFAULT 'file', -- file|companion|companion_copy|companion_drop
   created_at INTEGER NOT NULL
 );
 CREATE INDEX organize_journal_job  ON organize_journal(job_pid);
@@ -64,12 +68,13 @@ CREATE TABLE trash (
   pid           TEXT    NOT NULL UNIQUE,
   library_id    INTEGER REFERENCES library(id) ON DELETE CASCADE,
   item_pid      TEXT    NOT NULL DEFAULT '',  -- the item the file backed (for reporting)
+  item_kind     TEXT    NOT NULL DEFAULT '',  -- that item's kind then, which a pid handed on may not keep
   orig_path     BLOB    NOT NULL,             -- where the file was, raw bytes
   orig_display  TEXT    NOT NULL,
   trash_path    BLOB    NOT NULL,             -- where it now lives, raw bytes
   trash_display TEXT    NOT NULL,
   essence_hash  TEXT,                         -- the file's audio, to know it again elsewhere
-  reason        TEXT    NOT NULL DEFAULT 'user', -- user|prune|dedup|organize
+  reason        TEXT    NOT NULL DEFAULT 'user', -- 'user', or the reason the delete's caller gave
   size          INTEGER NOT NULL DEFAULT 0,
   trashed_at    INTEGER NOT NULL,             -- unix nanoseconds
   restored_at   INTEGER                       -- NULL = still in trash

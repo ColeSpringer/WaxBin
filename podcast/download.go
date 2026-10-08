@@ -374,10 +374,7 @@ func (s *Service) fileRow(ctx context.Context, dst string, size int64, contentHa
 	if err != nil {
 		return model.File{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	rel, err := filepath.Rel(s.cfg.Dir, dst)
-	if err != nil {
-		rel = filepath.Base(dst)
-	}
+	rel := pathx.RelUnder(s.cfg.Dir, dst)
 	file := model.File{
 		Path:        []byte(dst),
 		DisplayPath: dst,

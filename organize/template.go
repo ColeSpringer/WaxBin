@@ -150,9 +150,10 @@ func itemFields(p Profile, item *model.ItemView) map[string]fieldVal {
 	// Audiobook tokens. For a book the view's Artist is the author (COALESCE'd in
 	// the read view), so author/authorsort derive from it.
 	f["author"] = fieldVal{s: foldField(firstNonEmpty(item.Artist, item.AlbumArtist))}
-	// {authorsort} renders the collation key (model.SortKey), lower-cased and without
-	// accents, for a custom layout that files books by it; the native one uses {author}.
-	f["authorsort"] = fieldVal{s: foldField(firstNonEmpty(item.AuthorSort, model.SortKey(item.Artist)))}
+	// {authorsort} renders the collation key (model.SortKey of the sort spelling, else the
+	// author), lower-cased and without accents, for a custom layout that files books by
+	// it; the native one uses {author}.
+	f["authorsort"] = fieldVal{s: foldField(model.SortKey(firstNonEmpty(item.AuthorSort, item.Artist)))}
 	f["series"] = fieldVal{s: foldField(item.Series)}
 	f["seq"] = fieldVal{s: foldField(item.SeriesSeq)}
 	f["narrator"] = fieldVal{s: foldField(item.Narrator)}

@@ -28,6 +28,17 @@ func UnderRoot(root, p string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// RelUnder returns p relative to root when p lies under it (UnderRoot), and otherwise its
+// base name, never a path that climbs out of the root.
+func RelUnder(root, p string) string {
+	if UnderRoot(root, p) {
+		if rel, err := filepath.Rel(root, p); err == nil {
+			return rel
+		}
+	}
+	return filepath.Base(p)
+}
+
 // SamePath reports whether two absolute, cleaned paths name the same location, by
 // the same rules UnderRoot uses. Byte equality is wrong on Windows, where path
 // comparison folds case; filepath.Rel carries the platform's rule.

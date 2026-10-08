@@ -258,13 +258,32 @@ func trackSidecar(path string) bool {
 	return slices.Contains([]string{".lrc", ".cue", ".srt", ".vtt"}, strings.ToLower(filepath.Ext(path)))
 }
 
-// FolderDisposal returns the Dispose and Undo for pruning the folders a batch of moves
-// emptied; root gives each moved file's library or staging root. A companion follows the
-// audio when everything that left its folder, from the folder itself or from a disc
-// folder inside it, went to one destination folder. Any other stays (fsx.ErrKeep), as
-// does a track's own lyrics, cue sheet or captions and one whose name the destination
-// already holds, and keeps its folder.
-func FolderDisposal(moved []SidecarMove, root func(src string) string) (dispose, undo func(string) error) {
+// Disposal carries the companions of the folders a batch of moves emptied, for a prune
+// (fsx.PruneOptions Dispose and Undo), and remembers where each one it kept moved went.
+type Disposal struct {
+	Dispose, Undo func(string) error
+	carried       map[string]string
+	order         []string
+}
+
+// Carried lists the companions the prune moved and kept moved, in the order it moved them.
+func (d *Disposal) Carried() []model.CompanionMove {
+	var out []model.CompanionMove
+	for _, src := range d.order {
+		if dst, ok := d.carried[src]; ok {
+			out = append(out, model.CompanionMove{Kind: model.JournalCompanion, Src: []byte(src), Dst: []byte(dst)})
+		}
+	}
+	return out
+}
+
+// FolderDisposal returns the Disposal for pruning the folders a batch of moves emptied;
+// root gives each moved file's library or staging root. A companion follows the audio
+// when everything that left its folder, from the folder itself or from a disc folder
+// inside it, went to one destination folder. Any other stays (fsx.ErrKeep), as does a
+// track's own lyrics, cue sheet or captions and one whose name the destination already
+// holds, and keeps its folder.
+func FolderDisposal(moved []SidecarMove, root func(src string) string) *Disposal {
 	dests := map[string][]string{}
 	add := func(dir, dst string) {
 		if !slices.ContainsFunc(dests[dir], func(d string) bool { return sameDir(d, dst) }) {
@@ -285,7 +304,8 @@ func FolderDisposal(moved []SidecarMove, root func(src string) string) (dispose,
 		}
 		return filepath.Join(d[0], filepath.Base(p)), true
 	}
-	dispose = func(p string) error {
+	d := &Disposal{carried: map[string]string{}}
+	d.Dispose = func(p string) error {
 		q, ok := target(p)
 		if !ok {
 			return fsx.ErrKeep
@@ -296,32 +316,44 @@ func FolderDisposal(moved []SidecarMove, root func(src string) string) (dispose,
 			}
 			return err
 		}
+		d.carried[p] = q
+		d.order = append(d.order, p)
 		return nil
 	}
-	undo = func(p string) error {
-		if q, ok := target(p); ok {
-			return fsx.Move(q, p)
+	d.Undo = func(p string) error {
+		q, ok := target(p)
+		if !ok {
+			return nil
 		}
+		if err := fsx.Move(q, p); err != nil {
+			return err
+		}
+		delete(d.carried, p)
 		return nil
 	}
-	return dispose, undo
+	return d
 }
 
-// applyCoverMoves carries the planned directory covers, reporting how many landed. A
-// failure or a destination collision is logged and skipped, the way a sidecar's is.
-func (o *Organizer) applyCoverMoves(sp *fsx.Speller, moves []CoverMove) int {
-	moved := 0
+// applyCoverMoves carries the planned directory covers and companions, returning the steps
+// that landed, for the journal. A failure or a destination collision is logged and
+// skipped, the way a sidecar's is.
+func (o *Organizer) applyCoverMoves(sp *fsx.Speller, moves []CoverMove) []model.CompanionMove {
+	var took []model.CompanionMove
 	for _, m := range moves {
 		switch err := sp.MoveOrCopy(m.Src, m.Dst, m.Copy); {
 		case err == nil:
-			moved++
+			kind := model.JournalCompanion
+			if m.Copy {
+				kind = model.JournalCompanionCopy
+			}
+			took = append(took, model.CompanionMove{Kind: kind, Src: []byte(m.Src), Dst: []byte(m.Dst)})
 		case errors.Is(err, fsx.ErrExist):
 			o.log.Warn("directory cover not moved: destination exists", "src", m.Src, "dst", m.Dst)
 		default:
 			o.log.Warn("directory cover move failed", "src", m.Src, "dst", m.Dst, "err", err)
 		}
 	}
-	return moved
+	return took
 }
 
 var errSidecarExists = errors.New("sidecar destination exists")

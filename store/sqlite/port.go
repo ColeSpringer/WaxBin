@@ -331,35 +331,36 @@ func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRo
 				}
 			}
 		}
-		if err := relocateTrashTx(ctx, tx, libID, string(oldRoot), oldDisplay, newRoot); err != nil {
+		if err := relocateTrashTx(ctx, tx, "library_id = ?", []any{libID}, string(oldRoot), oldDisplay, newRoot); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := relocateBlobsTx(ctx, tx, `SELECT a.rowid, a.path FROM file_aux_state a
-			JOIN file f ON f.id = a.file_id WHERE f.library_id = ?`,
-			"UPDATE file_aux_state SET path = ? WHERE rowid = ?", 1, libID, string(oldRoot), newRoot); err != nil {
+			JOIN file f ON f.id = a.file_id WHERE f.library_id = ?`, []any{libID},
+			"UPDATE file_aux_state SET path = ? WHERE rowid = ?", 1, string(oldRoot), newRoot); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// A move whose file is gone names no library; reroot leaves those of other roots.
 		if err := relocateBlobsTx(ctx, tx, `SELECT j.id, j.src, j.dst FROM organize_journal j
-			LEFT JOIN file f ON f.id = j.file_id WHERE f.library_id = ? OR j.file_id IS NULL`,
-			"UPDATE organize_journal SET src = ?, dst = ? WHERE id = ?", 2, libID, string(oldRoot), newRoot); err != nil {
+			LEFT JOIN file f ON f.id = j.file_id WHERE f.library_id = ? OR j.file_id IS NULL`, []any{libID},
+			"UPDATE organize_journal SET src = ?, dst = ? WHERE id = ?", 2, string(oldRoot), newRoot); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "library", libPID, model.OpUpdate)
 	})
 }
 
-// relocateTrashTx moves a library's trash journal paths from under its old root to the
-// same places under newRoot, the raw paths by the raw root and the display paths by the
-// display root. A path outside the old root stays as it is.
-func relocateTrashTx(ctx context.Context, tx *sql.Tx, libID int64, oldRoot, oldDisplay, newRoot string) error {
+// relocateTrashTx moves the trash journal paths of the rows where selects (with args) from
+// under oldRoot to the same places under newRoot, the raw paths by the raw root and the
+// display paths by the display root: a library's rows for a root move, the rows below a
+// folder for a respell. A path outside the old root stays as it is.
+func relocateTrashTx(ctx context.Context, tx *sql.Tx, where string, args []any, oldRoot, oldDisplay, newRoot string) error {
 	type entry struct {
 		id                    int64
 		orig, trashed         []byte
 		origShown, trashShown string
 	}
 	rows, err := tx.QueryContext(ctx,
-		"SELECT id, orig_path, orig_display, trash_path, trash_display FROM trash WHERE library_id = ?", libID)
+		"SELECT id, orig_path, orig_display, trash_path, trash_display FROM trash WHERE "+where, args...)
 	if err != nil {
 		return err
 	}
@@ -391,15 +392,15 @@ func relocateTrashTx(ctx context.Context, tx *sql.Tx, libID int64, oldRoot, oldD
 	return nil
 }
 
-// relocateBlobsTx moves the raw paths a query reads (a row id, then paths of them) from
-// under oldRoot to newRoot, writing a changed row back through update, which takes the
-// paths in order and then the id.
-func relocateBlobsTx(ctx context.Context, tx *sql.Tx, query, update string, paths int, libID int64, oldRoot, newRoot string) error {
+// relocateBlobsTx moves the raw paths a query reads with args (a row id, then paths of
+// them) from under oldRoot to newRoot, writing a changed row back through update, which
+// takes the paths in order and then the id.
+func relocateBlobsTx(ctx context.Context, tx *sql.Tx, query string, args []any, update string, paths int, oldRoot, newRoot string) error {
 	type row struct {
 		id    int64
 		paths [][]byte
 	}
-	rows, err := tx.QueryContext(ctx, query, libID)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}

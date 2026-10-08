@@ -142,10 +142,6 @@ func (s *Store) bookISBNKeyDrift(ctx context.Context) (int, error) {
 // present as permanent unfixable drift. A curated entity is checked against its
 // sort override, which is what applyEntityFieldTx stored the key from.
 //
-// The tag-derived columns (track.artist_sort and friends) are deliberately absent:
-// their input is a tag the catalog does not keep, and a locked one holds literal
-// user text that no fix should repair.
-//
 // Sort keys are generated in Go, so this streams every row (O(n) time, O(1)
 // memory) and recomputes model.SortKey per row. That is acceptable for `db
 // verify`; if it ever needs to run hot, model.SortKey can be registered as a

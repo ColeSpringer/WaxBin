@@ -542,6 +542,11 @@ func (c *Client) Merge(ctx context.Context, entityType model.MergeEntity, surviv
 	return reports, nil
 }
 
+// UnfoldEntity proxies forgetting folds (Library.UnfoldEntity).
+func (c *Client) UnfoldEntity(ctx context.Context, entityType model.MergeEntity, keys []string) error {
+	return c.call(ctx, MethodUnfoldEntity, UnfoldEntityParams{EntityType: string(entityType), Keys: keys}, nil)
+}
+
 // MarkMissing proxies recording that an item's bytes are gone, returning what the
 // call did. Without force the server verifies against its own filesystem, so the
 // refusals (files-present, and the dropped-mount CodeIO) reflect the server's view,
@@ -855,6 +860,12 @@ func (c *Client) RunRemoveRoot(ctx context.Context, params RemoveRootParams) (mo
 // is a marshaled query rule document selecting the items to organize.
 func (c *Client) RunOrganize(ctx context.Context, rule []byte, profile string) (model.PID, error) {
 	return c.runJob(ctx, MethodRunOrganize, OrganizeParams{Rule: rule, Profile: profile})
+}
+
+// RunOrganizeUndo submits an undo of an organize job (Library.RunOrganizeUndo) and returns
+// the undo's job PID.
+func (c *Client) RunOrganizeUndo(ctx context.Context, jobPID model.PID) (model.PID, error) {
+	return c.runJob(ctx, MethodRunOrganizeUndo, OrganizeUndoParams{JobPID: string(jobPID)})
 }
 
 // runJob is the shared submit path for the run_* methods: it returns the started

@@ -784,7 +784,7 @@ func TestMergeUnhandledTypeRefusesBeforeDeleting(t *testing.T) {
 	loser := entityPID(t, st, "artist", "Lose")
 
 	err := st.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := mergeEntityTx(ctx, tx, model.MergeEntity("bogus"), "artist", survivor, loser)
+		_, err := mergeEntityTx(ctx, tx, model.MergeEntity("bogus"), "artist", survivor, loser, true)
 		return err
 	})
 	if !waxerr.Is(err, waxerr.CodeInvalid) {

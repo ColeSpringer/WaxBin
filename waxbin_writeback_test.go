@@ -111,7 +111,7 @@ func TestEditEntityWriteBackFanOut(t *testing.T) {
 // TestEditEntityArtistSortOnlyPrimaryArtist verifies an artist sort write-back writes
 // ARTISTSORT only to files where the artist is the PRIMARY artist, not to files where it
 // is merely the album-artist (which would overwrite that track's real primary-artist sort
-// on the next scan).
+// on the next scan), and that the tracks it wrote take the spelling in the catalog too.
 func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -147,6 +147,31 @@ func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
 	fmB, _ := r.Read(ctx, albumArtistOnly)
 	if fmB.Tags.ArtistSort != "" {
 		t.Errorf("album-artist-only track ARTISTSORT = %q, want empty (must not be corrupted with Xavier's sort)", fmB.Tags.ArtistSort)
+	}
+	// The track whose file took the tag spells its artist that way now, as a scan of the
+	// file would read it; the other is untouched.
+	for title, want := range map[string]string{"A": "Xavier, DJ", "B": ""} {
+		v, err := lib.Get(ctx, itemPIDByTitle(t, ctx, lib, title))
+		if err != nil || v.ArtistSort != want {
+			t.Errorf("track %s ArtistSort = %q (err %v), want %q", title, v.ArtistSort, err, want)
+		}
+	}
+	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
+		t.Errorf("verify after the sort write-back = %+v (err %v), want the keys in step", dr, err)
+	}
+	// Cleared, the tag goes from the file and the spelling from the track.
+	if _, err := lib.EditEntity(ctx, model.MergeArtist, xavier, map[string]string{"sort": ""},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn, Force: true}); err != nil {
+		t.Fatalf("artist sort clear: %v", err)
+	}
+	if fmA, _ := r.Read(ctx, primary); fmA.Tags.ArtistSort != "" {
+		t.Errorf("primary-artist track ARTISTSORT after the clear = %q, want none", fmA.Tags.ArtistSort)
+	}
+	if v, err := lib.Get(ctx, itemPIDByTitle(t, ctx, lib, "A")); err != nil || v.ArtistSort != "" {
+		t.Errorf("track A ArtistSort after the clear = %q (err %v), want none", v.ArtistSort, err)
+	}
+	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
+		t.Errorf("verify after the clear = %+v (err %v), want the keys in step", dr, err)
 	}
 }
 
@@ -186,8 +211,7 @@ func TestEditComposerSortWriteBack(t *testing.T) {
 		t.Errorf("on-disk COMPOSERSORT = %q, want Arranger, Amy", fm.Tags.ComposerSort)
 	}
 
-	// A forced rescan folds the tag through SortKey; the lock is what keeps the
-	// catalog's literal value.
+	// A forced rescan reads the written spelling back as it stands.
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
 		t.Fatalf("forced rescan: %v", err)
 	}
@@ -294,8 +318,8 @@ func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
 		t.Errorf("on-disk ARTISTSORT = %q, want cleared", fm.Tags.ArtistSort)
 	}
 
-	// A fresh catalog now derives the sorts from the new display names, matching
-	// what this catalog holds.
+	// A fresh catalog reads no sort spelling, as this catalog holds none after the edit,
+	// so both sort by the new names.
 	db2 := filepath.Join(t.TempDir(), "catalog2.db")
 	lib2 := openManaged(t, ctx, db2, root)
 	if _, err := lib2.Scan(ctx, waxbin.ScanRequest{}); err != nil {
@@ -305,8 +329,12 @@ func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh get: %v", err)
 	}
-	if v2.ComposerSort != model.SortKey("New Composer") {
-		t.Errorf("fresh-catalog composer_sort = %q, want %q", v2.ComposerSort, model.SortKey("New Composer"))
+	v, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if v.ComposerSort != "" || v2.ComposerSort != "" {
+		t.Errorf("composer_sort = %q here and %q in a fresh catalog, want no spelling in either", v.ComposerSort, v2.ComposerSort)
 	}
 
 	// A locked composer_sort keeps its tag through a later composer edit: the
@@ -328,6 +356,64 @@ func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
 	if fm.Tags.ComposerSort != "Curated, Sort" {
 		t.Errorf("on-disk COMPOSERSORT = %q, want the locked curated value kept", fm.Tags.ComposerSort)
 	}
+}
+
+// TestWriteBackOfAnUnchangedNameKeepsItsSortTag: an edit that sets the title, artist and
+// composer to what they already were, and a credit edit that does the same, keeps the sort
+// tags beside them in the file and their spellings in the catalog, since nothing they
+// spell changed.
+func TestWriteBackOfAnUnchangedNameKeepsItsSortTag(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Song", Artist: "The Artist", Album: "Album", Composer: "The Composer", Track: 1,
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "TITLESORT", Value: "Song, The"},
+			{Desc: "ARTISTSORT", Value: "Artist, The"},
+			{Desc: "COMPOSERSORT", Value: "Composer, The"},
+		},
+	}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "The Song")
+	check := func(when string) {
+		t.Helper()
+		fm, err := meta.NewReader().Read(ctx, src)
+		if err != nil {
+			t.Fatalf("read tags: %v", err)
+		}
+		if fm.Tags.TitleSort != "Song, The" || fm.Tags.ArtistSort != "Artist, The" || fm.Tags.ComposerSort != "Composer, The" {
+			t.Errorf("on-disk sort tags after %s = (%q, %q, %q), want all three kept", when,
+				fm.Tags.TitleSort, fm.Tags.ArtistSort, fm.Tags.ComposerSort)
+		}
+		v, err := lib.Get(ctx, pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.ArtistSort != "Artist, The" || v.ComposerSort != "Composer, The" {
+			t.Errorf("catalog spellings after %s = (%q, %q), want both kept", when, v.ArtistSort, v.ComposerSort)
+		}
+	}
+	if err := lib.EditFields(ctx, pid, map[string]string{"title": "The Song", "artist": "The Artist", "composer": "The Composer"},
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+	check("an edit to the same names")
+	if _, _, err := lib.SetCredits(ctx, pid, model.RoleArtist, []string{"The Artist"},
+		waxbin.CreditEditOptions{Lock: model.LockOn, Force: true, WriteBack: true}); err != nil {
+		t.Fatalf("credit edit with write-back: %v", err)
+	}
+	check("a credit edit to the same name")
+	// The catalog trims what an edit sets, so a title padded with space is the same title.
+	if err := lib.EditFields(ctx, pid, map[string]string{"title": " The Song "},
+		waxbin.EditOptions{Lock: model.LockOn, Force: true, WriteBack: true}); err != nil {
+		t.Fatalf("padded title edit: %v", err)
+	}
+	check("a title edit padded with space")
 }
 
 // TestEditAuthorWriteBackClearsStaleSortTag is the book variant: an author edit's
@@ -369,7 +455,7 @@ func TestEditAuthorWriteBackClearsStaleSortTag(t *testing.T) {
 		t.Errorf("on-disk ALBUMARTISTSORT = %q, want cleared", fm.Tags.AlbumArtistSort)
 	}
 
-	// A fresh catalog derives the author sort from the new author.
+	// A fresh catalog reads no sort spelling, as this catalog holds none after the edit.
 	db2 := filepath.Join(t.TempDir(), "catalog2.db")
 	lib2 := openManaged(t, ctx, db2, root)
 	if _, err := lib2.Scan(ctx, waxbin.ScanRequest{}); err != nil {
@@ -379,8 +465,56 @@ func TestEditAuthorWriteBackClearsStaleSortTag(t *testing.T) {
 	if err != nil || len(books2) != 1 {
 		t.Fatalf("fresh book query: %d books (err %v)", len(books2), err)
 	}
-	if books2[0].AuthorSort != model.SortKey("New Author") {
-		t.Errorf("fresh-catalog author_sort = %q, want %q", books2[0].AuthorSort, model.SortKey("New Author"))
+	edited, err := lib.Get(ctx, books[0].PID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if edited.AuthorSort != "" || books2[0].AuthorSort != "" {
+		t.Errorf("author_sort = %q here and %q in a fresh catalog, want no spelling in either", edited.AuthorSort, books2[0].AuthorSort)
+	}
+}
+
+// TestABookAuthorSortClearHoldsOverItsArtistSort: the scan reads a book's author sort
+// from ALBUMARTISTSORT and else ARTISTSORT, so a cleared spelling, and one an author change
+// dropped, clear both from the file and stay cleared on the next scan.
+func TestABookAuthorSortClearHoldsOverItsArtistSort(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	for i, name := range []string{"cleared.m4b", "renamed.m4b"} {
+		writeFile(t, filepath.Join(root, name), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: name, Artist: "Ursula K. Le Guin", AlbumArtist: "Ursula K. Le Guin", Album: name, Track: 1,
+			TXXX: []testaudio.TXXXFrame{{Desc: "ARTISTSORT", Value: "Le Guin, Ursula K."}}, Audio: testaudio.AudioWithSeed(byte(70 + i)),
+		}))
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	book := func(album string) *model.ItemView {
+		t.Helper()
+		books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Where("title", query.OpIs, album).Build(), "")
+		if err != nil || len(books) != 1 {
+			t.Fatalf("book %s: %d (err %v)", album, len(books), err)
+		}
+		return books[0]
+	}
+	if got := book("cleared.m4b").AuthorSort; got != "Le Guin, Ursula K." {
+		t.Fatalf("author sort read from ARTISTSORT = %q, want the file's", got)
+	}
+	if err := lib.EditField(ctx, book("cleared.m4b").PID, "author_sort", "", waxbin.EditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+		t.Fatalf("clear author_sort: %v", err)
+	}
+	if err := lib.EditField(ctx, book("renamed.m4b").PID, "author", "Ursula Le Guin", waxbin.EditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+		t.Fatalf("author edit: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	for _, album := range []string{"cleared.m4b", "renamed.m4b"} {
+		if got := book(album).AuthorSort; got != "" {
+			t.Errorf("%s author sort after the write-back and a scan = %q, want none", album, got)
+		}
 	}
 }
 

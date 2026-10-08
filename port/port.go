@@ -36,7 +36,9 @@ const ExportFormat = "waxbin-export"
 // Version 6 adds the item's acquisition source type, additive again.
 // Version 7 adds the listening log (play sessions), additive again.
 // Version 8 adds the item's credits, additive again.
-const ExportVersion = 8
+// Version 9 adds a track's track and disc totals, a book's part total and the sort
+// spellings as stated, additive again.
+const ExportVersion = 9
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -89,11 +91,20 @@ type ItemExport struct {
 	AlbumArtist string `json:"albumArtist,omitempty"`
 	Album       string `json:"album,omitempty"`
 	TrackNo     int    `json:"trackNo,omitempty"`
+	TrackTotal  int    `json:"trackTotal,omitempty"`
 	DiscNo      int    `json:"discNo,omitempty"`
-	Year        int    `json:"year,omitempty"`
-	Genre       string `json:"genre,omitempty"`
-	BPM         int    `json:"bpm,omitempty"`
-	RelPath     string `json:"relPath,omitempty"`
+	DiscTotal   int    `json:"discTotal,omitempty"`
+	// PartTotal is the number of parts a book's primary file says it has.
+	PartTotal int    `json:"partTotal,omitempty"`
+	Year      int    `json:"year,omitempty"`
+	Genre     string `json:"genre,omitempty"`
+	BPM       int    `json:"bpm,omitempty"`
+	RelPath   string `json:"relPath,omitempty"`
+	// The sort spellings as the file or an edit states them, empty when none; the keys a
+	// catalog sorts by derive from them.
+	ArtistSort   string `json:"artistSort,omitempty"`
+	ComposerSort string `json:"composerSort,omitempty"`
+	AuthorSort   string `json:"authorSort,omitempty"`
 	// The item's own external ids, the strongest cross-tool keys there are. Only its
 	// own two: this is a flat per-item record carrying no relational handles, and an
 	// album or artist id here would denormalize entity identity into every row.
@@ -179,8 +190,9 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 		ie := ItemExport{
 			PID: string(it.PID), Kind: string(it.Kind), State: string(it.State), Title: it.Title,
 			Artist: it.Artist, AlbumArtist: it.AlbumArtist, Album: it.Album,
-			TrackNo: it.TrackNo, DiscNo: it.DiscNo, Year: it.Year, Genre: it.Genre,
-			BPM: it.BPM, MBID: it.MBID, ISRC: it.ISRC,
+			TrackNo: it.TrackNo, TrackTotal: it.TrackTotal, DiscNo: it.DiscNo, DiscTotal: it.DiscTotal,
+			PartTotal: it.PartTotal, Year: it.Year, Genre: it.Genre, BPM: it.BPM, MBID: it.MBID, ISRC: it.ISRC,
+			ArtistSort: it.ArtistSort, ComposerSort: it.ComposerSort, AuthorSort: it.AuthorSort,
 		}
 		if it.Source != model.SourceLocal {
 			ie.Source = string(it.Source)

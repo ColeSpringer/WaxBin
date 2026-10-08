@@ -51,8 +51,8 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if got.Manifest.Version != port.ExportVersion {
 		t.Errorf("manifest version = %d, want %d", got.Manifest.Version, port.ExportVersion)
 	}
-	if port.ExportVersion != 8 {
-		t.Errorf("ExportVersion = %d, want 8 now that the credits are carried", port.ExportVersion)
+	if port.ExportVersion != 9 {
+		t.Errorf("ExportVersion = %d, want 9 now that the totals and sort spellings are carried", port.ExportVersion)
 	}
 	if got.PlayState[0].Rating == nil || *got.PlayState[0].Rating != 80 {
 		t.Fatalf("rating round-trip wrong: %+v", got.PlayState[0])
@@ -66,6 +66,45 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	}
 	if s := got.PlaySessions[1]; s.EndedAtNS != 0 || s.MsPlayed != 0 {
 		t.Errorf("open session round-trip = %+v, want no end and no play time", s)
+	}
+}
+
+// TestSnapshotCarriesTotalsAndSortSpellings: version 9 carries a track's track and disc
+// totals, a book's part total, and the sort spellings as stated, each left out when empty.
+func TestSnapshotCarriesTotalsAndSortSpellings(t *testing.T) {
+	t.Parallel()
+	items := []*model.ItemView{
+		{PID: "T1", Kind: model.KindTrack, State: model.StatePresent, Title: "Prelude", TrackNo: 3, TrackTotal: 12,
+			DiscNo: 1, DiscTotal: 2, ArtistSort: "Gould, Glenn", ComposerSort: "Bach, Johann Sebastian"},
+		{PID: "B1", Kind: model.KindBook, State: model.StatePresent, Title: "Earthsea", PartTotal: 9,
+			AuthorSort: "Le Guin, Ursula K."},
+		{PID: "T2", Kind: model.KindTrack, State: model.StatePresent, Title: "Bare"},
+	}
+	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil, nil)
+	var buf bytes.Buffer
+	if err := port.WriteSnapshot(&buf, snap); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := port.ReadSnapshot(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if tr := got.Items[0]; tr.TrackTotal != 12 || tr.DiscTotal != 2 || tr.ArtistSort != "Gould, Glenn" || tr.ComposerSort != "Bach, Johann Sebastian" {
+		t.Errorf("track = %+v, want its totals and spellings", tr)
+	}
+	if bk := got.Items[1]; bk.PartTotal != 9 || bk.AuthorSort != "Le Guin, Ursula K." {
+		t.Errorf("book = %+v, want its part total and author spelling", bk)
+	}
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"trackTotal", "discTotal", "partTotal", "artistSort", "composerSort", "authorSort"} {
+		if _, ok := raw.Items[2][k]; ok {
+			t.Errorf("a bare track encoded %s: %v", k, raw.Items[2])
+		}
 	}
 }
 
@@ -280,8 +319,8 @@ func TestBuildSnapshotCarriesCredits(t *testing.T) {
 	}
 	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil,
 		func(pid model.PID) []port.CreditExport { return credits[pid] })
-	if snap.Manifest.Version != 8 {
-		t.Errorf("manifest version = %d, want 8", snap.Manifest.Version)
+	if snap.Manifest.Version != port.ExportVersion {
+		t.Errorf("manifest version = %d, want %d", snap.Manifest.Version, port.ExportVersion)
 	}
 
 	var buf bytes.Buffer

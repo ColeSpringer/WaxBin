@@ -72,6 +72,10 @@ func (o RenameOptions) Attribution() model.Attribution {
 // artist, so renaming album_artist here moves that anchor and can carry the album under a
 // different group. The report's MovedAlbums names it when it happens.
 //
+// A rename that locks (opts.Lock LockOn) also folds the keys it leaves into the entity, so
+// a file read later under the old name joins it (EntityFolds, UnfoldEntity); an item or
+// credit edit that renames an entity in place never folds.
+//
 // With opts.WriteBack the new values are also written into each member file's tags,
 // which is what makes the rename survive the next scan that re-resolves them. Write-back
 // runs after the catalog change committed, so a file that cannot be written is reported
@@ -124,7 +128,7 @@ func (l *Library) writeBackRename(ctx context.Context, entityPID model.PID,
 		credits[e.ItemPID] = append(credits[e.ItemPID], creditRoleEdit{role: e.Role, names: e.Names})
 	}
 	if err := l.batchWriteBack(&out, func(pid model.PID) error {
-		return l.writeBackItemEdits(ctx, "waxbin.RenameEntity", pid, byItem[pid], credits[pid])
+		return l.writeBackItemEdits(ctx, "waxbin.RenameEntity", pid, byItem[pid], credits[pid], nil)
 	}); err != nil {
 		return err
 	}

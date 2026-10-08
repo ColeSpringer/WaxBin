@@ -4,9 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
+	"slices"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -205,7 +206,7 @@ func (s *Store) setItemCreditsBatch(ctx context.Context, op string, edits []mode
 			return err
 		}
 		for i, e := range entries {
-			stored, err := applyItemCreditsTx(ctx, tx, e, attr, lock, affected, op)
+			stored, err := applyItemCreditsTx(ctx, tx, e, before[i], attr, lock, affected, op)
 			if err != nil {
 				return err
 			}
@@ -244,7 +245,7 @@ func cleanCreditNames(names []string) []string {
 // provenance, and the item delta. Touched artists land in the caller-supplied set,
 // which the caller recomputes once for the whole batch, so this does NOT call
 // maintainRollupsTx. It returns the names actually stored.
-func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, attr model.Attribution, lock model.LockChange, affected *affectedRollups, op string) ([]string, error) {
+func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, before creditState, attr model.Attribution, lock model.LockChange, affected *affectedRollups, op string) ([]string, error) {
 	// The artist role rewrites track.artist_id, and the outgoing artist need not be
 	// a prior contributor: a catalog scanned before credits existed has no
 	// RoleArtist rows, so its rollup would drift unrecomputed.
@@ -296,7 +297,7 @@ func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, attr mod
 
 	// Keep the denormalized column in step for the roles that carry one, then rebuild
 	// the search row, whose credits column names every credited contributor.
-	if err := syncCreditDenormTx(ctx, tx, e.itemID, e.kind, e.role, resolved, firstID); err != nil {
+	if err := syncCreditDenormTx(ctx, tx, e.itemID, e.kind, e.role, resolved, firstID, before.same(resolved)); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if err := rebuildItemSearchFTSTx(ctx, tx, e.itemID, e.kind); err != nil {
@@ -317,8 +318,8 @@ func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, attr mod
 
 // creditStatesTx reads each entry's credit state (creditStateTx) ahead of the rename
 // pre-pass, which renames an artist in place before any apply.
-func creditStatesTx(ctx context.Context, tx *sql.Tx, entries []creditEntry) ([]string, error) {
-	out := make([]string, len(entries))
+func creditStatesTx(ctx context.Context, tx *sql.Tx, entries []creditEntry) ([]creditState, error) {
+	out := make([]creditState, len(entries))
 	for i, e := range entries {
 		st, err := creditStateTx(ctx, tx, e)
 		if err != nil {
@@ -329,13 +330,50 @@ func creditStatesTx(ctx context.Context, tx *sql.Tx, entries []creditEntry) ([]s
 	return out, nil
 }
 
-// creditStateTx reads what a credit write-back would carry for an entry's role: the
-// credited artists in order, and the display the role feeds (a track's artist or
-// composer, a book's author or narrator).
-func creditStateTx(ctx context.Context, tx *sql.Tx, e creditEntry) (string, error) {
-	ids, err := contributorArtistIDsForRole(ctx, tx, e.itemID, e.role)
+// creditState is what a credit write-back would carry for an entry's role: the credited
+// artists in order, with the names they held, and the display the role feeds (a track's
+// artist or composer, a book's author or narrator).
+type creditState struct {
+	ids     []int64
+	names   []string
+	display string
+}
+
+// moved reports whether the credit changed between two states, by its artists and display.
+func (c creditState) moved(to creditState) bool {
+	return !slices.Equal(c.ids, to.ids) || c.display != to.display
+}
+
+// same reports whether names are the people the state's role already named: the artists
+// it credited, in order, or those its display spells ("Simon & Garfunkel" names Simon and
+// Garfunkel), so saving a credit again leaves the display and its sort spelling as the
+// file gave them. Names are compared as written, so a case fix is a change; naming nobody
+// clears the role and is never the same.
+func (c creditState) same(names []string) bool {
+	return len(names) > 0 && (slices.Equal(c.names, names) || slices.Equal(identity.SplitCredits(c.display), names))
+}
+
+// creditStateTx reads an entry's credit state.
+func creditStateTx(ctx context.Context, tx *sql.Tx, e creditEntry) (creditState, error) {
+	var st creditState
+	rows, err := tx.QueryContext(ctx, `SELECT ic.artist_id, a.name FROM item_contributor ic
+		JOIN artist a ON a.id = ic.artist_id WHERE ic.item_id = ? AND ic.role = ? ORDER BY ic.position`,
+		e.itemID, string(e.role))
 	if err != nil {
-		return "", err
+		return st, err
+	}
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return st, err
+		}
+		st.ids, st.names = append(st.ids, id), append(st.names, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return st, err
 	}
 	var q string
 	switch {
@@ -351,20 +389,21 @@ func creditStateTx(ctx context.Context, tx *sql.Tx, e creditEntry) (string, erro
 	var display sql.NullString
 	if q != "" {
 		if err := tx.QueryRowContext(ctx, q, e.itemID).Scan(&display); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return "", err
+			return st, err
 		}
 	}
-	return fmt.Sprint(ids) + "\x00" + display.String, nil
+	st.display = display.String
+	return st, nil
 }
 
 // noteOwedCreditTx records an applied credit as owed to the item's files when its state
 // moved from before and a write-back can carry its role.
-func noteOwedCreditTx(ctx context.Context, tx *sql.Tx, e creditEntry, before string) error {
+func noteOwedCreditTx(ctx context.Context, tx *sql.Tx, e creditEntry, before creditState) error {
 	if !model.CreditWritable(e.role) {
 		return nil
 	}
 	after, err := creditStateTx(ctx, tx, e)
-	if err != nil || after == before {
+	if err != nil || !before.moved(after) {
 		return err
 	}
 	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, []string{model.CreditField(e.role)})
@@ -386,50 +425,61 @@ func creditRenameField(role model.ContributorRole) (string, bool) {
 	}
 }
 
-// syncCreditDenormTx updates the denormalized column a role feeds. The roles that
-// carry a derived sort column (composer_sort, author_sort) regenerate it from the new
-// display, unless that sort is locked: a locked sort is curated state the credit edit
-// did not name, so it survives, exactly as it does on the scalar edit path (the
-// editTrackFieldsTx/editBookFieldsTx probes).
-func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, role model.ContributorRole, names []string, firstArtistID int64) error {
+// syncCreditDenormTx updates the denormalized column a role feeds. The roles with a sort
+// spelling beside their column (artist and composer on a track, author on a book) drop it
+// when the display changes, since it spelled the name the edit replaced, and the key
+// follows the new display; a locked composer_sort or author_sort is curated state the
+// credit edit did not name, so it survives, exactly as it does on the scalar edit path
+// (the editTrackFieldsTx and editBookFieldsTx probes). With same (creditState.same) the
+// display already names these people, so it and its spelling stand and only the entity
+// link follows the credit.
+func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, role model.ContributorRole, names []string, firstArtistID int64, same bool) error {
+	var err error
+	if same {
+		switch {
+		case kind == string(model.KindTrack) && role == model.RoleArtist:
+			_, err = tx.ExecContext(ctx, "UPDATE track SET artist_id = ? WHERE item_id = ?", nullInt64(firstArtistID), itemID)
+		case kind == string(model.KindBook) && role == model.RoleAuthor:
+			_, err = tx.ExecContext(ctx, "UPDATE book SET author_id = ? WHERE item_id = ?", nullInt64(firstArtistID), itemID)
+		}
+		return err
+	}
 	switch {
 	case kind == string(model.KindTrack) && role == model.RoleArtist:
 		// Here the display IS rebuilt from the edited names, unlike the scan path,
 		// which keeps the file's raw credit string. The user typed these, so there is
-		// no file text to stay faithful to. artist_sort follows because it has no edit
-		// surface of its own, so unlike composer_sort there is no lock to probe.
-		display := strings.Join(names, ", ")
-		_, err := tx.ExecContext(ctx, "UPDATE track SET artist=?, artist_sort=?, artist_id=? WHERE item_id=?",
-			display, model.SortKey(display), nullInt64(firstArtistID), itemID)
-		return err
+		// no file text to stay faithful to. artist_sort has no edit surface of its own,
+		// so unlike composer_sort there is no lock to probe.
+		_, err = tx.ExecContext(ctx, `UPDATE track SET artist = ?1,
+			artist_sort = CASE WHEN artist = ?1 THEN artist_sort ELSE '' END, artist_id = ?2 WHERE item_id = ?3`,
+			strings.Join(names, ", "), nullInt64(firstArtistID), itemID)
 	case kind == string(model.KindTrack) && role == model.RoleComposer:
 		// The composer denormalization uses "; " (matching the scanner's multi-composer join).
 		display := strings.Join(names, "; ")
-		sortLocked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
-		if err != nil {
-			return err
+		sortLocked, lerr := fieldLockedTx(ctx, tx, itemID, "composer_sort")
+		if lerr != nil {
+			return lerr
 		}
 		if sortLocked {
 			_, err = tx.ExecContext(ctx, "UPDATE track SET composer=? WHERE item_id=?", display, itemID)
 		} else {
-			_, err = tx.ExecContext(ctx, "UPDATE track SET composer=?, composer_sort=? WHERE item_id=?",
-				display, model.SortKey(display), itemID)
+			_, err = tx.ExecContext(ctx, `UPDATE track SET composer = ?1,
+				composer_sort = CASE WHEN composer = ?1 THEN composer_sort ELSE '' END WHERE item_id = ?2`, display, itemID)
 		}
-		return err
 	case kind == string(model.KindBook) && role == model.RoleAuthor:
 		display := strings.Join(names, ", ")
-		sortLocked, err := fieldLockedTx(ctx, tx, itemID, "author_sort")
-		if err != nil {
-			return err
+		sortLocked, lerr := fieldLockedTx(ctx, tx, itemID, "author_sort")
+		if lerr != nil {
+			return lerr
 		}
 		if sortLocked {
 			_, err = tx.ExecContext(ctx, "UPDATE book SET author=?, author_id=? WHERE item_id=?",
 				display, nullInt64(firstArtistID), itemID)
 		} else {
-			_, err = tx.ExecContext(ctx, "UPDATE book SET author=?, author_sort=?, author_id=? WHERE item_id=?",
-				display, model.SortKey(display), nullInt64(firstArtistID), itemID)
+			_, err = tx.ExecContext(ctx, `UPDATE book SET author = ?1,
+				author_sort = CASE WHEN author = ?1 THEN author_sort ELSE '' END, author_id = ?2 WHERE item_id = ?3`,
+				display, nullInt64(firstArtistID), itemID)
 		}
-		return err
 	case kind == string(model.KindBook) && role == model.RoleNarrator:
 		_, err := tx.ExecContext(ctx, "UPDATE book SET narrator=? WHERE item_id=?",
 			strings.Join(names, ", "), itemID)
@@ -438,6 +488,10 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 		// Other roles have no denormalized column.
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	return refreshSortSpellingKeysTx(ctx, tx, itemID, kind)
 }
 
 // The credits that denormalize into a column (artist and composer on a track, author

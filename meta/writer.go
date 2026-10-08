@@ -127,6 +127,8 @@ var derivedSortPairs = []DerivedSortPair{
 	{Field: "title", SortField: "", TagKey: string(tag.TitleSort)},
 	{Field: "artist", SortField: "", TagKey: string(tag.ArtistSort)},
 	{Field: "author", SortField: "author_sort", TagKey: string(tag.AlbumArtistSort)},
+	// A book's author sort is read from ARTISTSORT where ALBUMARTISTSORT says none.
+	{Field: "author", SortField: "author_sort", TagKey: string(tag.ArtistSort)},
 	{Field: "composer", SortField: "composer_sort", TagKey: string(tag.ComposerSort)},
 }
 
@@ -207,10 +209,9 @@ func CreditTagValues(key string, names []string) []string {
 // a different item; see reanchorBookIdentity and bookIdentityEdited. mbid is not an
 // identity input, so it needs no re-anchor.
 //
-// author_sort round-trips with a caveat: the scanner folds the tag through
-// model.SortKey on an unlocked rescan, so what the written literal preserves is
-// the ordering it produces rather than its exact bytes. The edit's lock (on by
-// default) is what keeps the literal value durable in the catalog.
+// author_sort round-trips as written: the scanner keeps the ALBUMARTISTSORT spelling, else
+// the ARTISTSORT one, and folds the key it orders by beside it, so a clear empties both
+// (BookFieldClearKeys).
 var bookFieldTagKeys = map[string][]string{
 	"title":       {string(tag.Album)},
 	"author":      {string(tag.AlbumArtist)},
@@ -236,12 +237,16 @@ func BookFieldTagKeys(field string) ([]string, bool) {
 }
 
 // BookFieldClearKeys returns the keys a clear of a book field must empty besides the ones
-// it writes. The reader folds DESCRIPTION and LONGDESCRIPTION into one description, so
-// clearing the short key alone lets the long one read back as the old value; a set leaves
-// the long form alone, since it may hold a fuller text than the one being set.
+// it writes. The reader folds DESCRIPTION and LONGDESCRIPTION into one description, and
+// reads the author sort from ARTISTSORT where ALBUMARTISTSORT is empty, so clearing the
+// first key alone lets the other read back as the old value; a set leaves the other alone,
+// since the key it writes is the one read first.
 func BookFieldClearKeys(field string) []string {
-	if field == "description" {
+	switch field {
+	case "description":
 		return []string{string(tag.LongDescription)}
+	case "author_sort":
+		return []string{string(tag.ArtistSort)}
 	}
 	return nil
 }

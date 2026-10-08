@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 
 	"github.com/colespringer/waxbin/internal/fsx"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -63,7 +63,7 @@ func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 			}
 			if committed {
 				if err := commitMoveTx(ctx, tx, p.fileID.Int64, p.journalPID, model.RelocateInput{FilePID: model.PID(p.filePID.String),
-					NewPath: p.dst, NewDisplayPath: string(p.dst), NewRelPath: relUnder(p.root, p.dst)}); err != nil {
+					NewPath: p.dst, NewDisplayPath: string(p.dst), NewRelPath: []byte(pathx.RelUnder(string(p.root), string(p.dst)))}); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			} else if _, err := tx.ExecContext(ctx,
@@ -120,12 +120,126 @@ func pathHeldByAnotherTx(ctx context.Context, tx *sql.Tx, path []byte, fileID in
 	return err == nil, err
 }
 
-// relUnder returns dst relative to root, falling back to the base name when the
-// two share no common prefix (a recovered move to a path outside the root).
-func relUnder(root, dst []byte) []byte {
-	rel, err := filepath.Rel(string(root), string(dst))
+// OrganizeJournalByJob returns a job's committed moves and companion steps in the order it
+// took them, each move with its file as the catalog holds it now, or with none when the
+// file row is gone. The item is the one the file backs, its primary edge first.
+func (s *Store) OrganizeJournalByJob(ctx context.Context, jobPID model.PID) ([]model.OrganizeMove, error) {
+	const op = "store.OrganizeJournalByJob"
+	rows, err := s.read.QueryContext(ctx, `
+		SELECT jo.kind, jo.src, jo.dst, COALESCE(f.pid, ''), f.path, l.root,
+			COALESCE((SELECT pi.pid FROM item_file e JOIN playable_item pi ON pi.id = e.item_id
+				WHERE e.file_id = f.id ORDER BY e.role = 'primary' DESC, pi.id LIMIT 1), '')
+		FROM organize_journal jo
+		LEFT JOIN file f ON f.id = jo.file_id
+		LEFT JOIN library l ON l.id = f.library_id
+		WHERE jo.job_pid = ? AND jo.state = 'committed'
+		ORDER BY jo.id`, string(jobPID))
 	if err != nil {
-		return []byte(filepath.Base(string(dst)))
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return []byte(rel)
+	defer rows.Close()
+	var out []model.OrganizeMove
+	for rows.Next() {
+		var m model.OrganizeMove
+		var kind, filePID, itemPID string
+		if err := rows.Scan(&kind, &m.Src, &m.Dst, &filePID, &m.Path, &m.Root, &itemPID); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		m.Kind, m.FilePID, m.ItemPID = model.JournalKind(kind), model.PID(filePID), model.PID(itemPID)
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
+// OrganizeJobMoved reports whether a job's journal holds a committed file move.
+func (s *Store) OrganizeJobMoved(ctx context.Context, jobPID model.PID) (bool, error) {
+	const op = "store.OrganizeJobMoved"
+	var moved bool
+	if err := s.read.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM organize_journal
+		WHERE job_pid = ? AND kind = 'file' AND state = 'committed')`, string(jobPID)).Scan(&moved); err != nil {
+		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return moved, nil
+}
+
+// OrganizeHistory lists the jobs the organize journal holds moves for, newest first, each
+// with its file moves counted by state; a non-positive limit lists them all.
+func (s *Store) OrganizeHistory(ctx context.Context, limit int) ([]model.OrganizeBatch, error) {
+	const op = "store.OrganizeHistory"
+	q := `SELECT jo.job_pid, COALESCE(j.kind, ''), COALESCE(j.state, ''), COALESCE(j.started_at, MIN(jo.created_at)),
+			SUM(jo.kind = 'file' AND jo.state = 'committed'), SUM(jo.kind = 'file' AND jo.state = 'rolled_back'),
+			SUM(jo.kind = 'file' AND jo.state = 'planned')
+		FROM organize_journal jo LEFT JOIN job j ON j.pid = jo.job_pid
+		GROUP BY jo.job_pid HAVING SUM(jo.kind = 'file') > 0 ORDER BY MAX(jo.id) DESC`
+	var args []any
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.read.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.OrganizeBatch
+	for rows.Next() {
+		var b model.OrganizeBatch
+		var pid, state string
+		if err := rows.Scan(&pid, &b.Kind, &state, &b.StartedAt, &b.Committed, &b.RolledBack, &b.Planned); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		b.JobPID, b.State = model.PID(pid), model.JobState(state)
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
+// PruneOrganizeJournal deletes the journal rows of every job whose moves have all settled
+// (committed or rolled back) and whose newest was made no later than olderThanNS ago,
+// returning how many went. A move's age is when the job made it, which a crash recovery
+// settling it later does not change. A job goes whole or not at all, so an undo never
+// finds half of one: a running job stays whatever its age, and so does one with a planned
+// row, which the next read-write open settles. A pruned job can no longer be undone, and
+// its moves no longer vouch for a scan's album re-key.
+func (s *Store) PruneOrganizeJournal(ctx context.Context, olderThanNS int64) (int, error) {
+	const op = "store.PruneOrganizeJournal"
+	var n int64
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		r, err := tx.ExecContext(ctx, `DELETE FROM organize_journal WHERE job_pid IN (
+				SELECT jo.job_pid FROM organize_journal jo GROUP BY jo.job_pid
+				HAVING MAX(jo.created_at) <= ? AND SUM(jo.state = 'planned') = 0
+				   AND NOT EXISTS (SELECT 1 FROM job j WHERE j.pid = jo.job_pid AND j.state = 'running'))`,
+			nowNS()-olderThanNS)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		n, err = r.RowsAffected()
+		return err
+	})
+	return int(n), err
+}
+
+// JournalCompanions records the companion steps an organize job took after its moves,
+// committed and naming no file, so an undo can take them back.
+func (s *Store) JournalCompanions(ctx context.Context, jobPID model.PID, steps []model.CompanionMove) error {
+	const op = "store.JournalCompanions"
+	if len(steps) == 0 {
+		return nil
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		now := nowNS()
+		for _, st := range steps {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO organize_journal(pid, job_pid, src, dst, state, kind, created_at)
+				VALUES (?, ?, ?, ?, 'committed', ?, ?)`, string(model.NewPID()), string(jobPID), st.Src, st.Dst, string(st.Kind), now); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		return nil
+	})
 }

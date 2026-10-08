@@ -17,6 +17,7 @@ func newRmCmd(g *globals) *cobra.Command {
 		prune     bool
 		apply     bool
 		files     bool
+		reason    string
 	)
 	cmd := &cobra.Command{
 		Use:   "rm <pid>...",
@@ -30,7 +31,9 @@ func newRmCmd(g *globals) *cobra.Command {
 			"is always preserved (archived when it loses its last file). The tracks a cue sheet " +
 			"carves out of one file are deleted together or not at all. --file takes file " +
 			"pids instead and removes just those files: a copy goes alone, and an item's " +
-			"primary file gives its place to a copy when the item has one. Dry run unless --apply.",
+			"primary file gives its place to a copy when the item has one. --reason labels the " +
+			"trash entries the delete writes in place of \"user\", so it does not go with " +
+			"--prune or --permanent. Dry run unless --apply.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if permanent && prune {
@@ -54,7 +57,7 @@ func newRmCmd(g *globals) *cobra.Command {
 			for i, a := range args {
 				pids[i] = model.PID(a)
 			}
-			plan, err := planDelete(cmd, lib, pids, mode, files)
+			plan, err := planDelete(cmd, lib, pids, mode, files, waxbin.DeleteReason(reason))
 			if err != nil {
 				return err
 			}
@@ -72,15 +75,16 @@ func newRmCmd(g *globals) *cobra.Command {
 	cmd.Flags().BoolVar(&prune, "prune", false, "bypass the trash to reclaim space (policy pruning)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "execute the deletion (default is a dry run)")
 	cmd.Flags().BoolVar(&files, "file", false, "take file pids and remove only those files")
+	cmd.Flags().StringVar(&reason, "reason", "", "the reason the trash entries record (at most 64 bytes)")
 	return cmd
 }
 
 // planDelete plans the deletion of items, or of single files with --file.
-func planDelete(cmd *cobra.Command, lib *waxbin.Library, pids []model.PID, mode model.DeleteMode, files bool) (*trash.Plan, error) {
+func planDelete(cmd *cobra.Command, lib *waxbin.Library, pids []model.PID, mode model.DeleteMode, files bool, opts ...waxbin.DeleteOption) (*trash.Plan, error) {
 	if files {
-		return lib.PlanDeleteFiles(ctx(cmd), pids, mode)
+		return lib.PlanDeleteFiles(ctx(cmd), pids, mode, opts...)
 	}
-	return lib.PlanDeletePIDs(ctx(cmd), pids, mode)
+	return lib.PlanDeletePIDs(ctx(cmd), pids, mode, opts...)
 }
 
 func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
@@ -88,7 +92,11 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 		return printJSON(cmd, deletePlanJSON(plan))
 	}
 	w := out(cmd)
-	fmt.Fprintf(w, "Delete plan (mode %s): %d action(s), %d would delete\n", plan.Mode, len(plan.Actions), plan.Pending())
+	mode := string(plan.Mode)
+	if plan.Reason != "" {
+		mode += ", reason " + plan.Reason
+	}
+	fmt.Fprintf(w, "Delete plan (mode %s): %d action(s), %d would delete\n", mode, len(plan.Actions), plan.Pending())
 	managed, sidecars := false, plan.Sidecars()
 	for i, a := range plan.Actions {
 		if a.Skip {
@@ -162,7 +170,8 @@ func deletePlanJSON(plan *trash.Plan) any {
 	}
 	return struct {
 		Mode    string `json:"mode"`
+		Reason  string `json:"reason,omitempty"`
 		Pending int    `json:"pending"`
 		Actions any    `json:"actions"`
-	}{string(plan.Mode), plan.Pending(), actions}
+	}{string(plan.Mode), plan.Reason, plan.Pending(), actions}
 }

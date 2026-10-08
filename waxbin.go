@@ -1763,9 +1763,10 @@ func (l *Library) YearInReview(ctx context.Context, userPID model.PID, year, top
 // Merge collapses the loser entity onto the survivor: children (tracks, albums, books,
 // genre links, contributor credits) are re-pointed, the survivor's MBID and enrichment
 // marker are unioned when it lacks one, rollups are recomputed, and the loser is
-// deleted. The survivor keeps its PID. It repairs audit's duplicate-entity findings,
-// and is the seam enrichment uses to unify two heuristic rows that resolve to one
-// MBID.
+// deleted. The survivor keeps its PID, and the loser's key folds into it, so a file
+// still spelled the loser's way resolves to the survivor (MergeReport.Folds,
+// EntityFolds). It repairs audit's duplicate-entity findings, and is the seam
+// enrichment uses to unify two heuristic rows that resolve to one MBID.
 func (l *Library) Merge(ctx context.Context, entityType model.MergeEntity, survivorPID, loserPID model.PID) (*model.MergeReport, error) {
 	return l.store.MergeEntity(ctx, entityType, survivorPID, loserPID)
 }
@@ -1775,6 +1776,18 @@ func (l *Library) Merge(ctx context.Context, entityType model.MergeEntity, survi
 // back, so a partial merge can never be left behind. Returns one report per loser.
 func (l *Library) MergeMany(ctx context.Context, entityType model.MergeEntity, survivorPID model.PID, loserPIDs []model.PID) ([]*model.MergeReport, error) {
 	return l.store.MergeEntities(ctx, entityType, survivorPID, loserPIDs)
+}
+
+// EntityFolds lists the keys merges of one entity type retired, each with the entity it
+// still folds into.
+func (l *Library) EntityFolds(ctx context.Context, entityType model.MergeEntity) ([]model.EntityFold, error) {
+	return l.store.EntityFolds(ctx, entityType)
+}
+
+// UnfoldEntity forgets folds, so the next scan of a file carrying one of the keys mints
+// its own entity again. It is all or nothing: CodeNotFound names the keys no fold holds.
+func (l *Library) UnfoldEntity(ctx context.Context, entityType model.MergeEntity, keys ...string) error {
+	return l.store.UnfoldEntity(ctx, entityType, keys...)
 }
 
 // Lock marks item fields as protected from enrichment and organize tag
@@ -1888,13 +1901,17 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 // *WriteBackError naming the failed files and records a per-file drift diagnostic.
 // Surface that as "catalog updated, on-disk tag sync failed", not as a failed edit.
 func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[string]string, opts EditOptions) error {
+	prior, err := l.priorTitles(ctx, opts.WriteBack, []model.ItemFieldEdit{{ItemPID: itemPID, Fields: edits}})
+	if err != nil {
+		return err
+	}
 	if err := l.store.EditItemFields(ctx, itemPID, edits, opts.Attribution(), opts.Lock, opts.Force); err != nil {
 		return err
 	}
 	if !opts.WriteBack {
 		return nil
 	}
-	return l.writeBackFields(ctx, itemPID, edits)
+	return l.writeBackFields(ctx, itemPID, edits, prior)
 }
 
 // EditManyFields applies the same field edits to several items in one atomic
@@ -1907,6 +1924,14 @@ func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[s
 // catalog batch has already committed and err only reports a non-write-back failure
 // during the on-disk pass. Inspect the result's Edited list in that case.
 func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, opts EditOptions) (*BatchEditResult, error) {
+	each := make([]model.ItemFieldEdit, len(itemPIDs))
+	for i, pid := range itemPIDs {
+		each[i] = model.ItemFieldEdit{ItemPID: pid, Fields: edits}
+	}
+	prior, err := l.priorTitles(ctx, opts.WriteBack, each)
+	if err != nil {
+		return nil, err
+	}
 	res, err := l.store.EditManyFields(ctx, itemPIDs, edits, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
 		return nil, err
@@ -1916,7 +1941,7 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 		return out, nil
 	}
 	return out, l.batchWriteBack(out, func(pid model.PID) error {
-		return l.writeBackFields(ctx, pid, edits)
+		return l.writeBackFields(ctx, pid, edits, prior)
 	})
 }
 
@@ -1926,6 +1951,10 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 // then mirrors each item's own map into its tags, best-effort, as EditManyFields does;
 // see there for the error contract.
 func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, opts EditOptions) (*BatchEditResult, error) {
+	prior, err := l.priorTitles(ctx, opts.WriteBack, edits)
+	if err != nil {
+		return nil, err
+	}
 	res, err := l.store.EditItemsFields(ctx, edits, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
 		return nil, err
@@ -1939,8 +1968,35 @@ func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 		return out, nil
 	}
 	return out, l.batchWriteBack(out, func(pid model.PID) error {
-		return l.writeBackFields(ctx, pid, fieldsByPID[pid])
+		return l.writeBackFields(ctx, pid, fieldsByPID[pid], prior)
 	})
+}
+
+// priorTitles reads the titles that items a write-back edit retitles hold before the edit,
+// so the write-back can tell a title set to what it was, whose sort tag stays
+// (writeBackItemEdits). Nothing is read without a write-back or a title edit.
+func (l *Library) priorTitles(ctx context.Context, writeBack bool, edits []model.ItemFieldEdit) (map[model.PID]string, error) {
+	if !writeBack {
+		return nil, nil
+	}
+	var pids []model.PID
+	for _, e := range edits {
+		if _, ok := e.Fields["title"]; ok {
+			pids = append(pids, e.ItemPID)
+		}
+	}
+	if len(pids) == 0 {
+		return nil, nil
+	}
+	views, err := l.store.ItemsByPIDs(ctx, pids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[model.PID]string, len(views))
+	for _, v := range views {
+		out[v.PID] = v.Title
+	}
+	return out, nil
 }
 
 // batchWriteBack mirrors a committed batch into each edited item's on-disk tags,
@@ -2234,8 +2290,16 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 // audiobook tags the scanner reads back (bookTagEditsForFields) across all of its parts,
 // because a book's title and author are the key its parts group by and writing them to
 // one part alone would split the book on rescan. An episode is refused.
-func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
-	return l.writeBackItemEdits(ctx, "waxbin.EditFields", itemPID, edits, nil)
+// prior holds the titles the items had before the edit (priorTitles).
+func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string, prior map[model.PID]string) error {
+	// The catalog stored the title trimmed, so a title padded with space is the same one.
+	var kept []string
+	if t, ok := edits["title"]; ok {
+		if was, held := prior[itemPID]; held && was == strings.TrimSpace(t) {
+			kept = append(kept, "title")
+		}
+	}
+	return l.writeBackItemEdits(ctx, "waxbin.EditFields", itemPID, edits, nil, kept)
 }
 
 // writeBackItemEdits mirrors one item's committed field edits and credit edits into its
@@ -2243,8 +2307,9 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 // rename can produce both on one item (its performing credit and its producer credit), and
 // writing them separately would rewrite every file twice, doubling the mtime churn and the
 // next scan's work. Either half may be empty; op names the verb for the drift diagnostics.
+// kept names display fields the caller found unchanged, whose sort tags stay.
 func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID model.PID,
-	edits map[string]string, roles []creditRoleEdit) error {
+	edits map[string]string, roles []creditRoleEdit, kept []string) error {
 	// The reported edit map is both halves: a caller reading it back has to see every
 	// value the pass meant to write, whichever surface produced it.
 	all := make(map[string]string, len(edits)+len(roles))
@@ -2265,6 +2330,17 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	item, err := l.store.ItemByPID(ctx, itemPID)
 	if err != nil {
 		return writeBackSetupFailure(itemPID, all, err)
+	}
+	// A sort tag stays beside a name the edit left as it was: one the catalog still spells
+	// after the edit (a name set to what it was, or a spelling locked or edited with it),
+	// and one the caller kept, such as a title, which has no spelling of its own.
+	for _, f := range kept {
+		delete(sortFields, f)
+	}
+	for f, spelled := range map[string]string{"artist": item.ArtistSort, "composer": item.ComposerSort, "author": item.AuthorSort} {
+		if spelled != "" {
+			delete(sortFields, f)
+		}
 	}
 
 	var tagEdits []meta.TagEdit
@@ -2908,6 +2984,29 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 	return rep, err
 }
 
+// DeleteOption adjusts a delete plan.
+type DeleteOption func(*deleteOptions)
+
+type deleteOptions struct{ reason string }
+
+// DeleteReason records reason on each trash row the delete writes, in place of the
+// mode's own, so a caller can tell its deletes apart in `trash list` (a book merge's
+// leftover duplicates, say). Surrounding space is trimmed and an empty reason keeps the
+// mode's; trash.CheckReason says what a reason may hold, and a plan refuses one it
+// does not accept, a reason beside a mode that bypasses the trash included.
+func DeleteReason(reason string) DeleteOption {
+	return func(o *deleteOptions) { o.reason = strings.TrimSpace(reason) }
+}
+
+// deleteReason collects the reason a delete's options give, checked against its mode.
+func deleteReason(mode model.DeleteMode, opts []DeleteOption) (string, error) {
+	var o deleteOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o.reason, trash.CheckReason(mode, o.reason)
+}
+
 // PlanDelete computes a dry-run deletion plan for the items matching q under a mode
 // (trash|prune|permanent). DeleteTrash moves files to the reversible per-library trash;
 // the other modes bypass it to reclaim space. Every mode keeps the logical item,
@@ -2918,7 +3017,11 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 // episode. The count is surfaced rather than dropped, since a silent skip would
 // misreport what the sweep covered. So are the tracks of a cue rip the sweep matched only
 // some of (SkippedRipTracks), since deleting the rip's file takes every track it plays.
-func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.DeleteMode) (*trash.Plan, error) {
+func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.DeleteMode, opts ...DeleteOption) (*trash.Plan, error) {
+	reason, err := deleteReason(mode, opts)
+	if err != nil {
+		return nil, err
+	}
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
 		return nil, err
@@ -2947,7 +3050,7 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 	if err != nil {
 		return nil, err
 	}
-	plan.SkippedPodcast, plan.SkippedReadOnly = skipped, readOnly
+	plan.SkippedPodcast, plan.SkippedReadOnly, plan.Reason = skipped, readOnly, reason
 	return plan, nil
 }
 
@@ -2957,7 +3060,11 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 // An episode is refused here rather than skipped: the caller named the item, so a
 // silent skip would lie about what happened. See inPodcastLibrary. So is one of the
 // tracks a cue sheet carves out of one file unless the rip's other tracks are named too.
-func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode model.DeleteMode) (*trash.Plan, error) {
+func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode model.DeleteMode, opts ...DeleteOption) (*trash.Plan, error) {
+	reason, err := deleteReason(mode, opts)
+	if err != nil {
+		return nil, err
+	}
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
 		return nil, err
@@ -2979,7 +3086,12 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 		}
 		items = append(items, it)
 	}
-	return l.trasher.Plan(ctx, libs, items, mode)
+	plan, err := l.trasher.Plan(ctx, libs, items, mode)
+	if err != nil {
+		return nil, err
+	}
+	plan.Reason = reason
+	return plan, nil
 }
 
 // PlanDeleteFiles computes a deletion plan for single files by pid, the `rm --file`
@@ -2987,8 +3099,12 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 // when its item has one, so the item is archived only when the file was its last. A
 // file in the podcast library or a read-only one is refused, as PlanDeletePIDs refuses
 // such an item.
-func (l *Library) PlanDeleteFiles(ctx context.Context, filePIDs []model.PID, mode model.DeleteMode) (*trash.Plan, error) {
+func (l *Library) PlanDeleteFiles(ctx context.Context, filePIDs []model.PID, mode model.DeleteMode, opts ...DeleteOption) (*trash.Plan, error) {
 	const op = "Library.PlanDeleteFiles"
+	reason, err := deleteReason(mode, opts)
+	if err != nil {
+		return nil, err
+	}
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
 		return nil, err
@@ -3010,7 +3126,12 @@ func (l *Library) PlanDeleteFiles(ctx context.Context, filePIDs []model.PID, mod
 		}
 		targets = append(targets, trash.FileTarget{ItemPID: item, File: ref})
 	}
-	return l.trasher.PlanFiles(ctx, libs, targets, mode)
+	plan, err := l.trasher.PlanFiles(ctx, libs, targets, mode)
+	if err != nil {
+		return nil, err
+	}
+	plan.Reason = reason
+	return plan, nil
 }
 
 // rereadPromoted re-reads each promoted file still at its path, so its item follows the
@@ -3021,8 +3142,12 @@ func (l *Library) rereadPromoted(ctx context.Context, promoted []model.PromotedF
 
 // ApplyDelete executes a deletion plan under a "delete"-scoped job. An action in a
 // library flagged read-only since the plan was built is skipped, and so is one whose file's
-// cue rip plays other tracks than the plan named (trash.Recheck).
+// cue rip plays other tracks than the plan named (trash.Recheck). A plan whose Reason
+// trash.CheckReason refuses is refused before the job starts.
 func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Report, error) {
+	if err := trash.CheckReason(plan.Mode, plan.Reason); err != nil {
+		return nil, err
+	}
 	var rep *trash.Report
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "delete", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
 		libs, err := l.store.Libraries(ctx)

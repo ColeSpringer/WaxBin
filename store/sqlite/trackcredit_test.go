@@ -159,7 +159,7 @@ func TestRescanReplacesOnlyTheArtistRoleOnATrack(t *testing.T) {
 }
 
 // TestLockedArtistCreditSurvivesAForcedRescan checks the widened lock arm: either
-// spelling preserves the display, the derived sort, AND the split list, which cannot
+// spelling preserves the display, the sort key folded from it, AND the split list, which cannot
 // be re-derived because the display joins with a comma and the splitter does not
 // split on one.
 func TestLockedArtistCreditSurvivesAForcedRescan(t *testing.T) {
@@ -200,8 +200,8 @@ func TestLockedArtistCreditSurvivesAForcedRescan(t *testing.T) {
 			if got := scalarStr(t, st, "SELECT artist FROM track"); got != beforeDisplay {
 				t.Errorf("track.artist after rescan = %q, want the locked %q", got, beforeDisplay)
 			}
-			if got := scalarStr(t, st, "SELECT artist_sort FROM track"); got != model.SortKey(beforeDisplay) {
-				t.Errorf("artist_sort after rescan = %q, want it to ride with the locked display", got)
+			if sp, k := sortCols(t, st, res.ItemPID, "track", "artist_sort", "artist_sort_key"); sp != "" || k != model.SortKey(beforeDisplay) {
+				t.Errorf("artist sort after rescan = (%q, %q), want no spelling and the locked display's key", sp, k)
 			}
 		})
 	}
@@ -316,8 +316,8 @@ func TestSetArtistCreditRewritesTheTrackDisplayAndItsArtistID(t *testing.T) {
 	if got := scalarStr(t, st, "SELECT artist FROM track"); got != "Jay-Z, Alicia Keys" {
 		t.Errorf("track.artist = %q, want the rebuilt display", got)
 	}
-	if got := scalarStr(t, st, "SELECT artist_sort FROM track"); got != model.SortKey("Jay-Z, Alicia Keys") {
-		t.Errorf("artist_sort = %q, want it derived from the new display", got)
+	if sp, k := sortCols(t, st, res.ItemPID, "track", "artist_sort", "artist_sort_key"); sp != "" || k != model.SortKey("Jay-Z, Alicia Keys") {
+		t.Errorf("artist sort = (%q, %q), want no spelling and the new display's key", sp, k)
 	}
 	if got := trackArtistName(t, st, res.ItemPID); got != "Jay-Z" {
 		t.Errorf("track.artist_id names %q, want the first credited artist", got)

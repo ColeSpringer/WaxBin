@@ -186,7 +186,7 @@ func applyEditEntriesTx(ctx context.Context, tx *sql.Tx, log logger, entries []e
 		}
 	}
 	affected := newAffectedRollups()
-	if err := renameEntitiesForEditsTx(ctx, tx, log, entries, nil, affected, op); err != nil {
+	if err := renameEntitiesForEditsTx(ctx, tx, log, entries, nil, false, affected, op); err != nil {
 		return nil, err
 	}
 	edited := make([]model.PID, 0, len(entries))
@@ -557,11 +557,11 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		}
 	}
 
-	// A composer edit regenerates the derived composer_sort, but a locked sort the
-	// edit did not name is curated state the regeneration must not clobber. The lock
-	// validation above checks only the target fields, so probe the side-written one
-	// here and restore it. An explicitly edited composer_sort passed that validation
-	// (or was forced), so the edit wins.
+	// A composer edit drops the composer_sort spelling, but a locked spelling the edit
+	// did not name is curated state it must not clobber. The lock validation above
+	// checks only the target fields, so probe the side-cleared one here and restore it.
+	// An explicitly edited composer_sort passed that validation (or was forced), so the
+	// edit wins.
 	if editedComposer && !editedComposerSort {
 		locked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
 		if err != nil {
@@ -654,11 +654,10 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 		editedAuthorSort = editedAuthorSort || f == "author_sort"
 	}
 
-	// An author edit clears author_sort so upsertBook recomputes it, but a locked
-	// sort the edit did not name is curated state that must survive the re-derive.
-	// The lock validation above checks only the target fields, so probe the
-	// side-cleared one here and restore it (the composer_sort probe in
-	// editTrackFieldsTx is the same pattern).
+	// An author edit drops the author_sort spelling, but a locked spelling the edit did
+	// not name is curated state that must survive it. The lock validation above checks
+	// only the target fields, so probe the side-cleared one here and restore it (the
+	// composer_sort probe in editTrackFieldsTx is the same pattern).
 	if editedAuthor && !editedAuthorSort {
 		locked, err := fieldLockedTx(ctx, tx, itemID, "author_sort")
 		if err != nil {
@@ -754,31 +753,30 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 		// contributor rows still follow through resolveAndLinkEntities, and the
 		// release-group anchor falls back to the raw string rather than the split
 		// primary, so a credit edit cannot move a grouping key the same value in a
-		// tag would not move.
+		// tag would not move. A new name drops the sort spelling of the one it replaced.
+		if value != tr.Artist {
+			tr.ArtistSort = ""
+		}
 		tr.Artist = value
 		tr.Artists = nil
-		tr.ArtistSort = model.SortKey(value)
 	case "album_artist":
 		tr.AlbumArtist = value
 	case "album":
 		tr.Album = value
 	case "composer":
-		// A composer edit regenerates the derived sort (like the artist case above).
-		// When composer_sort is locked and not itself edited, editTrackFieldsTx
-		// restores the locked value after the apply loop.
-		tr.Composer = value
-		tr.ComposerSort = model.SortKey(value)
-	case "composer_sort":
-		// The literal value is stored (the lock is what makes it durable across an
-		// unlocked rescan, which folds the tag through SortKey). An empty value
-		// clears the override, reverting to the key derived from the composer; the
-		// sorted field order applies "composer" first, so a combined edit derives
-		// from the new composer.
-		if value == "" {
-			tr.ComposerSort = model.SortKey(tr.Composer)
-		} else {
-			tr.ComposerSort = value
+		// A new composer drops the sort spelling of the name it replaced (like the artist
+		// case above), so the key follows the new composer. When composer_sort is locked
+		// and not itself edited, editTrackFieldsTx restores the locked spelling after the
+		// apply loop.
+		if value != tr.Composer {
+			tr.ComposerSort = ""
 		}
+		tr.Composer = value
+	case "composer_sort":
+		// The literal spelling is stored and upsertTrack folds the key from it; an empty
+		// value clears it, so the key folds the composer again. The sorted field order
+		// applies "composer" first, so a combined edit keeps the explicit spelling.
+		tr.ComposerSort = value
 	case "comment":
 		tr.Comment = value
 	case "genre":
@@ -848,24 +846,23 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 }
 
 // applyBookEdit mutates one field of b in place. An author or narrator value splits
-// into contributor entities the same way the scanner splits a credit. Clearing the
-// author sort lets upsertBook recompute it from the new author. It never handles
+// into contributor entities the same way the scanner splits a credit. It never handles
 // title, which lives on playable_item and is applied by the caller.
 func applyBookEdit(b *model.Book, field, value, op string) error {
 	switch field {
 	case "author":
-		// Clearing the sort lets upsertBook recompute it from the new author. When
-		// author_sort is locked and not itself edited, editBookFieldsTx restores the
-		// locked value after the apply loop.
+		// A new author drops the sort spelling of the name it replaced, so the key
+		// follows the new author. When author_sort is locked and not itself edited,
+		// editBookFieldsTx restores the locked spelling after the apply loop.
+		if value != b.Author {
+			b.AuthorSort = ""
+		}
 		b.Authors = identity.SplitCredits(value)
 		b.Author = value
-		b.AuthorSort = ""
 	case "author_sort":
-		// The literal value is stored (the lock is what makes it durable across an
-		// unlocked rescan, which folds the ALBUMARTISTSORT tag through SortKey). An
-		// empty value clears the override and upsertBook recomputes SortKey(author);
-		// the sorted field order applies "author" first, so a combined edit derives
-		// from the new author.
+		// The literal spelling is stored and upsertBook folds the key from it; an empty
+		// value clears it, so the key folds the author again. The sorted field order
+		// applies "author" first, so a combined edit keeps the explicit spelling.
 		b.AuthorSort = value
 	case "narrator":
 		b.Narrators = identity.SplitCredits(value)

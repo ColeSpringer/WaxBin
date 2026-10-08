@@ -14,7 +14,6 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/store/sqlite"
-	"github.com/colespringer/waxbin/waxerr"
 )
 
 // twoTrackRipCue is a single-file album rip's cue: album header plus two TRACKs,
@@ -942,7 +941,8 @@ func TestScanBookCueStaysChapters(t *testing.T) {
 }
 
 // TestScanCueAddedThenRemovedConverts: a whole-file track gains a cue (converting to
-// virtual tracks), then loses it (reverting to one whole-file track).
+// virtual tracks), then loses it (reverting to one whole-file track), the item's pid
+// carried by the opening track and back.
 func TestScanCueAddedThenRemovedConverts(t *testing.T) {
 	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
@@ -970,8 +970,8 @@ func TestScanCueAddedThenRemovedConverts(t *testing.T) {
 			t.Errorf("item %s is not virtual after conversion", it.PID)
 		}
 	}
-	if _, err := st.ItemByPID(ctx, plainPID); !waxerr.Is(err, waxerr.CodeNotFound) {
-		t.Fatalf("the whole-file track should be gone after conversion, got %v", err)
+	if v, err := st.ItemByPID(ctx, plainPID); err != nil || !v.Virtual || v.StartMS != 0 {
+		t.Fatalf("the whole-file track's pid after conversion = %+v (err %v), want the opening virtual track", v, err)
 	}
 
 	// Remove the cue: the file reverts to a single whole-file track.
@@ -985,6 +985,9 @@ func TestScanCueAddedThenRemovedConverts(t *testing.T) {
 	}
 	if reverted[0].Virtual {
 		t.Error("reverted item should be a whole-file track, not virtual")
+	}
+	if reverted[0].PID != plainPID {
+		t.Errorf("reverted item pid = %s, want the one the file had before the cue, %s", reverted[0].PID, plainPID)
 	}
 	assertScanConsistent(t, st)
 }

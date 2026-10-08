@@ -42,7 +42,7 @@ func acquiredItemView(tags model.Tags, src string, kind model.Kind) *model.ItemV
 		author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
 		v.Title = scan.BookTitle(tags)
 		v.Artist, v.AlbumArtist = author, author
-		v.AuthorSort = model.SortKey(firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort, author))
+		v.AuthorSort = firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort)
 		v.Narrator = strings.Join(tags.Narrators, ", ")
 		v.Series = tags.Series
 		v.SeriesSeq = tags.SeriesSeq

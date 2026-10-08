@@ -39,16 +39,13 @@ func (s *Store) MergeEntity(ctx context.Context, et model.MergeEntity, survivorP
 // keys of dependent rows. Those dependent rows keep their existing keys, which stay
 // internally consistent: a re-pointed release_group still carries the loser's
 // derived match_key, and resolution keys off the unchanged track tags, so no
-// duplicate is created. The merge survives a re-scan when it is MBID-anchored (the
-// enrichment case), because the survivor inherits the loser's MBID below and
-// identity is MBID-first. A purely heuristic merge with no MBID can be re-derived
-// from the still-original tags on a later scan, so fix the tags or enable organize
-// tag write-back to make it durable. A merge of two albums that differ only by folder
-// (what audit reports as a duplicate by name or a split album) is undone however they
-// are tagged, since each member's key names its own folder: the next scan, or edit, that
-// re-resolves the members splits them again. Moving their files into one folder, which
-// organize does in a managed library, is what keeps it. Merging artists does not
-// auto-collapse two same-titled release groups now sharing the survivor; run
+// duplicate is created. The loser's own key folds into the survivor (entity_fold, and
+// MergeReport.Folds), so a later scan of a file still spelled the loser's way resolves to
+// the survivor rather than minting the loser again, whether or not an MBID anchors
+// either; folds that named the loser move to the survivor with it. An album's key holds
+// its folder, so merged albums stay merged while their files keep their folders and
+// tags, and a retag or a move elsewhere computes a key no fold names. Merging artists
+// does not auto-collapse two same-titled release groups now sharing the survivor; run
 // `merge release_group` for those.
 func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivorPID model.PID, loserPIDs []model.PID) ([]*model.MergeReport, error) {
 	const op = "store.MergeEntities"
@@ -70,7 +67,7 @@ func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivo
 	reports := make([]*model.MergeReport, 0, len(loserPIDs))
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		for _, loserPID := range loserPIDs {
-			rep, err := mergeEntityTx(ctx, tx, et, table, survivorPID, loserPID)
+			rep, err := mergeEntityTx(ctx, tx, et, table, survivorPID, loserPID, true)
 			if err != nil {
 				return err
 			}
@@ -84,8 +81,15 @@ func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivo
 	return reports, nil
 }
 
-// mergeEntityTx performs one merge inside the caller's transaction.
-func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table string, survivorPID, loserPID model.PID) (*model.MergeReport, error) {
+// mergeEntityTx performs one merge inside the caller's transaction. The loser's folds go
+// to the survivor either way; fold also folds the loser's own key into it, which a merge
+// someone asked for wants, and so does an entity rename that locks when it lands on a
+// taken key (it says the entity is now called that). The other merges do not: an item or
+// credit edit landing on a taken key said what those items are, not that the old name is
+// an alias, a scan carrying a moved album's drained row onto its new one leaves a key
+// naming a folder the files left, and an mbid clear leaves a key naming the id the files
+// are losing.
+func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table string, survivorPID, loserPID model.PID, fold bool) (*model.MergeReport, error) {
 	const op = "store.MergeEntities"
 	rep := &model.MergeReport{EntityType: et, Survivor: survivorPID, Loser: loserPID}
 	sid, err := entityIDByPID(ctx, tx, table, survivorPID, op)
@@ -236,6 +240,21 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM orphan_candidate WHERE entity_type = ? AND entity_id = ?", table, lid); err != nil {
 		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx, "UPDATE entity_fold SET entity_pid = ? WHERE entity_type = ? AND entity_pid = ?",
+		string(survivorPID), string(et), string(loserPID)); err != nil {
+		return nil, err
+	}
+	if fold {
+		key, err := entityFoldKeyTx(ctx, tx, et, lid)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeFoldTx(ctx, tx, et, key, survivorPID); err != nil {
+			return nil, err
+		}
+		rep.Folds = append(rep.Folds, key)
 	}
 
 	// Delete the loser. Remaining child rows still pointing at it (aliases,

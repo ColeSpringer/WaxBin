@@ -222,7 +222,9 @@ type ScanItemResult struct {
 	// (a re-encoded primary re-keyed away), for the caller to re-read.
 	Promoted []PromotedFile
 	// Folded lists the items this write left with no file and folded into ItemPID, their
-	// play state and list entries moved there, before deleting them.
+	// play state and list entries moved there, before deleting them. A rip's opening track
+	// whose pid a new item took is not among them: the item carries on as that track, not
+	// created but changed.
 	Folded []PID
 }
 
@@ -516,6 +518,10 @@ type Catalog interface {
 	// (add/update/remove), each with its own offset window. The result summarizes the
 	// file-level outcome; ItemCreated reports whether any virtual track was created.
 	PutScannedVirtualTracks(ctx context.Context, in PutScannedVirtualTracksInput) (*ScanItemResult, error)
+	// AdoptItemPID gives the item at from the pid to, for a rebuild whose stamped file
+	// joined an item an unstamped copy made under a fresh pid; it reports false, changing
+	// nothing, when to is not a valid pid or another item holds it.
+	AdoptItemPID(ctx context.Context, from, to PID) (bool, error)
 	// VirtualTracksForPath returns the virtual tracks the file at path backs, in start
 	// order and with their stored identity keys, or none when it is not a rip.
 	VirtualTracksForPath(ctx context.Context, path []byte) ([]VirtualTrack, error)
@@ -600,6 +606,9 @@ type Catalog interface {
 	// RespellFolder gives the files below a folder renamed between two spellings of its
 	// name the new spelling in their paths, returning how many it moved.
 	RespellFolder(ctx context.Context, from, to string) (int, error)
+	// JournalCompanions records the companion steps an organize job took after its moves,
+	// committed, so an undo can take them back.
+	JournalCompanions(ctx context.Context, jobPID PID, steps []CompanionMove) error
 
 	ChangesSince(ctx context.Context, seq int64) ([]Change, error)
 	LatestChangeSeq(ctx context.Context) (int64, error)

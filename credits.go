@@ -127,7 +127,7 @@ type creditRoleEdit struct {
 // tag, so that role is refused and stays DB-only while the roles beside it still write.
 // The catalog edit stands regardless.
 func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, roles []creditRoleEdit) error {
-	return l.writeBackItemEdits(ctx, "waxbin.SetCredits", itemPID, nil, roles)
+	return l.writeBackItemEdits(ctx, "waxbin.SetCredits", itemPID, nil, roles, nil)
 }
 
 // bookRoleField maps a book contributor role to the book metadata field whose on-disk

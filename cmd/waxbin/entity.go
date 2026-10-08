@@ -34,12 +34,15 @@ func newEntityCmd(g *globals) *cobra.Command {
 			"`entity rename` is the other verb: those fields never key an entity, while a " +
 			"rename moves the key itself. Renamable types: album, release_group, artist.\n" +
 			"`entity info` reads those three plus genre and series.\n" +
-			"Star-able types (star/rate/state/stars): artist, release_group, album, genre.",
+			"Star-able types (star/rate/state/stars): artist, release_group, album, genre.\n" +
+			"`entity folds` and `entity unfold` list and forget the keys merges folded into an " +
+			"entity: artist, release_group, album, genre, series.",
 	}
 	cmd.AddCommand(
 		newEntityEditCmd(g), newEntityRenameCmd(g), newEntityShowCmd(g), newEntityInfoCmd(g),
 		newEntityListCmd(g),
 		newEntityStarCmd(g), newEntityRateCmd(g), newEntityStateCmd(g), newEntityStarsCmd(g),
+		newEntityFoldsCmd(g), newEntityUnfoldCmd(g),
 	)
 	return cmd
 }
@@ -217,7 +220,10 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 			"narrator, translator, editor) has no field to ride, so it moves on the credit " +
 			"surface in the same transaction and is counted separately. A rename locks what " +
 			"it wrote on both surfaces, so by default every item whose credit moved comes out " +
-			"with that credit.<role> locked; --no-lock leaves them all writable.\n\n" +
+			"with that credit.<role> locked; --no-lock leaves them all writable. A rename that " +
+			"locks also folds the keys it leaves into the entity, so a file read later under the " +
+			"old name joins it (`entity folds` lists them, `entity unfold` forgets one); `edit` " +
+			"and `credit` never fold.\n\n" +
 			"Renaming a name to nothing is refused, as is a member with a locked keying field " +
 			"(use --force), an archived member with no file on disk, members whose files sit in " +
 			"different folders (the album key carries the folder, so no one key covers them), " +

@@ -43,8 +43,8 @@ func TestDedupLosers(t *testing.T) {
 }
 
 // TestMergeSaysWhatCanUndoIt: a merge in text ends with a note that the files still carry
-// the spellings it merged, which a later read can split off again; with --json it prints
-// its document alone.
+// the spellings it merged, which a rebuild (or, for albums, a retag or a move) can split
+// off again; with --json it prints its document alone.
 func TestMergeSaysWhatCanUndoIt(t *testing.T) {
 	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
@@ -79,15 +79,15 @@ func TestMergeSaysWhatCanUndoIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
-	if !strings.Contains(text, "note:") || !strings.Contains(text, "split") || !strings.Contains(text, "rebuild") {
-		t.Errorf("merge printed %q, want a note on what can split it again", text)
+	if !strings.Contains(text, "note:") || !strings.Contains(text, "db reset") {
+		t.Errorf("merge printed %q, want a note on what can undo it", text)
 	}
 	text, err = runLibraryCmd(t, db, false, "merge", "album", string(albums["Album Kept Spelling"]), string(albums["Album Second Spelling"]))
 	if err != nil {
 		t.Fatalf("merge albums: %v", err)
 	}
 	if !strings.Contains(text, "note:") || !strings.Contains(text, "folder") {
-		t.Errorf("album merge printed %q, want a note that keeping it takes one folder", text)
+		t.Errorf("album merge printed %q, want a note that a move can split it", text)
 	}
 	out, err := runLibraryCmd(t, db, true, "merge", "artist", string(artists["Kept Spelling"]), string(artists["Third Spelling"]))
 	if err != nil {
@@ -95,5 +95,16 @@ func TestMergeSaysWhatCanUndoIt(t *testing.T) {
 	}
 	if _, why := oneEnvelope(out); why != "" || strings.Contains(out, "note:") {
 		t.Errorf("merge --json printed %q (%s), want one envelope and no note", out, why)
+	}
+}
+
+// TestMergeNoteNamesTheReset: the caveat a merge prints names what drops a fold, a db
+// reset, since a rebuild scans into the catalog that holds it.
+func TestMergeNoteNamesTheReset(t *testing.T) {
+	t.Parallel()
+	for _, et := range []model.MergeEntity{model.MergeArtist, model.MergeAlbum} {
+		if n := mergeNote(et); !strings.Contains(n, "db reset") || strings.Contains(n, "rebuild") {
+			t.Errorf("note for %s = %q, want it to name a db reset and no rebuild", et, n)
+		}
 	}
 }

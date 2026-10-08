@@ -1,6 +1,7 @@
 package pathx
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -40,5 +41,23 @@ func TestCollisionKeyFoldsAsEqualFoldDoes(t *testing.T) {
 		if got := CollisionKey(c.a) == CollisionKey(c.b); got != c.same {
 			t.Errorf("CollisionKey(%q) == CollisionKey(%q) is %v, want %v", c.a, c.b, got, c.same)
 		}
+	}
+}
+
+// TestRelUnderFallsBackOutsideTheRoot: a path under the root is given relative to it, and
+// one outside it by its base name, never as a path climbing out of the root.
+func TestRelUnderFallsBackOutsideTheRoot(t *testing.T) {
+	t.Parallel()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol := filepath.VolumeName(wd)
+	p := func(s string) string { return vol + filepath.FromSlash(s) }
+	if got := RelUnder(p("/r"), p("/r/in/a.mp3")); got != filepath.Join("in", "a.mp3") {
+		t.Errorf("RelUnder inside the root = %q, want in/a.mp3", got)
+	}
+	if got := RelUnder(p("/r"), p("/elsewhere/a.mp3")); got != "a.mp3" {
+		t.Errorf("RelUnder outside the root = %q, want the base name", got)
 	}
 }

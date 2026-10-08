@@ -47,6 +47,10 @@ type Action struct {
 	// Empty unless the profile enables tag-write. Carried in the plan so a re-validated
 	// executor writes exactly what was planned without re-reading the profile or item.
 	TagFields []TagField
+	// unseated marks an action whose file may no longer stand at Src (an undo's move of a
+	// file the catalog has dropped), so its hold claims no path; Hold's look at the disk
+	// finds a file still there.
+	unseated bool
 }
 
 // HoldCode says why an action does not move: HoldInPlace marks a file already at its
@@ -98,6 +102,18 @@ type Plan struct {
 	// ReadOnlyLibraries counts the managed libraries the plan passed over because they
 	// are read-only.
 	ReadOnlyLibraries int
+	// Undo marks a plan that undoes an organize job (UndoPlan): after its moves it takes
+	// Companions, the inverse of the companion steps that job journaled, in place of the
+	// covers and companions an organize carries, so they come back exactly.
+	Undo       bool            `json:",omitempty"`
+	Companions []CompanionStep `json:",omitempty"`
+}
+
+// CompanionStep is one step with a folder companion: moved or copied from Src to Dst, or,
+// for model.JournalCompanionDrop, the copy at Dst of the one at Src removed.
+type CompanionStep struct {
+	Kind     model.JournalKind
+	Src, Dst string
 }
 
 // Pending returns the actions that would actually move.
@@ -747,7 +763,7 @@ func (o *Organizer) cataloged(ctx context.Context, self, file model.PID) (string
 func markCollisions(plan *Plan, held []bool) {
 	seen := make(map[string]int, len(plan.Actions))
 	for i, a := range plan.Actions {
-		if a.Skip {
+		if a.Skip && !a.unseated {
 			seen[pathx.CollisionKey(a.Src)] = i
 		}
 	}
@@ -822,15 +838,23 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 	roots := map[string]string{}
 	sib := NewSiblings()
 	placeCovers := func() {
+		if plan.Undo {
+			rep.SidecarsMoved += o.applyCompanionSteps(ctx, plan.Companions, moved, jobPID)
+			rep.DirsPruned += o.prune(ctx, roots, nil, jobPID)
+			return
+		}
 		byRoot := map[string][]SidecarMove{}
 		for _, m := range moved {
 			r := roots[filepath.Dir(m.Src)]
 			byRoot[r] = append(byRoot[r], m)
 		}
+		var carried []model.CompanionMove
 		for _, r := range slices.Sorted(maps.Keys(byRoot)) {
-			rep.SidecarsMoved += o.applyCoverMoves(speller(r), CoverMoves(byRoot[r], PruneOptions(r, nil)))
+			carried = append(carried, o.applyCoverMoves(speller(r), CoverMoves(byRoot[r], PruneOptions(r, nil)))...)
 		}
-		rep.DirsPruned += o.prune(roots, moved)
+		rep.SidecarsMoved += len(carried)
+		o.journalCompanions(ctx, jobPID, carried)
+		rep.DirsPruned += o.prune(ctx, roots, moved, jobPID)
 	}
 	pending := map[string]int{}
 	for _, a := range plan.Actions {
@@ -918,14 +942,115 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 
 // prune removes the source folders the moves emptied, and any folder above them that is
 // then empty, up to each one's library root (roots maps a source folder to it); a
-// companion left in one follows its audio as FolderDisposal says.
-func (o *Organizer) prune(roots map[string]string, moved []SidecarMove) int {
-	dispose, undo := FolderDisposal(moved, func(src string) string { return roots[filepath.Dir(src)] })
-	return fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
-		opts := PruneOptions(roots[dir], dispose)
-		opts.Undo = undo
+// companion left in one follows its audio as FolderDisposal says, journaled for an undo.
+// With no moves (an undo, whose companions went back by their journal) a companion keeps
+// its folder.
+func (o *Organizer) prune(ctx context.Context, roots map[string]string, moved []SidecarMove, jobPID model.PID) int {
+	if moved == nil {
+		return fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
+			return PruneOptions(roots[dir], nil)
+		}, func(dir string, err error) { o.log.Warn("pruning an emptied folder", "dir", dir, "err", err) })
+	}
+	d := FolderDisposal(moved, func(src string) string { return roots[filepath.Dir(src)] })
+	n := fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
+		opts := PruneOptions(roots[dir], d.Dispose)
+		opts.Undo = d.Undo
 		return opts
 	}, func(dir string, err error) { o.log.Warn("pruning an emptied folder", "dir", dir, "err", err) })
+	o.journalCompanions(ctx, jobPID, d.Carried())
+	return n
+}
+
+// journalCompanions records the companion steps a run took, so an undo can take them back;
+// a failure is logged, as a companion's own failure is, since the files already moved.
+func (o *Organizer) journalCompanions(ctx context.Context, jobPID model.PID, steps []model.CompanionMove) {
+	if len(steps) == 0 {
+		return
+	}
+	if err := o.cat.JournalCompanions(context.WithoutCancel(ctx), jobPID, steps); err != nil {
+		o.log.Warn("journaling the companions carried", "err", err)
+	}
+}
+
+// applyCompanionSteps takes an undo's companion steps, journaling each it took, and
+// reports how many: a move or a copy where its source stands and its destination is free,
+// and a removal of a copy that still holds its original's bytes, or, its original gone, a
+// move of the copy into the original's place. A step goes only with audio this run moved
+// back between its folders (companionMover), so a companion stays with audio that stays.
+// Any other is left as it stands, a failure logged.
+func (o *Organizer) applyCompanionSteps(ctx context.Context, steps []CompanionStep, moved []SidecarMove, jobPID model.PID) int {
+	var took []model.CompanionMove
+	for _, st := range steps {
+		st, ok := companionMover(st, moved)
+		if !ok {
+			continue
+		}
+		var err error
+		switch st.Kind {
+		case model.JournalCompanion, model.JournalCompanionCopy:
+			err = fsx.MoveOrCopy(st.Src, st.Dst, st.Kind == model.JournalCompanionCopy)
+		case model.JournalCompanionDrop:
+			if err = dropCopy(st.Src, st.Dst); errors.Is(err, fs.ErrNotExist) && isRegularFile(st.Dst) {
+				st = CompanionStep{Kind: model.JournalCompanion, Src: st.Dst, Dst: st.Src}
+				err = fsx.Move(st.Src, st.Dst)
+			}
+		default:
+			continue
+		}
+		if err != nil {
+			o.log.Warn("companion not put back", "kind", st.Kind, "src", st.Src, "dst", st.Dst, "err", err)
+			continue
+		}
+		took = append(took, model.CompanionMove{Kind: st.Kind, Src: []byte(st.Src), Dst: []byte(st.Dst)})
+	}
+	o.journalCompanions(ctx, jobPID, took)
+	return len(took)
+}
+
+// companionMover finds the audio move a companion step goes with: one from the folder the
+// step leaves (from) or one below it to the folder it reaches (to) or one below it, an album
+// folder above its discs being either, compared as the library lays paths out
+// (pathx.CollisionKey). The step is returned with its leaving side in that move's spelling
+// of the folder, which a respell since may have changed; ok is false when no audio moved
+// between them, and the step stays.
+func companionMover(st CompanionStep, moved []SidecarMove) (CompanionStep, bool) {
+	leaving, reaching := &st.Src, st.Dst
+	if st.Kind == model.JournalCompanionDrop {
+		leaving, reaching = &st.Dst, st.Src
+	}
+	from, to := pathx.CollisionKey(filepath.Dir(*leaving)), pathx.CollisionKey(filepath.Dir(reaching))
+	within := func(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) }
+	for _, m := range moved {
+		at := filepath.Dir(m.Src)
+		if !within(pathx.CollisionKey(at), from) || !within(pathx.CollisionKey(filepath.Dir(m.Dst)), to) {
+			continue
+		}
+		for pathx.CollisionKey(at) != from && at != filepath.Dir(at) {
+			at = filepath.Dir(at)
+		}
+		*leaving = filepath.Join(at, filepath.Base(*leaving))
+		return st, true
+	}
+	return st, false
+}
+
+// errCopyDiffers refuses to remove a copy that no longer holds its original's bytes.
+var errCopyDiffers = errors.New("the copy differs from the file it was copied from")
+
+// dropCopy removes copy when it still holds the bytes of orig, which still stands.
+func dropCopy(orig, copy string) error {
+	a, err := os.ReadFile(pathx.Long(orig))
+	if err != nil {
+		return err
+	}
+	b, err := os.ReadFile(pathx.Long(copy))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(a, b) {
+		return errCopyDiffers
+	}
+	return os.Remove(pathx.Long(copy))
 }
 
 // park moves an action's file to a free name in its own folder, journaled like any move,
@@ -935,10 +1060,7 @@ func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID mode
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "organize.park", err)
 	}
-	rel, err := filepath.Rel(cmp.Or(a.Root, plan.Root), tmp)
-	if err != nil {
-		rel = filepath.Base(tmp)
-	}
+	rel := pathx.RelUnder(cmp.Or(a.Root, plan.Root), tmp)
 	in := model.RelocateInput{FilePID: a.FilePID, JobPID: jobPID, SrcPath: a.SrcBytes,
 		NewPath: []byte(tmp), NewDisplayPath: tmp, NewRelPath: []byte(rel)}
 	jpid, err := o.cat.PlanMove(ctx, in)

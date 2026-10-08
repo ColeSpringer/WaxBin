@@ -319,6 +319,13 @@ func (m *mutator) MergeMany(ctx context.Context, et model.MergeEntity, survivor 
 	return m.lib.MergeMany(ctx, et, survivor, losers)
 }
 
+func (m *mutator) UnfoldEntity(ctx context.Context, et model.MergeEntity, keys []string) error {
+	if m.px != nil {
+		return m.px.UnfoldEntity(ctx, et, keys)
+	}
+	return m.lib.UnfoldEntity(ctx, et, keys...)
+}
+
 func (m *mutator) MarkMissing(ctx context.Context, itemPID model.PID, force bool) (model.MarkMissingOutcome, error) {
 	if m.px != nil {
 		return m.px.MarkMissing(ctx, itemPID, force)

@@ -454,20 +454,20 @@ func TestFolderDisposal(t *testing.T) {
 		filepath.Join(dst, "folder.jpg"), filepath.Join(split, "cover.jpg")} {
 		mustWrite(t, p)
 	}
-	dispose, undo := FolderDisposal([]SidecarMove{
+	d := FolderDisposal([]SidecarMove{
 		{Src: filepath.Join(album, "CD1", "1.mp3"), Dst: filepath.Join(dst, "1-01 - One.mp3")},
 		{Src: filepath.Join(split, "a.mp3"), Dst: filepath.Join(dstA, "01 - A.mp3")},
 		{Src: filepath.Join(split, "b.mp3"), Dst: filepath.Join(dstB, "01 - B.mp3")},
 	}, func(string) string { return root })
-	if err := dispose(filepath.Join(album, "cover.jpg")); err != nil || !exists(filepath.Join(dst, "cover.jpg")) {
+	if err := d.Dispose(filepath.Join(album, "cover.jpg")); err != nil || !exists(filepath.Join(dst, "cover.jpg")) {
 		t.Fatalf("the disc album's cover: err %v, moved %v; want it in the new folder", err, exists(filepath.Join(dst, "cover.jpg")))
 	}
 	for _, p := range []string{filepath.Join(album, "Gone.lrc"), filepath.Join(album, "folder.jpg"), filepath.Join(split, "cover.jpg")} {
-		if err := dispose(p); !errors.Is(err, fsx.ErrKeep) || !exists(p) {
+		if err := d.Dispose(p); !errors.Is(err, fsx.ErrKeep) || !exists(p) {
 			t.Errorf("%s: err %v, kept %v; want it kept", p, err, exists(p))
 		}
 	}
-	if err := undo(filepath.Join(album, "cover.jpg")); err != nil || !exists(filepath.Join(album, "cover.jpg")) {
+	if err := d.Undo(filepath.Join(album, "cover.jpg")); err != nil || !exists(filepath.Join(album, "cover.jpg")) {
 		t.Fatalf("undo: err %v; want the cover back", err)
 	}
 }

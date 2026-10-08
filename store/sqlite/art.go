@@ -713,10 +713,10 @@ type artLevel struct {
 
 // ResolveArt resolves art for an entity in one role. The front role walks the
 // fallback chain from the requested level up toward the root (track -> album ->
-// release_group -> artist -> genre) and answers from the first level that has a
-// front cover; every other role resolves at the requested level alone, since an
-// ancestor's back cover or booklet would be misleading for a descendant. An empty
-// role means front. size selects the output: a non-positive size returns the stored
+// release_group -> artist -> genre; a book has its own cover and nothing past it) and
+// answers from the first level that has a front cover; every other role resolves at
+// the requested level alone, since an ancestor's back cover or booklet would be
+// misleading for a descendant. An empty role means front. size selects the output: a non-positive size returns the stored
 // source exactly, and a positive size is rounded up to a ladder rung (art.Rung) and
 // answered there, with an image the caller can draw, scaled to fit a square box of that
 // side when the source is larger and re-encoded at its own size when the source already
@@ -1285,6 +1285,11 @@ func (s *Store) episodeArtChain(ctx context.Context, pid model.PID) ([]artLevel,
 // artist -> genre. The artist level is the release group's primary artist, falling
 // back to the track's album artist then artist; the genre level is the item's first
 // genre.
+//
+// A book's chain is its own cover alone (the 'track' slot keyed by the item id). An
+// author's picture is a portrait and a genre's a category tile, neither of them a book
+// jacket, so a coverless book answers NotFound and a host draws its own placeholder; the
+// author's picture stays reachable through the author's artist entity.
 func (s *Store) trackArtChain(ctx context.Context, pid model.PID) ([]artLevel, error) {
 	const op = "store.ResolveArt"
 	var itemID int64
@@ -1302,21 +1307,7 @@ func (s *Store) trackArtChain(ctx context.Context, pid model.PID) ([]artLevel, e
 	}
 
 	chain := []artLevel{{string(model.ArtTrack), itemID}}
-	// A book stores its cover at the item level (the 'track' art_map slot, keyed by
-	// the item id), then falls back to its author artist and first genre. It has no
-	// album/release-group rungs, so resolve it directly and return.
 	if kind == string(model.KindBook) {
-		var authorID sql.NullInt64
-		if err := s.read.QueryRowContext(ctx,
-			"SELECT author_id FROM book WHERE item_id = ?", itemID).Scan(&authorID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if authorID.Valid {
-			chain = append(chain, artLevel{string(model.ArtArtist), authorID.Int64})
-		}
-		if gid := s.firstItemGenre(ctx, itemID); gid != 0 {
-			chain = append(chain, artLevel{string(model.ArtGenre), gid})
-		}
 		return chain, nil
 	}
 	var rgID, primaryArtistID int64

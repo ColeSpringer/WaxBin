@@ -8,7 +8,7 @@ type Book struct {
 	ItemID      int64
 	Subtitle    string
 	Author      string   // primary author display
-	AuthorSort  string   // sort key for the primary author
+	AuthorSort  string   // the primary author's sort spelling as stated, "" when none
 	Authors     []string // all authors, primary first (role=author contributors)
 	Narrators   []string // narrators (role=narrator contributors)
 	Narrator    string   // joined narrator display

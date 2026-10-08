@@ -17,6 +17,7 @@ import (
 type bookSpec struct {
 	path, essence, content string
 	title, author          string
+	authorSort             string // the sort spelling the file states, empty when none
 	narrators              []string
 	series, seq            string
 	asin, isbn, edition    string
@@ -62,7 +63,7 @@ func bookSpecInput(libID int64, s bookSpec) model.PutScannedBookInput {
 			SortKey: model.SortKey(s.title), IdentityKey: key,
 		},
 		Book: model.Book{
-			Author: s.author, AuthorSort: model.SortKey(s.author), Authors: []string{s.author},
+			Author: s.author, AuthorSort: s.authorSort, Authors: []string{s.author},
 			Narrators: s.narrators, Series: s.series, SeriesSeq: s.seq,
 			ASIN: s.asin, ISBN: s.isbn, Edition: s.edition, MBID: s.mbid, Year: s.year,
 			Publisher: s.publisher, Genres: s.genres, Genre: genre,

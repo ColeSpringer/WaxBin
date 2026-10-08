@@ -571,6 +571,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return l.MergeMany(ctx, model.MergeEntity(p.EntityType), model.PID(p.Survivor), losers)
 		},
+		proxy.MethodUnfoldEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.UnfoldEntityParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.UnfoldEntity(ctx, model.MergeEntity(p.EntityType), p.Keys...)
+		},
 		proxy.MethodMarkMissing: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.MarkMissingParams](raw)
 			if err != nil {
@@ -909,6 +916,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			pid, err := l.RunOrganize(ctx, q, OrganizeOptions{ProfileName: p.Profile})
+			if err != nil {
+				return nil, err
+			}
+			return proxy.JobStartResult{JobPID: string(pid)}, nil
+		},
+		proxy.MethodRunOrganizeUndo: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.OrganizeUndoParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			pid, err := l.RunOrganizeUndo(ctx, model.PID(p.JobPID))
 			if err != nil {
 				return nil, err
 			}

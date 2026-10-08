@@ -1448,3 +1448,41 @@ func TestLibraryFieldOperators(t *testing.T) {
 		}
 	}
 }
+
+// TestARestoredBookCopyStandsForNoTrack: a copy of a single-file book, trashed while the
+// book stood, stands for nothing once the book's file is carved into a cue rip whose
+// opening track carries on the book's pid: the trash journal names a book, and a track
+// holds that pid now, so a copy put back by hand is read as its own tags say.
+func TestARestoredBookCopyStandsForNoTrack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib, root := openCopyStore(t)
+	whole, spare := filepath.Join(root, "book", "tome.wav"), filepath.Join(root, "spare", "tome.wav")
+	touch(t, whole)
+	touch(t, spare)
+	book, err := st.PutScannedBook(ctx, bookIn(lib.ID, whole, "sha256:TOME", "Tome", "Author", "", "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := st.PutScannedBook(ctx, bookIn(lib.ID, spare, "sha256:TOME", "Tome", "Author", "", "", ""))
+	if err != nil || !cp.AttachedAsCopy {
+		t.Fatalf("the spare = %+v (err %v), want a copy of the book", cp, err)
+	}
+	if _, err := st.TrashFile(ctx, model.TrashFileInput{FilePID: cp.FilePID,
+		TrashPath: []byte(filepath.Join(root, ".trash", "tome.wav")), TrashDisplay: filepath.Join(root, ".trash", "tome.wav")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, whole, "sha256:TOME", "c-sha256:TOME", 360, [][2]int64{{0, 9}, {9, 27}})); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := st.ItemByPID(ctx, book.ItemPID); err != nil || !v.Virtual {
+		t.Fatalf("the book's pid after the carve = %+v (err %v), want the opening track", v, err)
+	}
+	standing, err := st.FileStanding(ctx, lib.ID, []byte(spare), "sha256:TOME")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if standing != nil && standing.ItemPID == book.ItemPID {
+		t.Errorf("the spare put back stands for %s, a %s, want nothing for a book's copy", standing.ItemPID, standing.Kind)
+	}
+}

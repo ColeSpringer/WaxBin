@@ -158,110 +158,67 @@ func TestRefreshSortKeysUsesCuratedOverride(t *testing.T) {
 	}
 }
 
-// TestRefreshSortKeysRefoldsTagDerivedColumns covers the columns whose input was a
-// sort tag the catalog does not keep.
-func TestRefreshSortKeysRefoldsTagDerivedColumns(t *testing.T) {
+// TestSortKeysAreRecomputedFromSpellings: db verify counts a key that does not fold from
+// its spelling (or, with none, from the name it sorts by), and the repair writes exactly
+// that key back, leaving every spelling, a locked one included, as it was.
+func TestSortKeysAreRecomputedFromSpellings(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	tr := putTrack(t, st, lib.ID, trackSpec{
-		path: "/lib/b/1.flac", essence: "e1", content: "c1", title: "One",
-		artist: "The Beatles", album: "Help", composer: "Antonín Dvořák",
-	})
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "The Beatles", artistSort: "Beatles, Thé", album: "A", composer: "Antonín Dvořák",
+	}).ItemPID
+	locked := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/2.flac", essence: "e2", content: "c2", title: "Two", artist: "B", album: "A",
+		composer: "Antonín Dvořák",
+	}).ItemPID
 	bk := putBook(t, st, lib.ID, bookSpec{
-		path: "/lib/bk/1.m4b", essence: "be1", content: "bc1", title: "Kafka on the Shore",
-		author: "Haruki Murakami", series: "Standalone", seq: "1",
-	})
-	// The keys the ASCII-only implementation wrote from the sort tags: lowercased and
-	// article-preserving, but unfolded.
-	for _, stmt := range []struct {
-		q    string
-		args []any
-	}{
-		{"UPDATE track SET artist_sort = ?, composer_sort = ? WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
-			[]any{"beatles, thé", "dvořák, antonín", string(tr.ItemPID)}},
-		{"UPDATE book SET author_sort = ? WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
-			[]any{"murakami, haruki ٢", string(bk.ItemPID)}},
+		path: "/lib/b/1.m4b", essence: "be1", content: "bc1", title: "Kafka on the Shore",
+		author: "Haruki Murakami", authorSort: "Murakami, Haruki ٢",
+	}).ItemPID
+	user := model.Attribution{Source: model.SourceUser}
+	if err := st.EditItemField(ctx, bk, "author_sort", "Murakami, Haruki ٢", user, model.LockOf(true), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EditItemField(ctx, locked, "composer_sort", "Dvořák, Antonín", user, model.LockOf(true), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"UPDATE track SET artist_sort_key = 'stale', composer_sort_key = 'stale'",
+		"UPDATE book SET author_sort_key = 'stale'",
 	} {
-		if _, err := st.write.ExecContext(ctx, stmt.q, stmt.args...); err != nil {
-			t.Fatalf("seed tag-derived key: %v", err)
+		if _, err := st.write.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
 		}
 	}
-
-	if _, err := st.RefreshSortKeys(ctx); err != nil {
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The comma form survives: a recompute from "The Beatles" would have written
-	// "beatles" and destroyed the tag.
-	if got := storedKey(t, st, "SELECT artist_sort FROM track"); got != "beatles, the" {
-		t.Errorf("artist_sort = %q, want %q", got, "beatles, the")
+	if rep.SortKeyDrift != 5 {
+		t.Fatalf("sort key drift = %d, want the five stale keys", rep.SortKeyDrift)
 	}
-	if got := storedKey(t, st, "SELECT composer_sort FROM track"); got != "dvorak, antonin" {
-		t.Errorf("composer_sort = %q, want %q", got, "dvorak, antonin")
+	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 5 {
+		t.Fatalf("RefreshSortKeys rewrote %d (err %v), want 5", n, err)
 	}
-	// A non-ASCII digit run comes out padded, the case Fold alone gets wrong.
-	if got, want := storedKey(t, st, "SELECT author_sort FROM book"), "murakami, haruki 0000000002"; got != want {
-		t.Errorf("author_sort = %q, want %q", got, want)
+	if sp, k := sortCols(t, st, tr, "track", "artist_sort", "artist_sort_key"); sp != "Beatles, Thé" || k != "beatles, the" {
+		t.Errorf("artist sort after the repair = (%q, %q)", sp, k)
 	}
-
+	if sp, k := sortCols(t, st, tr, "track", "composer_sort", "composer_sort_key"); sp != "" || k != model.SortKey("Antonín Dvořák") {
+		t.Errorf("composer sort after the repair = (%q, %q)", sp, k)
+	}
+	if sp, k := sortCols(t, st, locked, "track", "composer_sort", "composer_sort_key"); sp != "Dvořák, Antonín" || k != "dvorak, antonin" {
+		t.Errorf("locked composer sort after the repair = (%q, %q), want the spelling kept and its key", sp, k)
+	}
+	// A non-ASCII digit run comes out padded, and the locked spelling keeps its bytes.
+	if sp, k := sortCols(t, st, bk, "book", "author_sort", "author_sort_key"); sp != "Murakami, Haruki ٢" || k != "murakami, haruki 0000000002" {
+		t.Errorf("author sort after the repair = (%q, %q)", sp, k)
+	}
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 0 {
-		t.Errorf("second refold rewrote %d rows (err %v), want 0", n, err)
+		t.Errorf("second repair rewrote %d (err %v), want 0", n, err)
 	}
-}
-
-// TestRefreshSortKeysSkipsLockedSortFields proves a locked composer_sort or
-// author_sort is left alone: an explicit edit stores the literal string the user
-// typed, which refolding would rewrite.
-func TestRefreshSortKeysSkipsLockedSortFields(t *testing.T) {
-	t.Parallel()
-	st, lib := entityFixture(t)
-	ctx := context.Background()
-	locked := putTrack(t, st, lib.ID, trackSpec{
-		path: "/lib/b/1.flac", essence: "e1", content: "c1", title: "One",
-		artist: "A", album: "Help", composer: "Antonín Dvořák",
-	})
-	unlocked := putTrack(t, st, lib.ID, trackSpec{
-		path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two",
-		artist: "B", album: "Help", composer: "Antonín Dvořák",
-	})
-	bk := putBook(t, st, lib.ID, bookSpec{
-		path: "/lib/bk/1.m4b", essence: "be1", content: "bc1", title: "Kafka on the Shore",
-		author: "Haruki Murakami",
-	})
-
-	const userText = "Dvořák, Antonín"
-	if err := st.EditItemFields(ctx, locked.ItemPID,
-		map[string]string{"composer_sort": userText}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
-		t.Fatalf("edit composer_sort: %v", err)
-	}
-	if err := st.EditItemFields(ctx, bk.ItemPID,
-		map[string]string{"author_sort": userText}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
-		t.Fatalf("edit author_sort: %v", err)
-	}
-	if _, err := st.write.ExecContext(ctx,
-		"UPDATE track SET composer_sort = 'dvořák, antonín' WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
-		string(unlocked.ItemPID)); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := st.RefreshSortKeys(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := storedKey(t, st,
-		"SELECT composer_sort FROM track WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
-		string(locked.ItemPID)); got != userText {
-		t.Errorf("locked composer_sort = %q, want the user's %q untouched", got, userText)
-	}
-	if got := storedKey(t, st, "SELECT author_sort FROM book"); got != userText {
-		t.Errorf("locked author_sort = %q, want the user's %q untouched", got, userText)
-	}
-	if got := storedKey(t, st,
-		"SELECT composer_sort FROM track WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
-		string(unlocked.ItemPID)); got != "dvorak, antonin" {
-		t.Errorf("unlocked composer_sort = %q, want it refolded", got)
-	}
+	assertVerifyClean(t, st)
 }
 
 // TestRefreshSortKeysCoversAliasAndSeriesSeq covers the two columns that were in

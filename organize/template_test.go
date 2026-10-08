@@ -228,6 +228,16 @@ func TestAuthorSortStillRendersForACustomLayout(t *testing.T) {
 	if want := filepath.Join("edith piaf", "Standalone.m4b"); rel != want {
 		t.Errorf("custom authorsort rel = %q, want %q", rel, want)
 	}
+	// A stated sort spelling renders as its key too, so books with and without one file
+	// side by side.
+	rel, err = organize.RenderRelPath(p, &model.ItemView{Kind: model.KindBook, Title: "Earthsea", Artist: "Ursula K. Le Guin",
+		AuthorSort: "Le Guin, Ursula K.", DisplayPath: "/in/y.m4b"})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if want := filepath.Join("le guin, ursula k", "Earthsea.m4b"); rel != want {
+		t.Errorf("custom authorsort rel with a spelling = %q, want %q", rel, want)
+	}
 }
 
 // TestOrderBookMoves: a part moves only after the part on its new name has moved off it,

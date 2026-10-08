@@ -98,6 +98,9 @@ type Request struct {
 	// catalog or after an essence-algorithm change. It does not affect analysis,
 	// which re-runs on its own analysis_version.
 	Force bool
+	// Adoption carries a rebuild's run state across the libraries it scans in turn (see
+	// Adoption); nil keeps it for this library's walk alone.
+	Adoption *Adoption
 	// AdoptStampedPIDs makes the scan pass each file's WAXBIN_ITEM_PID tag to the
 	// store as a preferred item PID, so a rebuild restores original identities. The
 	// store adopts it only when creating a new item and only when unambiguous. Off for
@@ -250,7 +253,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		return res, nil
 	}
 	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
-		folders: map[string]*folderState{}}
+		folders: map[string]*folderState{}, adoption: req.Adoption}
+	if sc.adopt && sc.adoption == nil {
+		sc.adoption = &Adoption{}
+	}
 
 	// Preload the scope's file index once, so the walk fast-paths an unchanged file
 	// (size+mtime match) in memory and reconciles vanished ones at end-of-walk, with
@@ -372,6 +378,7 @@ type scanCtx struct {
 	index         map[string]model.ScopedFile // path -> known file; entries deleted as visited
 	force         bool                        // bypass the fast-path (re-hash everything)
 	adopt         bool                        // pass WAXBIN_ITEM_PID hints to the store (rebuild)
+	adoption      *Adoption                   // the rebuild's run state, set when adopt is
 	preserveLocks bool                        // keep user-locked fields from being re-derived from tags
 	cache         *artCache
 	promoted      []model.PromotedFile  // alternates a write promoted, re-read as the scan ends
@@ -725,10 +732,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		meta.PromoteBookFields(&tags)
 	}
 
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		rel = filepath.Base(path)
-	}
+	rel := pathx.RelUnder(root, path)
 
 	file := model.File{
 		Path:        []byte(path),
@@ -920,6 +924,11 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if err != nil {
 		return err
 	}
+	if sc.adopt && len(rip) == 0 {
+		if err := s.settleAdoption(ctx, sc, out, adoptedPID(sc, fm)); err != nil {
+			return err
+		}
+	}
 	sc.promoted = append(sc.promoted, out.Promoted...)
 	sc.last = out
 	counted := countOutcome(res, out)
@@ -1036,6 +1045,60 @@ func folderNames(tags *model.Tags, rel string) []string {
 	return []string{"artist", "album"}
 }
 
+// Adoption is a rebuild's run state: the items it made under a fresh pid, because the
+// first of their files it read carried no stamp (or one another item held), so that a
+// stamped file the walk reaches later can hand such an item the pid it carries. Only an
+// item this run made is ever given one, since its fresh pid is known to nothing outside
+// the catalog yet. The zero value is ready.
+type Adoption struct {
+	fresh map[model.PID]bool
+}
+
+// settleAdoption records an item a put made under a fresh pid, or gives one the stamp of
+// the file that just joined it, so a rebuilt item keeps its stamped identity whichever of
+// its files the walk read first. A stamp another item holds changes nothing. The folder
+// rule's walk state learns the new pid too, so a book stays one book to it.
+func (s *Scanner) settleAdoption(ctx context.Context, sc *scanCtx, out *model.ScanItemResult, stamp model.PID) error {
+	a := sc.adoption
+	switch {
+	case out.ItemCreated && out.ItemPID != stamp:
+		if a.fresh == nil {
+			a.fresh = map[model.PID]bool{}
+		}
+		a.fresh[out.ItemPID] = true
+	case !out.ItemCreated && stamp != "" && a.fresh[out.ItemPID]:
+		adopted, err := s.cat.AdoptItemPID(ctx, out.ItemPID, stamp)
+		if err != nil || !adopted {
+			return err
+		}
+		delete(a.fresh, out.ItemPID)
+		sc.repid(out.ItemPID, stamp)
+		out.ItemPID = stamp
+	}
+	return nil
+}
+
+// repid renames an item in the folder states the walk holds.
+func (sc *scanCtx) repid(from, to model.PID) {
+	for _, f := range sc.folders {
+		for i := range f.books {
+			if f.books[i].ItemPID == from {
+				f.books[i].ItemPID = to
+			}
+		}
+		for i := range f.catalog {
+			if f.catalog[i].ItemPID == from {
+				f.catalog[i].ItemPID = to
+			}
+		}
+		for i := range f.loose {
+			if f.loose[i].item == from {
+				f.loose[i].item = to
+			}
+		}
+	}
+}
+
 // adoptedPID returns the file's WAXBIN_ITEM_PID hint when the scan is in adopt mode
 // (rebuild), else empty. The store decides whether to actually adopt it.
 func adoptedPID(sc *scanCtx, fm *meta.FileMeta) model.PID {
@@ -1069,7 +1132,7 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 		chapterSource = "synthetic"
 	}
 
-	authorSort := model.SortKey(firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort, author))
+	authorSort := firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort)
 	return model.PutScannedBookInput{
 		LibraryID: libraryID,
 		File:      file,
@@ -1176,7 +1239,6 @@ func carvedTracks(essenceHash string, tags model.Tags, sheet *meta.CueSheet, win
 // fillRipTrack completes a virtual track from its own fields and the file's tags.
 func fillRipTrack(vt *model.VirtualTrack, tags model.Tags) {
 	vt.Item.Kind, vt.Item.State, vt.Item.SortKey = model.KindTrack, model.StatePresent, model.SortKey(vt.Item.Title)
-	vt.Track.ArtistSort = model.SortKey(vt.Track.Artist)
 	vt.Track.Genres = identity.SplitGenres(vt.Track.Genre)
 	// From the file's own tags: a .cue has no vocabulary for these, and without them a
 	// carved rip's album row is empty where a plain rip's is filled.
@@ -1253,10 +1315,9 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// trackFromTags builds the track subtype from the parsed tags. ArtistSort
-// prefers the tagged sort name and falls back to a generated key over the
-// primary (or album) artist, so collation is correct even when a file carries no
-// ARTISTSORT tag.
+// trackFromTags builds the track subtype from the parsed tags. The sort spellings are
+// the file's ARTISTSORT and COMPOSERSORT as written, empty when it has none; the store
+// folds the keys a sorted list compares from them, or from the names they stand for.
 func trackFromTags(tags model.Tags) model.Track {
 	// Tags.Artist is only the FIRST value, so a repeated ARTIST frame needs the whole
 	// list joined, or a credit write-back loses every artist after the first on the
@@ -1265,33 +1326,14 @@ func trackFromTags(tags model.Tags) model.Track {
 	if len(tags.Artists) > 1 {
 		artistDisplay = strings.Join(tags.Artists, ", ")
 	}
-	artistForSort := artistDisplay
-	if artistForSort == "" {
-		artistForSort = tags.AlbumArtist
-	}
-	// Generate every stored sort key through model.SortKey. A tagged ARTISTSORT is
-	// honored as input, but storing it raw would bypass normalization and sort
-	// inconsistently against generated keys.
-	sortInput := tags.ArtistSort
-	if sortInput == "" {
-		sortInput = artistForSort
-	}
-	artistSort := model.SortKey(sortInput)
-	// The composer sort mirrors the artist handling: a tagged COMPOSERSORT wins as
-	// input, else the composer itself, folded through SortKey either way (an empty
-	// composer yields an empty key).
-	composerSortInput := tags.ComposerSort
-	if composerSortInput == "" {
-		composerSortInput = tags.Composer
-	}
 	return model.Track{
 		Artist:           artistDisplay,
 		Artists:          creditArtists(tags),
-		ArtistSort:       artistSort,
+		ArtistSort:       tags.ArtistSort,
 		Album:            tags.Album,
 		AlbumArtist:      tags.AlbumArtist,
 		Composer:         tags.Composer,
-		ComposerSort:     model.SortKey(composerSortInput),
+		ComposerSort:     tags.ComposerSort,
 		Comment:          tags.Comment,
 		TrackNo:          tags.TrackNo,
 		TrackTotal:       tags.TrackTotal,

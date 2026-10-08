@@ -15,12 +15,35 @@ import (
 // book's timeline, the item it joins, which an item it leaves with no file folds into (0
 // for none), and whether the put honours locks.
 type departure struct {
-	file          int64
-	into          int64
-	lost          map[int64]lostEdge
-	books         map[int64]bool
-	spans         map[int64]partSpan
+	file  int64
+	into  int64
+	lost  map[int64]lostEdge
+	books map[int64]bool
+	spans map[int64]partSpan
+	// intoPID is the pid the put minted for into, empty when into stood already, so a rip's
+	// opening track folding into it may hand it its own (reconcileOrphansTx).
+	intoPID       model.PID
 	preserveLocks bool
+}
+
+// handPIDTx moves pid to onto the item holding from, unless another item holds to, and
+// reports whether it did. It is how an item keeps the identity a client knows across the
+// conversions between a whole file and a cue rip, and how a rebuild restores a stamp. A
+// from the change log has named goes with a delete there (fromLogged); the caller logs
+// to, as an update where a client knew it and as a create where none could.
+func handPIDTx(ctx context.Context, tx *sql.Tx, from, to model.PID, fromLogged bool) (bool, error) {
+	r, err := tx.ExecContext(ctx, `UPDATE playable_item SET pid = ?1 WHERE pid = ?2
+		AND NOT EXISTS (SELECT 1 FROM playable_item WHERE pid = ?1)`, string(to), string(from))
+	if err != nil {
+		return false, err
+	}
+	if n, err := r.RowsAffected(); err != nil || n == 0 {
+		return false, err
+	}
+	if fromLogged {
+		return true, appendChange(ctx, tx, "item", from, model.OpDelete)
+	}
+	return true, nil
 }
 
 // departingTx reads the edges a file holds before a link moves it to into, and its place
@@ -71,10 +94,13 @@ func (d departure) sources(item int64) []int64 {
 
 // unfinishForArrivalTx keeps a book finished, as a part joins it from the items in from,
 // only for a listener who finished one of them: the book anyone else finished did not hold
-// the part.
+// the part. A part new to the catalog (from empty) comes from no one, so the book is
+// finished for no one.
 func unfinishForArrivalTx(ctx context.Context, tx *sql.Tx, bookID int64, from []int64, now int64) error {
 	if len(from) == 0 {
-		return nil
+		_, err := tx.ExecContext(ctx, `UPDATE play_state SET finished = 0, played_changed_at = MAX(COALESCE(played_changed_at, 0), ?)
+			WHERE item_id = ? AND finished = 1`, now, bookID)
+		return err
 	}
 	args := []any{now, bookID}
 	for _, id := range from {
@@ -96,14 +122,70 @@ type partSpan struct {
 	last           bool
 }
 
-// inside places a position within the part into the book's timeline, a place on or past
-// the part's end at its last moment, so it stays with the part it came from. A part of
-// unknown length takes the place as it is.
-func (s partSpan) inside(pos int64) int64 {
-	if s.length <= 0 {
-		return s.offset + pos
+// inside places an offset into the span on its timeline, kept inside the span (clamp), so
+// it stays with the part or window it came from.
+func (s partSpan) inside(off int64) int64 {
+	return s.offset + s.clamp(off)
+}
+
+// within is the offset into the span of a place on its timeline, kept inside the span.
+func (s partSpan) within(pos int64) int64 {
+	return s.clamp(pos - s.offset)
+}
+
+// clamp keeps an offset into the span inside it: a place before it at its start, and one
+// on or past its end at its last moment. A span of unknown length takes the place as it is.
+func (s partSpan) clamp(off int64) int64 {
+	off = max(off, 0)
+	if s.length > 0 {
+		off = min(off, s.length-1)
 	}
-	return s.offset + min(pos, s.length-1)
+	return off
+}
+
+// spanAt returns the index of the span that holds a place on a timeline whose spans run in
+// order: the last that starts at or before it, a place where a span starts being that
+// span's, and the first for a place before them all.
+func spanAt(spans []partSpan, pos int64) int {
+	held := 0
+	for i, s := range spans {
+		if s.offset <= pos {
+			held = i
+		}
+	}
+	return held
+}
+
+// place is a listener's resume position on an item (key the user, with the times it was
+// set at) or a bookmark on it (key its id).
+type place struct{ key, pos, at, updated int64 }
+
+// itemPlacesTx reads an item's places: each resume position a listener set and each
+// bookmark. Rows are drained before the caller writes, since the single write connection
+// cannot interleave a query and an exec.
+func itemPlacesTx(ctx context.Context, tx *sql.Tx, itemID int64) (states, marks []place, err error) {
+	read := func(q string) ([]place, error) {
+		rows, err := tx.QueryContext(ctx, q, itemID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []place
+		for rows.Next() {
+			var p place
+			if err := rows.Scan(&p.key, &p.pos, &p.at, &p.updated); err != nil {
+				return nil, err
+			}
+			out = append(out, p)
+		}
+		return out, rows.Err()
+	}
+	if states, err = read(`SELECT user_id, position_ms, last_progress_at, updated_at FROM play_state
+		WHERE item_id = ? AND last_progress_at IS NOT NULL`); err != nil {
+		return nil, nil, err
+	}
+	marks, err = read("SELECT id, position_ms, 0, 0 FROM bookmark WHERE item_id = ?")
+	return states, marks, err
 }
 
 // partSpanTx returns the span of the part a file holds in a book, or for an alternate the
@@ -119,37 +201,135 @@ func partSpanTx(ctx context.Context, tx *sql.Tx, bookID, fileID int64) (partSpan
 	if err != nil {
 		return partSpan{}, false, err
 	}
-	parts, err := bookPartsQ(ctx, tx, bookID)
+	parts, err := bookTimelineTx(ctx, tx, bookID, nil)
 	if err != nil {
 		return partSpan{}, false, err
+	}
+	for _, p := range parts {
+		if p.fileID == fileID || (role == alternateRole && p.position == pos) {
+			return p.span, true, nil
+		}
+	}
+	return partSpan{}, false, nil
+}
+
+// timelinePart is one part of a book on its timeline.
+type timelinePart struct {
+	fileID   int64
+	position int
+	span     partSpan
+}
+
+// partWas is where a part stood on its book's timeline before a read moved or resized it:
+// its position and the length it ran.
+type partWas struct {
+	position int
+	length   int64
+}
+
+// bookTimelineTx returns a book's parts in reading order, each with its span. A file in
+// was takes the position and length given there in place of its own, for the timeline as
+// it stood before a read changed them.
+func bookTimelineTx(ctx context.Context, tx *sql.Tx, bookID int64, was map[int64]partWas) ([]timelinePart, error) {
+	parts, err := bookPartsQ(ctx, tx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	if len(was) > 0 {
+		for i := range parts {
+			if w, ok := was[parts[i].fileID]; ok {
+				parts[i].Position = w.position
+			}
+		}
+		sortBookParts(parts)
 	}
 	extents := map[int64]int64{}
 	rows, err := tx.QueryContext(ctx, `SELECT file_id, MAX(MAX(start_ms, end_ms)) FROM chapter
 		WHERE book_item_id = ? GROUP BY file_id`, bookID)
 	if err != nil {
-		return partSpan{}, false, err
+		return nil, err
 	}
 	for rows.Next() {
 		var id, ext int64
 		if err := rows.Scan(&id, &ext); err != nil {
 			rows.Close()
-			return partSpan{}, false, err
+			return nil, err
 		}
 		extents[id] = ext
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return partSpan{}, false, err
+		return nil, err
 	}
+	out := make([]timelinePart, len(parts))
 	var off int64
 	for i, p := range parts {
 		length := max(p.DurationMS, extents[p.fileID])
-		if p.fileID == fileID || (role == alternateRole && p.Position == pos) {
-			return partSpan{offset: off, length: length, last: i == len(parts)-1}, true, nil
+		if w, ok := was[p.fileID]; ok {
+			length = w.length
 		}
+		out[i] = timelinePart{fileID: p.fileID, position: p.Position, span: partSpan{offset: off, length: length, last: i == len(parts)-1}}
 		off += length
 	}
-	return partSpan{}, false, nil
+	return out, nil
+}
+
+// chapterExtentTx is how far a part's chapters run on a book: its furthest chapter
+// start or end, which a part's length on the timeline takes when it passes the file's
+// duration (bookTimelineTx).
+func chapterExtentTx(ctx context.Context, tx *sql.Tx, bookID, fileID int64) (int64, error) {
+	var ext int64
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(MAX(start_ms, end_ms)), 0) FROM chapter
+		WHERE book_item_id = ? AND file_id = ?`, bookID, fileID).Scan(&ext)
+	return ext, err
+}
+
+// remapPlacesTx keeps a book's resume positions and bookmarks with their audio when a put
+// reorders or resizes its parts: each place keeps its offset into the part that held it,
+// at that part's start on the timeline after, inside its new length. It does nothing
+// unless the same parts stand either side and one of them moved or changed length, since a
+// part joining or leaving moves its places itself (shiftPositionsTx,
+// moveDepartedPositionsTx).
+func remapPlacesTx(ctx context.Context, tx *sql.Tx, bookID int64, before, after []timelinePart) error {
+	now := make(map[int64]partSpan, len(after))
+	for _, p := range after {
+		now[p.fileID] = p.span
+	}
+	moved := false
+	for _, p := range before {
+		a, ok := now[p.fileID]
+		if !ok {
+			return nil
+		}
+		moved = moved || a.offset != p.span.offset || a.length != p.span.length
+	}
+	if !moved || len(before) != len(after) {
+		return nil
+	}
+	spans := make([]partSpan, len(before))
+	for i, p := range before {
+		spans[i] = p.span
+	}
+	remap := func(pos int64) int64 {
+		p := before[spanAt(spans, pos)]
+		return now[p.fileID].inside(pos - p.span.offset)
+	}
+	states, marks, err := itemPlacesTx(ctx, tx, bookID)
+	if err != nil {
+		return err
+	}
+	for _, p := range states {
+		if _, err := tx.ExecContext(ctx, "UPDATE play_state SET position_ms = ? WHERE user_id = ? AND item_id = ?",
+			remap(p.pos), p.key, bookID); err != nil {
+			return err
+		}
+	}
+	for _, m := range marks {
+		if _, err := tx.ExecContext(ctx, "UPDATE bookmark SET position_ms = ? WHERE id = ?", remap(m.pos), m.key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // shiftPositionsTx moves the resume positions and bookmarks on an item at or past from by
@@ -228,16 +408,18 @@ func moveDepartedPositionsTx(ctx context.Context, tx *sql.Tx, bookID, into, file
 
 // foldItemIntoTx folds an item a put left with no file into the item the file joined (a
 // track whose file became a part of a book, a book whose one part joined another, a
-// track whose file became a copy of another recording), so what was done with it outlives
-// its pid. Each user's play state merges into the survivor's (foldPlayStateTx), the
+// track whose file became a copy of another recording, a rip's track whose file is one
+// item again), so what was done with it outlives its pid. Each user's play state merges
+// into the survivor's (foldPlayStateTx), the
 // custom tags a scan would keep come across (foldItemTagsTx), and the bookmarks, sessions,
 // queue and playlist entries and acquisition move across: a queue or playlist that already
 // holds the survivor drops the loser's entries instead, so a book made of three tracks is
 // listed once, and each playlist and queue changed is settled (entryHolders), here or
 // with the caller's batch. When the survivor is a book, a position or bookmark lands inside the file's
-// part (partSpan.inside). Only tracks and books fold, and the caller deletes the loser
-// afterwards.
-func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int64, preserveLocks bool, batch *entryHolders) error {
+// part (partSpan.inside), and a loser that played a window of the file (window, a rip's
+// track) lands its places inside that window. Only tracks and books fold, and the caller
+// deletes the loser afterwards.
+func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int64, window partSpan, preserveLocks bool, batch *entryHolders) error {
 	var lkind, skind string
 	if err := tx.QueryRowContext(ctx, `SELECT (SELECT kind FROM playable_item WHERE id = ?),
 		(SELECT kind FROM playable_item WHERE id = ?)`, loser, survivor).Scan(&lkind, &skind); err != nil {
@@ -254,8 +436,24 @@ func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int
 			return err
 		}
 	}
+	if window != (partSpan{}) {
+		// A window with an open end runs to the end of what holds it, the part or the file.
+		length := window.length
+		if length == 0 {
+			total := span.length
+			if !book {
+				if err := tx.QueryRowContext(ctx, "SELECT COALESCE(duration_ms, 0) FROM file WHERE id = ?", fileID).Scan(&total); err != nil {
+					return err
+				}
+			}
+			if total > window.offset {
+				length = total - window.offset
+			}
+		}
+		span = partSpan{offset: span.offset + window.offset, length: length, last: span.last}
+	}
 	offset := span.offset
-	if err := foldPlayStateTx(ctx, tx, loser, survivor, span, book); err != nil {
+	if err := foldPlayStateTx(ctx, tx, loser, survivor, span, book || window != (partSpan{})); err != nil {
 		return err
 	}
 	if err := foldItemTagsTx(ctx, tx, loser, survivor, skind, preserveLocks); err != nil {
@@ -272,6 +470,7 @@ func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int
 		q    string
 		args []any
 	}{
+		// partSpan.inside, set-based.
 		{`UPDATE bookmark SET item_id = ?, position_ms = ? + CASE WHEN ? > 0 THEN MIN(position_ms, ? - 1) ELSE position_ms END
 			WHERE item_id = ?`, []any{survivor, offset, span.length, span.length, loser}},
 		{"UPDATE play_session SET item_id = ? WHERE item_id = ?", []any{survivor, loser}},
@@ -361,18 +560,19 @@ func (r *playRow) fields() []any {
 }
 
 // foldPlayStateTx merges each user's play state on loser into theirs on survivor. Plays
-// add up and played holds if either was played. Into a book, a star comes across whenever
-// the book is not starred, since a book is starred when any of its parts was, with the
-// later of the two change stamps so a replayed unstar older than the book's own cannot
-// undo it, and an unstar's stamp only where the book has none; the rating comes across
-// with its change stamp only where the book has none, the way an entity merge folds it
-// (repointEntityPlayState). Into a track, which held the same recording as the loser, the
+// add up and played holds if either was played. A part of the survivor (a book's part, or
+// a rip's track folding into its file) brings its star whenever the survivor is not
+// starred, since the whole is starred when any of its parts was, with the later of the two
+// change stamps so a replayed unstar older than the survivor's own cannot undo it, and an
+// unstar's stamp only where the survivor has none; its rating comes across with its change
+// stamp only where the survivor has none, the way an entity merge folds it
+// (repointEntityPlayState). Into a track that held the same recording as the loser, the
 // later change of each wins. The resume position follows the latest listening: the
 // loser's comes across when the survivor has none or an older one, placed by span, the
-// file's part in a survivor that is a book, always inside that part: a part finished
-// leaves the listener at its last moment, so a part that joins after it is heard next. A
-// part finished is not its book finished, so finished comes across only into a track.
-func foldPlayStateTx(ctx context.Context, tx *sql.Tx, loser, survivor int64, span partSpan, book bool) error {
+// part's place in the survivor, always inside that part: a part finished leaves the
+// listener at its last moment, so the part after it is heard next. A part finished is not
+// its whole finished, so finished comes across only from a whole recording.
+func foldPlayStateTx(ctx context.Context, tx *sql.Tx, loser, survivor int64, span partSpan, part bool) error {
 	rows, err := tx.QueryContext(ctx, "SELECT user_id, "+playRowCols+" FROM play_state WHERE item_id = ?", loser)
 	if err != nil {
 		return err
@@ -398,12 +598,12 @@ func foldPlayStateTx(ctx context.Context, tx *sql.Tx, loser, survivor int64, spa
 		lo := u.row
 		switch {
 		case !lo.lastProgress.Valid:
-		case book && lo.finished == 1:
+		case part && lo.finished == 1:
 			lo.position = span.inside(span.length)
 		default:
 			lo.position = span.inside(lo.position)
 		}
-		if book {
+		if part {
 			lo.finished = 0
 		}
 		var m playRow
@@ -421,7 +621,7 @@ func foldPlayStateTx(ctx context.Context, tx *sql.Tx, loser, survivor int64, spa
 			m.playedChanged = laterStamp(m.playedChanged, lo.playedChanged)
 			m.lastPlayed = laterStamp(m.lastPlayed, lo.lastPlayed)
 			m.updated = max(m.updated, lo.updated)
-			if book {
+			if part {
 				if !m.rating.Valid && !m.ratingChanged.Valid {
 					m.rating, m.ratingChanged = lo.rating, lo.ratingChanged
 				}
@@ -454,6 +654,53 @@ func foldPlayStateTx(ctx context.Context, tx *sql.Tx, loser, survivor int64, spa
 			u.user, survivor, m.position, m.played, m.finished, m.count, m.rating, m.starredAt, m.lastPlayed,
 			m.lastProgress, m.ratingChanged, m.starredChanged, m.playedChanged, m.updated); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// finishedByTx returns the users who finished every one of items, each with the latest
+// stamp their finishes carry.
+func finishedByTx(ctx context.Context, tx *sql.Tx, items []int64) (map[int64]sql.NullInt64, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(items)+1)
+	for _, id := range items {
+		args = append(args, id)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT user_id, MAX(played_changed_at) FROM play_state
+		WHERE finished = 1 AND item_id IN `+placeholders(len(items))+` GROUP BY user_id HAVING COUNT(*) = ?`,
+		append(args, len(items))...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]sql.NullInt64{}
+	for rows.Next() {
+		var user int64
+		var stamp sql.NullInt64
+		if err := rows.Scan(&user, &stamp); err != nil {
+			return nil, err
+		}
+		out[user] = stamp
+	}
+	return out, rows.Err()
+}
+
+// finishTx marks each of items played and finished for the users in by, with the stamp
+// their finish carried where it is the later one.
+func finishTx(ctx context.Context, tx *sql.Tx, items []int64, by map[int64]sql.NullInt64, now int64) error {
+	for user, stamp := range by {
+		for _, id := range items {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO play_state(user_id, item_id, played, finished, played_changed_at, updated_at)
+				VALUES (?, ?, 1, 1, ?, ?)
+				ON CONFLICT(user_id, item_id) DO UPDATE SET played = 1, finished = 1, updated_at = excluded.updated_at,
+					played_changed_at = CASE WHEN excluded.played_changed_at > COALESCE(play_state.played_changed_at, 0)
+						THEN excluded.played_changed_at ELSE play_state.played_changed_at END`,
+				user, id, stamp, now); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

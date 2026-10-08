@@ -189,14 +189,19 @@ func helpTopic(from *cobra.Command, path []string) error {
 }
 
 // refuseUnknownSubcommands makes the root and every command group answer an unknown
-// subcommand with a usage error and print their help when named alone. Cobra refuses
+// subcommand with a usage error and print their help when named alone (a group that also
+// runs on its own runs instead, runnableGroup). Cobra refuses
 // an unknown command at the root with a plain error and shows a group's help before it
 // reads the arguments, so `waxbin playlist typo` printed help and exited 0.
 func refuseUnknownSubcommands(cmd *cobra.Command) {
 	for _, c := range cmd.Commands() {
 		refuseUnknownSubcommands(c)
 	}
-	if !cmd.HasSubCommands() || cmd.Runnable() {
+	if !cmd.HasSubCommands() {
+		return
+	}
+	if cmd.Runnable() {
+		runnableGroup(cmd)
 		return
 	}
 	cmd.Args = cobra.ArbitraryArgs
@@ -209,15 +214,58 @@ func refuseUnknownSubcommands(cmd *cobra.Command) {
 		if args[0] == "help" {
 			return helpTopic(c, args[1:])
 		}
-		if c.SuggestionsMinimumDistance <= 0 {
-			c.SuggestionsMinimumDistance = 2 // cobra's own default for the root
-		}
-		msg := fmt.Sprintf("unknown command %q", args[0])
-		if near := c.SuggestionsFor(args[0]); len(near) > 0 {
-			msg += " (did you mean " + strings.Join(near, " or ") + "?)"
-		}
-		return waxerr.New(waxerr.CodeInvalid, commandOp(c), msg)
+		return unknownCommand(c, args[0])
 	}
+}
+
+// runnableGroup gives a command that runs on its own and holds subcommands (organize, art)
+// the group conventions: `help` answers as it does under any group, and so does a word,
+// as an unknown command, where the command takes no word of its own; one that takes an
+// argument (art's item) keeps its own refusals.
+func runnableGroup(cmd *cobra.Command) {
+	declared, run := cmd.Args, cmd.RunE
+	if run == nil {
+		plain := cmd.Run
+		run = func(c *cobra.Command, args []string) error {
+			plain(c, args)
+			return nil
+		}
+		cmd.Run = nil
+	}
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if len(args) > 0 && args[0] == "help" {
+			return nil
+		}
+		if declared == nil {
+			return nil
+		}
+		if err := declared(c, args); err != nil {
+			if len(args) > 0 && declared(c, args[:1]) != nil {
+				return unknownCommand(c, args[0])
+			}
+			return err
+		}
+		return nil
+	}
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		if len(args) > 0 && args[0] == "help" {
+			return helpTopic(c, args[1:])
+		}
+		return run(c, args)
+	}
+}
+
+// unknownCommand is the usage error for a word no subcommand of c answers, naming the near
+// misses.
+func unknownCommand(c *cobra.Command, word string) error {
+	if c.SuggestionsMinimumDistance <= 0 {
+		c.SuggestionsMinimumDistance = 2 // cobra's own default for the root
+	}
+	msg := fmt.Sprintf("unknown command %q", word)
+	if near := c.SuggestionsFor(word); len(near) > 0 {
+		msg += " (did you mean " + strings.Join(near, " or ") + "?)"
+	}
+	return waxerr.New(waxerr.CodeInvalid, commandOp(c), msg)
 }
 
 // loadConfig resolves configuration with flag > env > json > default precedence

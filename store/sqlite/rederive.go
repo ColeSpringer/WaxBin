@@ -275,7 +275,7 @@ var bookEntityFields = map[string]bool{"series": true, "credit.translator": true
 
 // bookFieldValue reads one bookScanFields value off b. A stored book (loadBookForEditTx)
 // carries its columns as written; a scanned one is derived the way upsertBook derives
-// what it writes, the author display from the split authors and an empty sort from that.
+// what it writes, the author display from the split authors.
 func bookFieldValue(field string, b model.Book, stored bool) string {
 	switch field {
 	case "author":
@@ -284,10 +284,7 @@ func bookFieldValue(field string, b model.Book, stored bool) string {
 		}
 		return bookAuthorDisplay(b)
 	case "author_sort":
-		if stored || b.AuthorSort != "" {
-			return b.AuthorSort
-		}
-		return model.SortKey(bookAuthorDisplay(b))
+		return b.AuthorSort
 	case "narrator":
 		return b.Narrator
 	case "series":

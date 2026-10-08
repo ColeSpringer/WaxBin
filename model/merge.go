@@ -55,4 +55,19 @@ type MergeReport struct {
 	// Children is the number of first-class child rows (tracks, albums, books, or
 	// item_genre links) re-pointed from the loser onto the survivor.
 	Children int
+	// Folds lists the keys the merge now folds into the survivor (EntityFold.Key), so a
+	// file still spelled the loser's way resolves to it.
+	Folds []string
+}
+
+// EntityFold is one key a merge retired, still naming the entity it folded into: a scan
+// resolving that key reaches the entity instead of minting the loser the merge did away
+// with. Key is what the type's resolver looks up, the match key (a genre's with its facet
+// before it, "genre:hip hop").
+type EntityFold struct {
+	EntityType MergeEntity
+	Key        string
+	EntityPID  PID
+	EntityName string
+	CreatedAt  int64 // unix nanoseconds
 }

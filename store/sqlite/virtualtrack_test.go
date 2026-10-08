@@ -12,7 +12,6 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/store/sqlite"
-	"github.com/colespringer/waxbin/waxerr"
 )
 
 // vtrackInput builds a virtual-track scan input for one single-file rip: each window
@@ -326,7 +325,8 @@ func TestVirtualTrackWindowRoundTripsExactly(t *testing.T) {
 }
 
 // TestVirtualTracksConvertFromWholeFile: a whole-file track scanned before the .cue
-// existed is detached and deleted when the file is re-cataloged as virtual tracks.
+// existed is detached when the file is re-cataloged as virtual tracks, and carries on as
+// the track that opens the file.
 func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -346,8 +346,8 @@ func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
 		t.Fatalf("put virtual tracks: %v", err)
 	}
 
-	if _, err := st.ItemByPID(ctx, wholePID); !waxerr.Is(err, waxerr.CodeNotFound) {
-		t.Fatalf("whole-file track should be gone after conversion, got %v", err)
+	if v, err := st.ItemByPID(ctx, wholePID); err != nil || !v.Virtual || v.StartMS != 0 {
+		t.Fatalf("the whole-file track's pid after conversion = %+v (err %v), want the opening virtual track", v, err)
 	}
 	items := vtItems(t, st)
 	if len(items) != 2 {
@@ -889,5 +889,64 @@ func TestRipRelinkFollowsAChangedWindow(t *testing.T) {
 	after := vtItems(t, st)
 	if len(after) != 3 || after[0].PID != before[0].PID || after[1].PID != before[1].PID || after[2].PID == before[2].PID {
 		t.Errorf("tracks = %v, want the first two kept and the third replaced", after)
+	}
+}
+
+// TestAWholeFileBecomingARipCopyFoldsIntoItsTracks: a byte copy of a rip read as one
+// whole-file track before its sheet arrived, then read with the sheet, backs the rip's
+// tracks as alternates; the whole-file item folds into them rather than staying present
+// with no file, its star landing on the opening track.
+func TestAWholeFileBecomingARipCopyFoldsIntoItsTracks(t *testing.T) {
+	t.Parallel()
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, f := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")
+	for _, p := range []string{g, f} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windows := [][2]int64{{0, 300}, {300, 600}}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, g, "sha256:VE", "sha256:G", 8000, windows)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := st.PutScannedTrack(ctx, input(lib.ID, f, "sha256:VE", "sha256:F", "Whole"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := r.ItemPID
+	if _, err := st.SetStar(ctx, "", whole, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, f, "sha256:VE", "sha256:F", 8000, windows)); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := st.ItemByPID(ctx, whole); err == nil {
+		t.Fatalf("the whole-file item is still in the catalog (state %s, file %q), want it folded into the rip", v.State, v.FilePID)
+	}
+	items := vtItems(t, st)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want the rip's two tracks", len(items))
+	}
+	for _, it := range items {
+		ps, err := st.PlayStateFor(ctx, "", it.PID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := it.StartMS == 0; ps.Starred != want {
+			t.Errorf("track at %d ms starred = %v, want %v (the star goes to the opening track)", it.StartMS, ps.Starred, want)
+		}
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() {
+		t.Errorf("verify = %+v (err %v), want consistent", rep, err)
 	}
 }

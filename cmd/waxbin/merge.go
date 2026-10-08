@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -15,18 +16,18 @@ func newMergeCmd(g *globals) *cobra.Command {
 		Long: "Collapses one or more loser entities onto the survivor, re-pointing their " +
 			"tracks, albums, books, genre links, and contributor credits (so play state and " +
 			"provenance ride along), unioning MBID/enrichment state, recomputing rollups, " +
-			"and deleting the losers. The survivor keeps its public id. Use `audit` to find " +
-			"duplicate artists/albums/genres to merge. Two albums apart only by their " +
-			"folder or their tags split again on the next scan or edit that re-reads " +
-			"their members, since an album's identity comes from its files; tag the " +
-			"files alike and keep them in one folder (organize does in a managed " +
-			"library) to keep the merge.",
+			"and deleting the losers. The survivor keeps its public id, and each loser's key " +
+			"folds into it, so a file still spelled the loser's way resolves to the survivor " +
+			"when it is read again (`entity folds` lists the keys, `entity unfold` forgets " +
+			"one); a `db reset` starts the catalog over from the files, folds and all, so tag " +
+			"them alike to keep a merge through one. Use `audit` to find duplicate artists/albums/genres to merge. An " +
+			"album's key holds its folder, so merged albums stay merged while their files keep " +
+			"their folders and tags; a retag or a move to another folder can split them again.",
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			et := model.MergeEntity(args[0])
-			if !et.Valid() {
-				return waxerr.New(waxerr.CodeInvalid, "merge",
-					"unknown entity type "+args[0]+" (want artist|release_group|album|genre|series)")
+			et, err := parseMergeEntity("merge", args[0])
+			if err != nil {
+				return err
 			}
 			survivor := model.PID(args[1])
 			// Dedup the losers and drop any that equal the survivor: each merge deletes
@@ -58,8 +59,8 @@ func newMergeCmd(g *globals) *cobra.Command {
 			var total int
 			for _, r := range reports {
 				total += r.Children
-				fmt.Fprintf(w, "merged %s %s -> %s (%d children re-pointed)\n",
-					r.EntityType, r.Loser, r.Survivor, r.Children)
+				fmt.Fprintf(w, "merged %s %s -> %s (%d children re-pointed; folds %s)\n",
+					r.EntityType, r.Loser, r.Survivor, r.Children, strings.Join(quoteKeys(r.Folds), ", "))
 			}
 			fmt.Fprintf(w, "merged %d %s(s) into %s; %d children re-pointed\n",
 				len(reports), et, survivor, total)
@@ -70,15 +71,14 @@ func newMergeCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
-// mergeNote is the caveat a merge prints: the catalog holds the merge, and files that
-// disagree with it can bring a merged entity back when they are read again. An album's
-// identity takes its folder as well as its tags.
+// mergeNote is the caveat a merge prints. The loser's key folds into the survivor, so the
+// spelling the merge did away with keeps resolving to it while the catalog holds the fold;
+// a db reset starts over from the files, and an album's key holds its folder.
 func mergeNote(et model.MergeEntity) string {
-	const reread = "when they are read again after a retag, move or content change, or by a rebuild"
 	if et == model.MergeAlbum {
-		return "note: merged albums can split again " + reread + ", unless their files are tagged alike and share one folder"
+		return "note: merged albums stay merged while their files keep their folders and tags; a retag, a move to another folder or a db reset can split them again"
 	}
-	return "note: files still tagged with a merged spelling can split it off again " + reread + "; tag them alike to keep the merge"
+	return "note: files still spelled the loser's way resolve to the survivor, until a db reset starts the catalog over from them; tag them alike to keep the merge through one"
 }
 
 // dedupLosers returns the distinct loser PIDs in input order, excluding any equal
@@ -98,10 +98,11 @@ func dedupLosers(args []string, survivor model.PID) []model.PID {
 }
 
 type mergeView struct {
-	EntityType string `json:"entityType"`
-	Survivor   string `json:"survivor"`
-	Loser      string `json:"loser"`
-	Children   int    `json:"children"`
+	EntityType string   `json:"entityType"`
+	Survivor   string   `json:"survivor"`
+	Loser      string   `json:"loser"`
+	Children   int      `json:"children"`
+	Folds      []string `json:"folds,omitempty"`
 }
 
 func toMergeViews(reports []*model.MergeReport) []mergeView {
@@ -112,6 +113,7 @@ func toMergeViews(reports []*model.MergeReport) []mergeView {
 			Survivor:   string(r.Survivor),
 			Loser:      string(r.Loser),
 			Children:   r.Children,
+			Folds:      r.Folds,
 		})
 	}
 	return out

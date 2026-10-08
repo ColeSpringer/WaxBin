@@ -36,24 +36,27 @@ type trackSpec struct {
 	title, artist, albumArt string
 	// artists is the split credit the scanner supplies alongside the raw artist
 	// string. Leaving it nil is a pre-split caller, which the store re-splits.
-	artists               []string
-	preserveLocks         bool
-	album, genre          string
-	composer              string
-	year                  int
-	bpm                   int
-	discTotal             int
-	trackNo, discNo       int
-	durationMS            int64
-	compilation           bool
-	mbRecording           string
-	mbReleaseGroup        string
-	mbRelease             string
-	mbArtists             []string
-	mbAlbumArtists        []string
-	isrc                  string
-	barcode, label, catNo string
-	media, country        string
+	artists       []string
+	preserveLocks bool
+	album, genre  string
+	composer      string
+	// artistSort and composerSort are the sort spellings the file states (ARTISTSORT,
+	// COMPOSERSORT), empty when it states none.
+	artistSort, composerSort string
+	year                     int
+	bpm                      int
+	discTotal                int
+	trackNo, discNo          int
+	durationMS               int64
+	compilation              bool
+	mbRecording              string
+	mbReleaseGroup           string
+	mbRelease                string
+	mbArtists                []string
+	mbAlbumArtists           []string
+	isrc                     string
+	barcode, label, catNo    string
+	media, country           string
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
@@ -90,8 +93,8 @@ func trackSpecInput(libID int64, s trackSpec) model.PutScannedTrackInput {
 			SortKey: model.SortKey(s.title), IdentityKey: idKey,
 		},
 		Track: model.Track{
-			Artist: s.artist, Artists: s.artists, ArtistSort: model.SortKey(s.artist), Album: s.album,
-			AlbumArtist: s.albumArt, Composer: s.composer, ComposerSort: model.SortKey(s.composer),
+			Artist: s.artist, Artists: s.artists, ArtistSort: s.artistSort, Album: s.album,
+			AlbumArtist: s.albumArt, Composer: s.composer, ComposerSort: s.composerSort,
 			Genre:            s.genre,
 			Genres:           identity.SplitGenres(s.genre),
 			Year:             s.year,

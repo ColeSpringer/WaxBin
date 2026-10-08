@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,10 @@ func TestParseAge(t *testing.T) {
 		{"0d", 0},
 		{"36h", 36 * time.Hour},
 		{"90m", 90 * time.Minute},
+		// More days than a duration holds is the longest age, not one wrapped around to
+		// minutes (213504 days wrapped to about 25 of them).
+		{"213504d", math.MaxInt64},
+		{"9999999999d", math.MaxInt64},
 	} {
 		got, err := parseAge("trash empty", tc.in)
 		if err != nil || got != tc.want {

@@ -5,15 +5,20 @@
 -- isrc feeds audit. bpm is the tempo the file states, rounded to a whole number
 -- because that is what the MP4 tmpo atom stores. MusicBrainz ids live on the
 -- entity rows (artist/album/release_group .mbid); track.mbid is the recording
--- id when known.
+-- id when known. artist_sort and composer_sort are the sort spellings the file or an
+-- edit states, '' when none; each *_sort_key is what a sorted list compares, the
+-- spelling folded through model.SortKey or, with none, the name it sorts in place of
+-- (the artist, else the album artist; the composer).
 CREATE TABLE track (
   item_id      INTEGER PRIMARY KEY REFERENCES playable_item(id) ON DELETE CASCADE,
   artist       TEXT    NOT NULL DEFAULT '',
   artist_sort  TEXT    NOT NULL DEFAULT '',
+  artist_sort_key TEXT NOT NULL DEFAULT '',
   album        TEXT    NOT NULL DEFAULT '',
   album_artist TEXT    NOT NULL DEFAULT '',
   composer     TEXT    NOT NULL DEFAULT '',
   composer_sort TEXT   NOT NULL DEFAULT '',
+  composer_sort_key TEXT NOT NULL DEFAULT '',
   comment      TEXT    NOT NULL DEFAULT '',
   track_no     INTEGER,
   track_total  INTEGER,
@@ -29,7 +34,7 @@ CREATE TABLE track (
   album_artist_id INTEGER REFERENCES artist(id) ON DELETE SET NULL,
   album_id        INTEGER REFERENCES album(id)  ON DELETE SET NULL
 );
-CREATE INDEX track_artist          ON track(artist_sort);
+CREATE INDEX track_artist          ON track(artist_sort_key);
 CREATE INDEX track_album           ON track(album);
 CREATE INDEX track_artist_id       ON track(artist_id);
 CREATE INDEX track_album_artist_id ON track(album_artist_id);

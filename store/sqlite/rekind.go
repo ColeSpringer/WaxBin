@@ -172,7 +172,7 @@ func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID model.PID) (m
 			}
 		}
 		affected := newAffectedRollups()
-		if _, folded, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
+		if _, folded, _, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
@@ -235,9 +235,10 @@ func scanStanding(sc rowScanner) (*model.FileStanding, error) {
 }
 
 // trashStandingQ reads the standing of the item a file backed when the trash took it,
-// from the journal's newest active entry; %s names the column it matches.
+// from the journal's newest active entry, while its pid still names an item of the kind it
+// was; %s names the column it matches.
 const trashStandingQ = `SELECT t.orig_path, '', ` + standingItemCols + `
-	FROM trash t JOIN playable_item pi ON pi.pid = t.item_pid
+	FROM trash t JOIN playable_item pi ON pi.pid = t.item_pid AND (t.item_kind = '' OR pi.kind = t.item_kind)
 	WHERE t.restored_at IS NULL AND t.%s = ? ORDER BY t.library_id IS ? DESC, t.trashed_at DESC LIMIT 1`
 
 // FileStanding returns what the catalog holds behind the file at path: the item its own

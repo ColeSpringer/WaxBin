@@ -21,8 +21,11 @@ type detachedFile struct {
 	// itemPID is the item the file backed, for reporting and for the delta a later
 	// purge emits. It is the primary item when the file has a primary edge, and any
 	// linked item otherwise: a multi-file book's non-first parts are 'part' edges, so
-	// requiring 'primary' left every trashed book part with a blank item.
-	itemPID model.PID
+	// requiring 'primary' left every trashed book part with a blank item. itemKind is
+	// that item's kind, which the pid may not keep (a book carved into a rip hands its
+	// pid to a track), so a file put back stands only for an item of that kind.
+	itemPID  model.PID
+	itemKind string
 	// promoted lists the alternates that took the file's place.
 	promoted []model.PromotedFile
 }
@@ -41,9 +44,9 @@ func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.
 		}
 		res.Promoted = d.promoted
 		_, err = tx.ExecContext(ctx, `INSERT INTO trash
-			(pid, library_id, item_pid, orig_path, orig_display, trash_path, trash_display, essence_hash, reason, size, trashed_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			string(res.TrashPID), d.libraryID, string(d.itemPID), d.path, d.display,
+			(pid, library_id, item_pid, item_kind, orig_path, orig_display, trash_path, trash_display, essence_hash, reason, size, trashed_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			string(res.TrashPID), d.libraryID, string(d.itemPID), d.itemKind, d.path, d.display,
 			in.TrashPath, in.TrashDisplay, d.essence, reasonOr(in.Reason), d.size, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -144,15 +147,15 @@ func (b *detachBatch) detachTx(ctx context.Context, tx *sql.Tx, fileID int64) (*
 		return nil, err
 	}
 	if err := tx.QueryRowContext(ctx,
-		`SELECT pi.pid FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
+		`SELECT pi.pid, pi.kind FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
 		 WHERE itf.file_id = ? AND itf.role = 'primary'
-		 ORDER BY itf.item_id LIMIT 1`, d.id).Scan(&d.itemPID); err != nil &&
+		 ORDER BY itf.item_id LIMIT 1`, d.id).Scan(&d.itemPID, &d.itemKind); err != nil &&
 		!errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	if d.itemPID == "" && len(itemIDs) > 0 {
 		if err := tx.QueryRowContext(ctx,
-			"SELECT pid FROM playable_item WHERE id = ?", itemIDs[0]).Scan(&d.itemPID); err != nil {
+			"SELECT pid, kind FROM playable_item WHERE id = ?", itemIDs[0]).Scan(&d.itemPID, &d.itemKind); err != nil {
 			return nil, err
 		}
 	}

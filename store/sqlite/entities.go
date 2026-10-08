@@ -297,14 +297,35 @@ func libraryRootOfTx(ctx context.Context, tx *sql.Tx, path string) (string, erro
 // resolved to. Keeping them separate is what let the album-artist credit split
 // without re-keying anything: only the name reaches ReleaseGroupKey.
 func resolveAlbumChain(ctx context.Context, tx *sql.Tx, log logger, tr model.Track, rgKey, albumKey string, albumArtistID int64, affected *affectedRollups) (int64, error) {
-	if rgKey == "" {
+	if rgKey == "" || albumKey == "" {
 		return 0, nil
+	}
+	row, ok, err := albumRowTx(ctx, tx, "match_key = ?", albumKey)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		// An album key a merge retired resolves to the album it folded into, under that
+		// album's own group, so the group the folded key names is not minted beside it.
+		folded, err := foldedEntityTx(ctx, tx, model.MergeAlbum, albumKey)
+		if err != nil {
+			return 0, err
+		}
+		if folded != 0 {
+			if row, _, err = albumRowTx(ctx, tx, "id = ?", folded); err != nil {
+				return 0, err
+			}
+			return row.id, row.fillTx(ctx, tx, tr)
+		}
 	}
 	rgID, err := resolveReleaseGroup(ctx, tx, log, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID, affected)
 	if err != nil {
 		return 0, err
 	}
-	return resolveAlbum(ctx, tx, log, albumKey, rgID, tr)
+	if ok {
+		return row.id, row.fillTx(ctx, tx, tr)
+	}
+	return newAlbumTx(ctx, tx, log, albumKey, rgID, tr)
 }
 
 // resolveArtist finds-or-creates an artist by normalized match key, returning
@@ -343,6 +364,16 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	var pid, cur string
 	err := tx.QueryRowContext(ctx,
 		"SELECT id, pid, COALESCE(mbid,'') FROM artist WHERE match_key = ?", mk).Scan(&id, &pid, &cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A spelling a merge retired resolves to the artist it folded into.
+		folded, ferr := foldedEntityTx(ctx, tx, model.MergeArtist, mk)
+		if ferr != nil {
+			return 0, ferr
+		}
+		if folded != 0 {
+			err = tx.QueryRowContext(ctx, "SELECT id, pid, COALESCE(mbid,'') FROM artist WHERE id = ?", folded).Scan(&id, &pid, &cur)
+		}
+	}
 	if err == nil {
 		// Free in both steady states, an artist that already has an id and the
 		// untagged majority: the fill is reached at most once per artist per scan,
@@ -406,6 +437,13 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 	err := tx.QueryRowContext(ctx,
 		"SELECT id, primary_artist_id FROM release_group WHERE match_key = ?", key).Scan(&id, &curPrimary)
 	if errors.Is(err, sql.ErrNoRows) {
+		// A key a merge retired resolves to the group it folded into, which keeps its own
+		// primary artist: the folded key's anchor is the one the merge did away with, and
+		// adopting it would flip the group between the two on every scan.
+		folded, ferr := foldedEntityTx(ctx, tx, model.MergeReleaseGroup, key)
+		if ferr != nil || folded != 0 {
+			return folded, ferr
+		}
 		adopted, aerr := adoptEntityByMBIDTx(ctx, tx, log, "release_group", key)
 		if aerr != nil {
 			return 0, aerr
@@ -457,16 +495,17 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 	return id, appendChange(ctx, tx, "release_group", pid, model.OpCreate)
 }
 
-// resolveAlbum finds-or-creates a specific release/edition by its identity key,
-// recording its disc total and MusicBrainz release id when known. As at the group rung,
-// a key carrying a release id that matches nothing adopts the row already holding that
-// id in its column rather than forking a second one.
+// newAlbumTx makes the specific release/edition an identity key that matched no row and no
+// fold names (resolveAlbumChain), recording its disc total and MusicBrainz release id when
+// known. As at the group rung, a key carrying a release id that matches nothing adopts the
+// row already holding that id in its column rather than forking a second one.
 //
-// An existing row takes any of barcode/label/catalog_number/media/country it still
-// lacks from tags that now supply them: they are not part of identity.AlbumKey, so a
-// late tag pass hits the row already there. The mbid is not filled here because it is
-// part of the key. A new row takes its first member's year, and from then on the year
-// is its members' (refreshAlbumYearsTx, run for every album a resolve touches).
+// An existing row, found by its key, a fold or an adoption, takes any of
+// barcode/label/catalog_number/media/country it still lacks from tags that now supply
+// them (albumRow.fillTx): they are not part of identity.AlbumKey, so a late tag pass hits
+// the row already there. The mbid is not filled because it is part of the key. A new row
+// takes its first member's year, and from then on the year is its members'
+// (refreshAlbumYearsTx, run for every album a resolve touches).
 //
 // Two shapes still fork, and both are narrower than what adoption closes. A file
 // carrying a release-group id but no release id computes al:mbid:<group>\x1f…, which is
@@ -487,33 +526,17 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 // the editions MusicBrainz knows. Aggregating the album's distinct media would not help,
 // since discriminating on the SET means requiring a release to cover every value, and
 // narrowing is the shape the matcher rejects.
-func resolveAlbum(ctx context.Context, tx *sql.Tx, log logger, key string, releaseGroupID int64, tr model.Track) (int64, error) {
-	if key == "" {
-		return 0, nil
-	}
-	const sel = `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
-		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,'')
-		FROM album WHERE `
-	var id int64
-	var pid, curBarcode, curLabel, curCatNo, curMedia, curCountry string
-	err := tx.QueryRowContext(ctx, sel+"match_key = ?", key).
-		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
-	if errors.Is(err, sql.ErrNoRows) {
-		adopted, aerr := adoptEntityByMBIDTx(ctx, tx, log, "album", key)
-		if aerr != nil {
-			return 0, aerr
-		}
-		if adopted != 0 {
-			err = tx.QueryRowContext(ctx, sel+"id = ?", adopted).
-				Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
-		}
-	}
-	if err == nil {
-		return id, fillAlbumIdentifiersTx(ctx, tx, id, model.PID(pid), tr,
-			curBarcode, curLabel, curCatNo, curMedia, curCountry)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+func newAlbumTx(ctx context.Context, tx *sql.Tx, log logger, key string, releaseGroupID int64, tr model.Track) (int64, error) {
+	adopted, err := adoptEntityByMBIDTx(ctx, tx, log, "album", key)
+	if err != nil {
 		return 0, err
+	}
+	if adopted != 0 {
+		row, _, err := albumRowTx(ctx, tx, "id = ?", adopted)
+		if err != nil {
+			return 0, err
+		}
+		return row.id, row.fillTx(ctx, tx, tr)
 	}
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
@@ -527,11 +550,37 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, log logger, key string, relea
 	if err != nil {
 		return 0, err
 	}
-	id, err = r.LastInsertId()
+	id, err := r.LastInsertId()
 	if err != nil {
 		return 0, err
 	}
 	return id, appendChange(ctx, tx, "album", newPID, model.OpCreate)
+}
+
+// albumRow is an album as the identifier fill reads it.
+type albumRow struct {
+	id                                    int64
+	pid                                   model.PID
+	barcode, label, catNo, media, country string
+}
+
+// albumRowTx reads the album where cond holds for arg, ok false when none does.
+func albumRowTx(ctx context.Context, tx *sql.Tx, cond string, arg any) (albumRow, bool, error) {
+	var r albumRow
+	var pid string
+	err := tx.QueryRowContext(ctx, `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
+		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,'') FROM album WHERE `+cond, arg).
+		Scan(&r.id, &pid, &r.barcode, &r.label, &r.catNo, &r.media, &r.country)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, false, nil
+	}
+	r.pid = model.PID(pid)
+	return r, err == nil, err
+}
+
+// fillTx fills the identifiers the album lacks from what the file states.
+func (r albumRow) fillTx(ctx context.Context, tx *sql.Tx, tr model.Track) error {
+	return fillAlbumIdentifiersTx(ctx, tx, r.id, r.pid, tr, r.barcode, r.label, r.catNo, r.media, r.country)
 }
 
 // adoptEntityByMBIDTx looks a release group or album up by its mbid column when an
@@ -551,7 +600,7 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, log logger, key string, relea
 //     members would compute the heuristic key, miss the now-mbid-keyed row, and mint a
 //     fresh album that keeps accumulating them.
 //   - At the group rung it churns forever. An untagged member computes rg:…, misses, and
-//     inserts a new release group, while resolveAlbum still hits its album by that
+//     inserts a new release group, while resolveAlbumChain still hits its album by that
 //     album's unchanged al:rg:… key and a hit never repoints release_group_id. The new
 //     group is born childless, orphan.go sweeps it, and the next scan mints it again.
 //
@@ -619,7 +668,7 @@ func fillEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEn
 
 // fillAlbumIdentifiersTx tops up an existing album's release identifiers and the two
 // descriptive edition columns, emitting one delta if anything landed. The cur values come
-// from resolveAlbum's own lookup, so the common no-op costs nothing extra.
+// from the lookup that found the album (albumRowTx), so the common no-op costs nothing extra.
 //
 // A column the release matcher can decide on also clears a stale no-match marker, since
 // a retag that adds a barcode must re-queue an album the weak edition tier failed on and
@@ -713,6 +762,9 @@ func resolveGenre(ctx context.Context, tx *sql.Tx, facet model.GenreFacet, name 
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
+	}
+	if folded, err := foldedEntityTx(ctx, tx, model.MergeGenre, genreFoldKey(facet, mk)); err != nil || folded != 0 {
+		return folded, err
 	}
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,

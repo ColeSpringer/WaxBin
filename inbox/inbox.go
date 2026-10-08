@@ -594,10 +594,10 @@ func (s *Service) pruneStaging(root string, placed []organize.SidecarMove) int {
 	for _, m := range placed {
 		dirs = append(dirs, filepath.Dir(m.Src))
 	}
-	dispose, undo := organize.FolderDisposal(placed, func(string) string { return root })
+	d := organize.FolderDisposal(placed, func(string) string { return root })
 	return fsx.PruneAll(dirs, func(string) fsx.PruneOptions {
-		opts := organize.PruneOptions(root, dispose)
-		opts.Undo = undo
+		opts := organize.PruneOptions(root, d.Dispose)
+		opts.Undo = d.Undo
 		return opts
 	}, func(dir string, err error) { s.log.Warn("pruning an emptied staging folder", "dir", dir, "err", err) })
 }

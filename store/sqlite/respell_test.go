@@ -88,3 +88,40 @@ func TestCommitMoveAfterARespellLogsNoChange(t *testing.T) {
 		t.Errorf("journal row = %q (err %v), want committed", state, err)
 	}
 }
+
+// TestRespellFolderCarriesWhatStandsBelowIt: the paths that say where things stand below a
+// respelled folder take its new spelling with the files: the sidecars a scan observed and
+// the place a trashed file returns to.
+func TestRespellFolderCarriesWhatStandsBelowIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	nat := filepath.FromSlash
+	in := input(lib.ID, nat("/lib/author/Book/x.mp3"), "sha256:E1", "sha256:C1", "One")
+	in.AuxObservations = []model.AuxObservation{{Kind: model.AuxLyrics, Path: []byte(nat("/lib/author/Book/x.lrc")), Size: 3, MTimeNS: 1}}
+	if _, err := st.PutScannedTrack(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	gone, err := st.PutScannedTrack(ctx, input(lib.ID, nat("/lib/author/Book/y.mp3"), "sha256:E2", "sha256:C2", "Two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.TrashFile(ctx, model.TrashFileInput{FilePID: gone.FilePID,
+		TrashPath: []byte(nat("/lib/.trash/y.mp3")), TrashDisplay: nat("/lib/.trash/y.mp3")}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.RespellFolder(ctx, nat("/lib/author"), nat("/lib/Author")); err != nil {
+		t.Fatal(err)
+	}
+	var aux []byte
+	if err := roConn(t, dbPath).QueryRowContext(ctx, "SELECT path FROM file_aux_state").Scan(&aux); err != nil ||
+		string(aux) != nat("/lib/Author/Book/x.lrc") {
+		t.Errorf("observed sidecar path = %q (err %v), want the new spelling", aux, err)
+	}
+	entries, err := st.TrashEntries(ctx, false, 0, 0)
+	if err != nil || len(entries) != 1 || string(entries[0].OrigPath) != nat("/lib/Author/Book/y.mp3") ||
+		entries[0].OrigDisplay != nat("/lib/Author/Book/y.mp3") || string(entries[0].TrashPath) != nat("/lib/.trash/y.mp3") {
+		t.Errorf("trash entries = %+v (err %v), want the file returning under the new spelling", entries, err)
+	}
+}

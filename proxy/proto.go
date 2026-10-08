@@ -60,6 +60,7 @@ const (
 	MethodCreateUser       = "create_user"
 	MethodUsers            = "users"
 	MethodMerge            = "merge"
+	MethodUnfoldEntity     = "unfold_entity"
 	MethodMarkMissing      = "mark_missing"
 	MethodSetRating        = "set_rating"
 	MethodSetStar          = "set_star"
@@ -100,6 +101,8 @@ const (
 	MethodRunEnrich   = "run_enrich"
 	MethodRunOrganize = "run_organize"
 	MethodRunSetKind  = "run_set_kind"
+
+	MethodRunOrganizeUndo = "run_organize_undo"
 
 	MethodRunRemoveRoot = "run_remove_root"
 )
@@ -576,6 +579,13 @@ type MergeParams struct {
 	Losers     []string `json:"losers"`
 }
 
+// UnfoldEntityParams is the unfold_entity request payload: the keys whose folds to
+// forget, all of them or none.
+type UnfoldEntityParams struct {
+	EntityType string   `json:"entityType"`
+	Keys       []string `json:"keys"`
+}
+
 // RatingParams is the set_rating request payload. Rating is nil to clear the
 // rating. AsOfNS is the optional recorded-time stamp (see asOfToWire).
 type RatingParams struct {
@@ -948,6 +958,13 @@ type EnrichParams struct {
 type OrganizeParams struct {
 	Rule    json.RawMessage `json:"rule,omitempty"`
 	Profile string          `json:"profile,omitempty"`
+}
+
+// OrganizeUndoParams is the run_organize_undo request payload: the organize (or undo) job
+// whose moves to move back. The server checks it before starting the job, and the finished
+// job's result is an organize RunResult.
+type OrganizeUndoParams struct {
+	JobPID string `json:"jobPid"`
 }
 
 // SetKindParams is the run_set_kind request payload: the items to change and the kind

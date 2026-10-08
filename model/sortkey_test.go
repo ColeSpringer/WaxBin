@@ -200,20 +200,6 @@ func TestAsciiDigitCoversEveryUnicodeDigit(t *testing.T) {
 	}
 }
 
-func TestRefoldKeyFoldsWithoutStrippingArticle(t *testing.T) {
-	cases := map[string]string{
-		"beatles, thé":     "beatles, the",     // an already-stored tag-derived key folds
-		"a team":           "a team",           // the article is not re-stripped
-		"track ٢":          "track 0000000002", // a non-ASCII digit run pads on the way through
-		"track 0000000002": "track 0000000002",
-	}
-	for in, want := range cases {
-		if got := RefoldKey(in); got != want {
-			t.Errorf("RefoldKey(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestSortKeyOrderingIsCollationCorrect proves a plain BINARY sort over the
 // generated keys matches human collation expectations: numeric-aware, article-
 // insensitive, case-insensitive, and accent-insensitive.
@@ -240,8 +226,8 @@ func TestSortKeyOrderingIsCollationCorrect(t *testing.T) {
 	}
 }
 
-// FuzzFoldIdempotent guards the property the in-place refold rests on. The input
-// that first broke it, invalid UTF-8 that x/text declines to normalize, is in
+// FuzzFoldIdempotent guards the idempotence Fold promises. The input that first
+// broke it, invalid UTF-8 that x/text declines to normalize, is in
 // testdata; no hand-written case would have found it.
 func FuzzFoldIdempotent(f *testing.F) {
 	for _, s := range []string{
@@ -257,22 +243,6 @@ func FuzzFoldIdempotent(f *testing.F) {
 		}
 		if strings.TrimSpace(once) == "" && strings.TrimSpace(s) != "" {
 			t.Fatalf("Fold(%q) collapsed a non-empty name to %q", s, once)
-		}
-	})
-}
-
-// FuzzRefoldKeyIdempotent covers the same property over already-padded input.
-func FuzzRefoldKeyIdempotent(f *testing.F) {
-	for _, s := range []string{
-		"beatles, thé", "a team", "track ٢", "track 0000000002", "ｔｈｅ ｂｅａｔｌｅｓ",
-		"piaf, édith", "0000000002", "́", "ⅻ 2",
-	} {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		once := RefoldKey(s)
-		if twice := RefoldKey(once); twice != once {
-			t.Fatalf("RefoldKey not idempotent for %q: %q then %q", s, once, twice)
 		}
 	})
 }

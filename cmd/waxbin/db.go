@@ -241,25 +241,38 @@ func newDBReSealSecretsCmd(g *globals) *cobra.Command {
 
 func newDBVacuumCmd(g *globals) *cobra.Command {
 	var (
-		integrity bool
-		prune     int
+		integrity   bool
+		prune       int
+		journalDays int
 	)
 	cmd := &cobra.Command{
 		Use:   "vacuum",
 		Short: "Reclaim space and compact the database",
 		Long: "Garbage-collects orphaned art, compacts the database file (VACUUM), and " +
-			"optionally runs SQLite's integrity check and trims the change_log. Takes the " +
-			"write lock.",
+			"optionally runs SQLite's integrity check, trims the change_log, and prunes the " +
+			"organize journal of every job whose moves have all settled and were made more " +
+			"than --journal-days days ago (a pruned organize can no longer be undone). Takes " +
+			"the write lock.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Refused before anything is pruned.
+			pruneJournal := cmd.Flags().Changed("journal-days")
+			if pruneJournal && journalDays < 0 {
+				return usageError(cmd, fmt.Errorf("--journal-days takes a count of days, not %d", journalDays))
+			}
 			lib, _, err := g.open(cmd)
 			if err != nil {
 				return err
 			}
 			defer lib.Close()
 
-			var pruned int
+			var pruned, journalPruned int
 			if prune > 0 {
 				if pruned, err = lib.PruneChangeLog(ctx(cmd), prune); err != nil {
+					return err
+				}
+			}
+			if pruneJournal {
+				if journalPruned, err = lib.PruneOrganizeJournal(ctx(cmd), daysAge(journalDays)); err != nil {
 					return err
 				}
 			}
@@ -284,6 +297,7 @@ func newDBVacuumCmd(g *globals) *cobra.Command {
 					"orphansDeleted":      rep.OrphansDeleted,
 					"orphansPending":      rep.OrphansPending,
 					"changeLogPruned":     pruned,
+					"journalPruned":       journalPruned,
 					"integrityChecked":    integrity,
 				}
 				if integrity {
@@ -307,6 +321,9 @@ func newDBVacuumCmd(g *globals) *cobra.Command {
 				if prune > 0 {
 					fmt.Fprintf(w, "change_log pruned:     %d\n", pruned)
 				}
+				if pruneJournal {
+					fmt.Fprintf(w, "journal moves pruned:  %d\n", journalPruned)
+				}
 				fmt.Fprintln(w, "database compacted")
 				if integrity {
 					if ok {
@@ -327,6 +344,7 @@ func newDBVacuumCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&integrity, "integrity", false, "also run SQLite's integrity check")
 	cmd.Flags().IntVar(&prune, "prune-changelog", 0, "trim the change_log to its newest N rows (0 = keep all)")
+	cmd.Flags().IntVar(&journalDays, "journal-days", 0, "prune the organize jobs whose moves have all settled and were made more than N days ago (unset keeps all)")
 	return cmd
 }
 

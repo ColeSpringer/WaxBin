@@ -423,7 +423,7 @@ func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, max
 func itemsBySortKeyQ(narrow string) string {
 	return `SELECT ` + searchDisplayCols + `, 0.0
 		FROM (SELECT id FROM playable_item WHERE sort_key = ?1
-			UNION SELECT item_id FROM track WHERE artist_sort = ?1
+			UNION SELECT item_id FROM track WHERE artist_sort_key = ?1
 			UNION SELECT item_id FROM track WHERE instr(artist, ?1) > 0
 				AND instr(', ' || artist || ', ', ', ' || ?1 || ', ') > 0) m
 		CROSS JOIN playable_item pi ON pi.id = m.id` + narrow + searchDisplayJoins + `

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -191,13 +192,25 @@ func parseAge(op, s string) (time.Duration, error) {
 	if days, ok := strings.CutSuffix(s, "d"); ok {
 		n, aerr := strconv.Atoi(days)
 		if aerr == nil {
-			d, err = time.Duration(n)*24*time.Hour, nil
+			if n < 0 {
+				return bad()
+			}
+			d, err = daysAge(n), nil
 		}
 	}
 	if err != nil || d < 0 {
 		return bad()
 	}
 	return d, nil
+}
+
+// daysAge is n days as a duration, the longest one for more days than a duration holds,
+// which would otherwise wrap around (213504 days to about 25 minutes).
+func daysAge(n int) time.Duration {
+	if int64(n) > math.MaxInt64/int64(24*time.Hour) {
+		return math.MaxInt64
+	}
+	return time.Duration(n) * 24 * time.Hour
 }
 
 func trashEntriesJSON(entries []model.TrashEntry) any {

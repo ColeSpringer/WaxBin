@@ -199,3 +199,39 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		}
 	}
 }
+
+// TestARunnableGroupTakesTheGroupConventions: a command that runs and also holds
+// subcommands (organize) answers `help <sub>` with that help, and an unknown word under it
+// as any group does, a usage error naming the near miss.
+func TestARunnableGroupTakesTheGroupConventions(t *testing.T) {
+	t.Parallel()
+	run := func(args ...string) (string, error) {
+		cmd := newRootCmd(&globals{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(context.Background())
+		return out.String(), err
+	}
+	if out, err := run("organize", "help", "undo"); err != nil || !strings.Contains(out, "organize undo") {
+		t.Errorf("organize help undo: err %v, printed %.80q; want undo's help", err, out)
+	}
+	if out, err := run("organize", "help"); err != nil || !strings.Contains(out, "Usage:") {
+		t.Errorf("organize help: err %v, printed %.80q; want organize's help", err, out)
+	}
+	_, err := run("organize", "histry")
+	if !waxerr.Is(err, waxerr.CodeInvalid) || exitCodeFor(err) != exitUsage || !strings.Contains(err.Error(), "did you mean history?") {
+		t.Errorf("organize histry: err = %v (exit %d), want a usage error naming history", err, exitCodeFor(err))
+	}
+	if _, err := run("organize", "help", "bogus"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("organize help bogus: err = %v, want an unknown topic", err)
+	}
+	// One that takes an argument of its own keeps its own refusal of a wrong count.
+	if out, err := run("art", "help"); err != nil || !strings.Contains(out, "Usage:") {
+		t.Errorf("art help: err %v, printed %.80q; want art's help", err, out)
+	}
+	if _, err := run("art", "a", "b"); !waxerr.Is(err, waxerr.CodeInvalid) || strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("art a b: err = %v, want its own usage error about the count", err)
+	}
+}
