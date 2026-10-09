@@ -26,10 +26,24 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
-          check-latest: true
+          # The exact release the checks ran on, so the binaries come from the Go the
+          # gate scanned even when a new patch lands while CI runs.
+          go-version: ${{ needs.ci.outputs.go-version }}
+          go-download-base-url: https://go.dev/dl # see the checks job in ci.yml
+          token: ""
           # Release binaries come from a clean build.
           cache: false
+
+      - name: Verify the Go release matches CI
+        # setup-go installs nothing for an empty version and leaves the runner's own Go
+        # on the path, so an empty or stale answer from CI must fail here, not build.
+        env:
+          GO_RELEASE: ${{ needs.ci.outputs.go-version }}
+        run: |
+          have="$(go version | awk '{print $3}')"
+          if [ -z "$GO_RELEASE" ] || [ "$have" != "go$GO_RELEASE" ]; then
+            echo "CI ran on '${GO_RELEASE:-(none reported)}' but this job has $have"; exit 1
+          fi
 
       - uses: goreleaser/goreleaser-action@v7
         with:

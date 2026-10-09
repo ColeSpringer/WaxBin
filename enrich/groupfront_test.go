@@ -503,3 +503,44 @@ func TestForcedGroupFetchIsConditionalThroughTheFallback(t *testing.T) {
 		t.Errorf("images downloaded = %d, want the first one alone (the original answered 304)", images)
 	}
 }
+
+// deadlineStore plays the clock running out under the provider: a record write that
+// carries a deadline is refused the way the store refuses an expired context, which is
+// where a bound slower than the provider's budget leaves the write. Refusing at once
+// rather than waiting the deadline out keeps a regression failing in under a second.
+type deadlineStore struct {
+	enrich.Store
+}
+
+func (s deadlineStore) EnrichmentCachePut(ctx context.Context, key string, payload []byte) error {
+	if _, ok := ctx.Deadline(); ok && strings.HasPrefix(key, "caa:") {
+		return context.DeadlineExceeded
+	}
+	return s.Store.EnrichmentCachePut(ctx, key, payload)
+}
+
+// TestGroupFrontRecordOutlivesTheProviderDeadline: the group record is written after the
+// bytes are bounded, and bounding a large cover on a slow machine can outlast the
+// provider's budget. The cover is kept either way; the record has to be too, since the
+// album rung's reuse and the forced walk's conditional fetch both rest on it.
+func TestGroupFrontRecordOutlivesTheProviderDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, _, lib := openStore(t)
+	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
+
+	caa, hits := newRedirectingCAAMock(t, pngBytes(t), edGBMBID)
+	svc := albumArtService(deadlineStore{st}, newRelMock(t, "[]").server.URL, caa)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if _, release, images := hits.hits(); release != 0 || images != 1 {
+		t.Fatalf("first run: release fronts fetched = %d, images downloaded = %d; want the album rung to reuse the group record (0 and 1)", release, images)
+	}
+	if _, err := svc.Run(ctx, enrich.RunOptions{ForcePhases: []model.EnrichPhase{model.EnrichPhaseReleaseGroup}}, nil); err != nil {
+		t.Fatalf("forced Run: %v", err)
+	}
+	if _, _, images := hits.hits(); images != 1 {
+		t.Errorf("images downloaded = %d, want the first one alone (the archive answered 304)", images)
+	}
+}

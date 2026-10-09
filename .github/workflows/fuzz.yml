@@ -27,7 +27,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
-          check-latest: true
+          go-download-base-url: https://go.dev/dl # see the checks job in ci.yml
+          token: ""
           # CI's Linux test job uses the same cache key, and its race builds are
           # the ones worth keeping.
           cache: false

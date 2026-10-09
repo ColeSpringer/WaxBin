@@ -12,6 +12,10 @@ on:
     - cron: "23 7 * * 1"
   workflow_dispatch:
   workflow_call:
+    outputs:
+      go-version:
+        description: The exact Go release the checks ran on
+        value: ${{ jobs.checks.outputs.go-version }}
 
 permissions:
   contents: read
@@ -35,15 +39,25 @@ jobs:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      go-version: ${{ steps.go.outputs.go-version }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version: "1.26"
-          check-latest: true
+          # The newest 1.26 patch straight from go.dev. setup-go's manifest trails a Go
+          # release by about a day, and govulncheck knows the fixed version the moment
+          # it is out, so a push in that day failed the gate on the previous patch.
+          # check-latest is ignored with a custom URL; the listing is read fresh.
+          # The token is cleared because setup-go sends it with a custom URL's
+          # download, and go.dev has no use for the job's token.
+          go-download-base-url: https://go.dev/dl
+          token: ""
           # The Linux test job uses the same cache key, and its race builds are
           # the ones worth keeping.
           cache: false
@@ -126,7 +140,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
-          check-latest: true
+          go-download-base-url: https://go.dev/dl
+          token: ""
 
       - name: Test (race)
         # The race detector needs cgo; scope it to the test toolchain only so the
@@ -147,7 +162,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
-          check-latest: true
+          go-download-base-url: https://go.dev/dl
+          token: ""
           cache: false
 
       - name: govulncheck

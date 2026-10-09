@@ -235,7 +235,12 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 	}
 	if req.Type == TargetReleaseGroup {
 		// The record is what lets the album rung reuse these bytes rather than download
-		// them again. A write failure costs that reuse, not the cover.
+		// them again. A write failure costs that reuse, not the cover. The write carries
+		// neither the call's deadline nor the run's cancellation: bounding a large cover
+		// can outlast the provider's budget, which the bound does not watch, and a record
+		// dropped there costs the reuse and the next forced walk's conditional fetch for a
+		// cover the catalog keeps anyway. A run cancelled mid-bound still pays only this
+		// one local write; the Service's own store write is what notices the cancellation.
 		rec := caaGroupFront{Release: releaseMBIDFromURL(f.reqURL, f.finalURL), Hash: info.Hash, ETag: f.etag}
 		if rec.Release == "" {
 			// The reuse reads the release off the archive's redirect, so a fetch that named
@@ -244,7 +249,7 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 			p.log.Debug("cover art group fetch named no release; the album rung cannot reuse it",
 				"group", req.MBID, "final", f.finalURL)
 		}
-		if err := p.caa.recordGroupFront(ctx, req.MBID, rec); err != nil {
+		if err := p.caa.recordGroupFront(context.WithoutCancel(ctx), req.MBID, rec); err != nil {
 			p.log.Debug("cover art group record unwritable", "group", req.MBID, "err", err)
 		}
 	}
