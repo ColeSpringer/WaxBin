@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -80,8 +81,8 @@ type Root struct {
 type Engine interface {
 	// Rescan runs a scan of one library, optionally scoped to a sub-path, optionally
 	// forced (bypassing the fast-path). It reports whether the catalog changed. A
-	// CodeConflict error means another filesystem mutator holds the shared lease; the
-	// watcher treats that as "busy" and retries on the next cycle.
+	// held-lease conflict (jobs.IsLeaseHeld) means another filesystem mutator holds the
+	// shared lease; the watcher treats that as "busy" and retries on the next cycle.
 	Rescan(ctx context.Context, libPID model.PID, subPath string, force bool) (changed bool, err error)
 	// Analyze runs the analyze pass (loudness/peaks/fingerprint). Best-effort.
 	Analyze(ctx context.Context) error
@@ -276,8 +277,8 @@ func (w *Watcher) notify(trigger string, changed bool) {
 	}
 }
 
-// rescan runs one Engine.Rescan, mapping a busy (CodeConflict) result to a skip and
-// any other error to a warning, so a transient failure never stops the watcher.
+// rescan runs one Engine.Rescan, mapping a busy (held-lease) result to a skip and any
+// other error to a warning, so a transient failure never stops the watcher.
 func (w *Watcher) rescan(ctx context.Context, libPID model.PID, subPath string, force bool) (bool, error) {
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -286,7 +287,7 @@ func (w *Watcher) rescan(ctx context.Context, libPID model.PID, subPath string, 
 	switch {
 	case err == nil:
 		return changed, nil
-	case waxerr.Is(err, waxerr.CodeConflict):
+	case jobs.IsLeaseHeld(err):
 		// Another filesystem mutator (organize/import) holds the shared lease; skip and
 		// retry next cycle rather than racing it.
 		w.log.Debug("watch: rescan skipped, filesystem mutator busy", "library", libPID, "sub", subPath)

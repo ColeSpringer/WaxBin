@@ -74,3 +74,49 @@ func TestClassifyOverridesClass(t *testing.T) {
 		t.Fatal("classifying a nil cause should yield nil")
 	}
 }
+
+func TestReasonSurvivesWrap(t *testing.T) {
+	t.Parallel()
+	inner := waxerr.New(waxerr.CodeConflict, "jobs.acquire", "busy").WithReason("lease_held")
+	twice := waxerr.Wrap(waxerr.CodeIO, "facade.Remove", waxerr.Wrapf(waxerr.CodeIO, "remove", inner, "removing %s", "x"))
+	if got := waxerr.ReasonOf(twice); got != "lease_held" {
+		t.Fatalf("reason wrapped twice = %q, want lease_held", got)
+	}
+	if got := waxerr.ReasonOf(waxerr.Wrap(waxerr.CodeIO, "op", fmt.Errorf("walk: %w", inner))); got != "lease_held" {
+		t.Fatalf("reason under a plain wrapper = %q, want lease_held", got)
+	}
+	if got := waxerr.ReasonOf(waxerr.FromContext("op", inner, waxerr.CodeIO)); got != "lease_held" {
+		t.Fatalf("reason through FromContext = %q, want lease_held", got)
+	}
+	// A new class drops the reason that explained the old one, and a cancel is only a
+	// cancel.
+	if got := waxerr.ReasonOf(waxerr.Classify(waxerr.CodeInvalid, "op", inner)); got != "" {
+		t.Fatalf("reason after Classify = %q, want none", got)
+	}
+	canceled := waxerr.FromContext("op", fmt.Errorf("%w after %w", context.Canceled, inner), waxerr.CodeIO)
+	if got := waxerr.ReasonOf(canceled); got != "" || !waxerr.Is(canceled, waxerr.CodeCanceled) {
+		t.Fatalf("canceled = %s %q, want canceled with no reason", waxerr.CodeOf(canceled), got)
+	}
+}
+
+func TestReasonOfNilAndPlainError(t *testing.T) {
+	t.Parallel()
+	if got := waxerr.ReasonOf(nil); got != "" {
+		t.Fatalf("ReasonOf(nil) = %q, want none", got)
+	}
+	if got := waxerr.ReasonOf(errors.New("disk")); got != "" {
+		t.Fatalf("ReasonOf(plain) = %q, want none", got)
+	}
+	if got := waxerr.ReasonOf(waxerr.New(waxerr.CodeIO, "op", "x")); got != "" {
+		t.Fatalf("ReasonOf(unreasoned) = %q, want none", got)
+	}
+}
+
+func TestWithReasonLeavesTheReceiverAlone(t *testing.T) {
+	t.Parallel()
+	base := waxerr.New(waxerr.CodeConflict, "op", "busy")
+	reasoned := base.WithReason("lease_held")
+	if base.Reason != "" || reasoned.Reason != "lease_held" || reasoned.Error() != base.Error() || reasoned.Code != base.Code {
+		t.Fatalf("base %+v, reasoned %+v: want a reasoned copy and the base untouched", base, reasoned)
+	}
+}

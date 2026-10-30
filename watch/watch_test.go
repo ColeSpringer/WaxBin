@@ -15,6 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/fsnotify/fsnotify"
@@ -180,14 +181,25 @@ func TestWatcherFullRescan(t *testing.T) {
 	<-done
 }
 
-// TestRescanSkipsOnConflict verifies a busy (CodeConflict) rescan is swallowed so
-// the watcher keeps running.
+// TestRescanSkipsOnConflict verifies a busy rescan, one whose lease another mutator
+// holds, is swallowed so the watcher keeps running.
 func TestRescanSkipsOnConflict(t *testing.T) {
-	eng := &mockEngine{rescanErr: waxerr.New(waxerr.CodeConflict, "test", "busy")}
+	eng := &mockEngine{rescanErr: waxerr.New(waxerr.CodeConflict, "test", "busy").WithReason(jobs.ReasonLeaseHeld)}
 	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{Interval: time.Hour, FullRescanInterval: -1})
 	changed, err := w.rescan(context.Background(), "L1", "", false)
 	if err != nil || changed {
 		t.Fatalf("conflict rescan = (%v, %v), want (false, nil)", changed, err)
+	}
+}
+
+// TestRescanReportsAnotherConflict: a conflict that is not a held lease is a fault the
+// next tick will meet again, so it is reported rather than skipped as busy.
+func TestRescanReportsAnotherConflict(t *testing.T) {
+	t.Parallel()
+	eng := &mockEngine{rescanErr: waxerr.New(waxerr.CodeConflict, "test", "the podcast dir is a music root")}
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{Interval: time.Hour, FullRescanInterval: -1})
+	if _, err := w.rescan(context.Background(), "L1", "", false); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Fatalf("conflict rescan = %v, want the conflict reported", err)
 	}
 }
 

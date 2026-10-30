@@ -315,9 +315,11 @@ func (s *Store) FolderStanding(ctx context.Context, libraryID int64, root, folde
 // song's title against a book's, a recording against a release), and the kind lock pinned
 // the kind that is gone. The entities the item leaves are refreshed here; the put that
 // follows writes the new kind's fields and links. A file holding part of a book with other
-// parts, or a window of a rip, leaves its item instead. With held set (locks honoured, the kind not forced) a kind lock on the item
-// refuses the change with CodeConflict: the scan read the item before the lock was set, and
-// its next read follows the lock. It returns the item's id, 0 when it re-kinded nothing.
+// parts, or a window of a rip, leaves its item instead. With held set (locks honoured, the
+// kind not forced) a kind lock on the item refuses the change with CodeLocked and
+// model.ReasonKindLocked, as a kind change's own check does: the scan read the item before
+// the lock was set, and its next read follows the lock. It returns the item's id, 0 when it
+// re-kinded nothing.
 func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind model.Kind, key string, held bool, now int64) (int64, error) {
 	var itemID int64
 	var from string
@@ -338,7 +340,7 @@ func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind mod
 			return 0, err
 		}
 		if locked {
-			return 0, waxerr.New(waxerr.CodeConflict, "store.rekind", "the item's kind is locked as "+from)
+			return 0, waxerr.New(waxerr.CodeLocked, "store.rekind", "the item's kind is locked as "+from).WithReason(model.ReasonKindLocked)
 		}
 	}
 	affected := newAffectedRollups()

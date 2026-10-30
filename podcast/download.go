@@ -35,8 +35,10 @@ type DownloadResult struct {
 // Download fetches an episode's enclosure into the podcast directory, catalogs it
 // as the episode's file (flipping the episode to present), and opportunistically fetches
 // its transcript and artwork. It enforces a free-space preflight and the configured
-// size cap. Re-downloading an episode replaces the prior file. A provider's failure is a
-// *source.ProviderError, as for Sync; a file that refuses the bytes is the catalog's.
+// size cap. Re-downloading an episode replaces the prior file. The show's login goes
+// only to requests at its feed's origin. A provider's failure, including an enclosure
+// that is not media (source.ReasonMediaType), is a *source.ProviderError, as for Sync;
+// a file that refuses the bytes is the catalog's.
 func (s *Service) Download(ctx context.Context, episodePID model.PID) (*DownloadResult, error) {
 	const op = "podcast.Download"
 	if strings.TrimSpace(s.cfg.Dir) == "" {
@@ -86,7 +88,7 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 		return nil, err
 	}
 	n, contentHash, err := s.fetchTo(ctx, prov, tmp, source.FetchRequest{
-		URL: ep.EnclosureURL, User: user, Pass: pass, MaxBytes: s.cfg.MaxEnclosureBytes,
+		URL: ep.EnclosureURL, User: user, Pass: pass, AuthOrigin: pod.FeedURL, MaxBytes: s.cfg.MaxEnclosureBytes,
 	})
 	if err != nil {
 		_ = os.Remove(pathx.Long(tmp))

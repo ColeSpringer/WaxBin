@@ -139,11 +139,12 @@ const (
 
 // RunLeasedWait is RunLeased with a bounded retry on a busy scope, for the one caller
 // whose work is already paid for by the time it needs the lease (a finished download's
-// commit tail) and would otherwise be discarded.
+// commit tail) and would otherwise be discarded. Only a held lease is retried; any other
+// failure to take it comes back at once.
 //
-// The bound is real: a holder that outlasts it still yields CodeConflict and the
-// caller still loses its work. That is the trade against hanging behind a pass whose
-// own duration is unbounded.
+// The bound is real: a holder that outlasts it still yields the held-lease conflict and
+// the caller still loses its work. That is the trade against hanging behind a pass
+// whose own duration is unbounded.
 //
 // It is unsuitable for a scope whose holders run for minutes, such as fs-mutate, where
 // the backoff would only add latency before the same CodeConflict.
@@ -156,7 +157,7 @@ func (m *Manager) RunLeasedWait(ctx context.Context, scope string, fn func(conte
 			defer release()
 			return fn(ctx)
 		}
-		if !waxerr.Is(err, waxerr.CodeConflict) {
+		if !IsLeaseHeld(err) {
 			return err
 		}
 		select {
@@ -167,6 +168,19 @@ func (m *Manager) RunLeasedWait(ctx context.Context, scope string, fn func(conte
 	}
 	return err
 }
+
+// ReasonLeaseHeld is the reason on the CodeConflict a runner returns when another job
+// holds its scope.
+const ReasonLeaseHeld waxerr.Reason = "lease_held"
+
+// LeaseHeldError is the cause of a held-lease conflict, naming the scope. It stays in
+// process; a proxied conflict carries ReasonLeaseHeld alone.
+type LeaseHeldError struct{ Scope string }
+
+func (e *LeaseHeldError) Error() string { return "another job holds scope " + e.Scope }
+
+// IsLeaseHeld reports whether err is a held-lease conflict, in process or proxied.
+func IsLeaseHeld(err error) bool { return waxerr.ReasonOf(err) == ReasonLeaseHeld }
 
 // acquire takes scope's lease and returns the release func, or CodeConflict. The one
 // lease-taking path, shared by all three runners, so the acquire/release pairing and
@@ -179,7 +193,7 @@ func (m *Manager) acquire(ctx context.Context, scope, op string) (func(), error)
 		return nil, err
 	}
 	if !ok {
-		return nil, waxerr.New(waxerr.CodeConflict, op, "another job holds scope "+scope)
+		return nil, &waxerr.Error{Code: waxerr.CodeConflict, Op: op, Err: &LeaseHeldError{Scope: scope}, Reason: ReasonLeaseHeld}
 	}
 	cleanup := context.WithoutCancel(ctx)
 	return func() {

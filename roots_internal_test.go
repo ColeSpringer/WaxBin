@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -38,8 +39,8 @@ func TestRemoveRootRefusesThePodcastLibraryAndWaitsForTheFsLease(t *testing.T) {
 	}
 
 	holdScope(t, lib, fsMutateScope)
-	if _, err := lib.RemoveRoot(ctx, music, RemoveRootOptions{Force: true}); !waxerr.Is(err, waxerr.CodeConflict) {
-		t.Errorf("remove during a scan = %v, want CodeConflict", err)
+	if _, err := lib.RemoveRoot(ctx, music, RemoveRootOptions{Force: true}); !waxerr.Is(err, waxerr.CodeConflict) || !jobs.IsLeaseHeld(err) {
+		t.Errorf("remove during a scan = %v (reason %q), want a held-lease CodeConflict", err, waxerr.ReasonOf(err))
 	}
 	if after, err := lib.Libraries(ctx); err != nil || len(after) != 2 {
 		t.Errorf("libraries = %+v (err %v), want both kept", after, err)

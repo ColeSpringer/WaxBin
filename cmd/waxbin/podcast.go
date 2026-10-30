@@ -279,7 +279,7 @@ func newPodcastAddCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&user, "user", "", "basic-auth username for a private feed")
+	cmd.Flags().StringVar(&user, "user", "", "basic-auth username for a private feed, sent only to the feed's own host and port")
 	cmd.Flags().StringVar(&pass, "pass", "", "basic-auth password for a private feed")
 	return cmd
 }
@@ -526,7 +526,9 @@ func newPodcastAuthCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth <pid> <user>",
 		Short: "Set basic-auth credentials for a private feed",
-		Args:  cobra.ExactArgs(2),
+		Long: "Set basic-auth credentials for a private feed. They are sent only to the feed's own host and port\n" +
+			"(and its https form): an enclosure on another host, a subdomain included, is fetched without them.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.open(cmd)
 			if err != nil {

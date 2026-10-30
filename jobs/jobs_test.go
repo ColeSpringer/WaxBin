@@ -2,11 +2,14 @@ package jobs_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
@@ -146,5 +149,74 @@ func TestRunRecordsACancel(t *testing.T) {
 	})
 	if job.State != model.JobFailed {
 		t.Errorf("inner cancel = %s, want failed", job.State)
+	}
+}
+
+// TestLeaseHeldIsTyped: a held scope is a conflict whose reason says so, whose cause
+// names the scope, and whose text reads as it always has.
+func TestLeaseHeldIsTyped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	if ok, err := st.AcquireLease(ctx, &model.Lease{Scope: "fs-mutate", Owner: "other", AcquiredAt: 1, HeartbeatAt: 1}); err != nil || !ok {
+		t.Fatalf("hold the scope: ok=%v err=%v", ok, err)
+	}
+	err := m.RunLeased(ctx, "fs-mutate", func(context.Context) error { return nil })
+	var held *jobs.LeaseHeldError
+	if !waxerr.Is(err, waxerr.CodeConflict) || waxerr.ReasonOf(err) != jobs.ReasonLeaseHeld || !jobs.IsLeaseHeld(err) {
+		t.Fatalf("held scope = %v (%s %q), want a conflict whose reason is lease_held", err, waxerr.CodeOf(err), waxerr.ReasonOf(err))
+	}
+	if !errors.As(err, &held) || held.Scope != "fs-mutate" {
+		t.Fatalf("cause = %+v, want a LeaseHeldError naming fs-mutate", held)
+	}
+	if err.Error() != "jobs.RunLeased: another job holds scope fs-mutate" {
+		t.Fatalf("text = %q, want the sentence unchanged", err.Error())
+	}
+	if jobs.IsLeaseHeld(waxerr.New(waxerr.CodeConflict, "store", "owned elsewhere")) || jobs.IsLeaseHeld(nil) {
+		t.Fatal("another conflict, or no error, reads as a held lease")
+	}
+}
+
+// conflictingStore refuses every lease with a conflict that is not a held scope, the
+// shape of a write-ownership refusal.
+type conflictingStore struct {
+	model.JobStore
+	calls atomic.Int32
+}
+
+func (s *conflictingStore) AcquireLease(context.Context, *model.Lease) (bool, error) {
+	s.calls.Add(1)
+	return false, waxerr.New(waxerr.CodeConflict, "store.AcquireLease", "the catalog is owned elsewhere")
+}
+
+// TestRunLeasedWaitDoesNotRetryOtherConflicts: only a held lease is waited out; any other
+// conflict comes back at once without the work running.
+func TestRunLeasedWaitDoesNotRetryOtherConflicts(t *testing.T) {
+	t.Parallel()
+	_, st := newManager(t)
+	cs := &conflictingStore{JobStore: st}
+	m := jobs.NewManager(cs, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ran := false
+	err := m.RunLeasedWait(ctx, "podcast-fs", func(context.Context) error { ran = true; return nil })
+	if !waxerr.Is(err, waxerr.CodeConflict) || jobs.IsLeaseHeld(err) || ran || cs.calls.Load() != 1 {
+		t.Fatalf("err = %v (%s), ran %v, %d tries; want the conflict back after one try", err, waxerr.CodeOf(err), ran, cs.calls.Load())
+	}
+}
+
+// TestRunLeasedWaitRetriesAHeldLease: a held scope is waited out and the work runs once
+// the holder lets go.
+func TestRunLeasedWaitRetriesAHeldLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	if ok, err := st.AcquireLease(ctx, &model.Lease{Scope: "podcast-fs", Owner: "other", AcquiredAt: 1, HeartbeatAt: 1}); err != nil || !ok {
+		t.Fatalf("hold the scope: ok=%v err=%v", ok, err)
+	}
+	time.AfterFunc(300*time.Millisecond, func() { _ = st.ReleaseLease(ctx, "podcast-fs", "other") })
+	ran := false
+	if err := m.RunLeasedWait(ctx, "podcast-fs", func(context.Context) error { ran = true; return nil }); err != nil || !ran {
+		t.Fatalf("wait = %v, ran %v; want the work run once the lease freed", err, ran)
 	}
 }

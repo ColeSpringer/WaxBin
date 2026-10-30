@@ -66,7 +66,7 @@ type Config struct {
 	Dir               string        // download directory (downloads require it)
 	UserAgent         string        // HTTP User-Agent for feed/enclosure fetches
 	BlockPrivateIPs   bool          // SSRF guard (off by default; on for untrusted feeds)
-	Timeout           time.Duration // per-request timeout
+	Timeout           time.Duration // per-request timeout; bounds a download's silences, not its length
 	MaxFeedBytes      int64         // cap on a feed/transcript/OPML body
 	MaxEnclosureBytes int64         // cap on an episode download
 	ReserveBytes      int64         // free-space headroom kept on the download volume
@@ -246,8 +246,11 @@ func (s *Service) fetchProvider(st model.SourceType) (source.Provider, error) {
 		"no acquisition provider registered for source type "+string(st))
 }
 
-// AddOptions carries optional basic-auth credentials for a private feed, applied to
-// the initial fetch and stored for later syncs.
+// AddOptions carries a private feed's HTTP Basic login, used for the first fetch and
+// stored for later syncs. It goes only to the feed's own origin, its scheme, host and port
+// (an http feed's https form included); an enclosure or redirect on any other host, a
+// subdomain of the feed's host among them, is fetched without it, and a refusal from such
+// a host says where the login goes.
 type AddOptions struct {
 	User string
 	Pass string
@@ -365,9 +368,10 @@ func (s *Service) AddEpisode(ctx context.Context, showPID model.PID, ep model.Fe
 // from where the cover it holds came from, and never while that cover is locked. Both
 // facts ride along on the PodcastByPID this already does, so neither costs a query.
 //
-// A failure of the provider itself comes back as a *source.ProviderError, and any
-// other error is the catalog's own. The type does not cross the proxy, which rebuilds a
-// plain waxerr from the class and text; no sync, add, or download verb is proxied.
+// A failure of the provider itself comes back as a *source.ProviderError carrying the
+// reason (source.Reason*) and HTTP status its cause names, and any other error is the
+// catalog's own. The type does not cross the proxy, which rebuilds a plain waxerr from
+// the class, reason and text; no sync, add, or download verb is proxied.
 func (s *Service) Sync(ctx context.Context, podcastPID model.PID) (*model.UpsertFeedResult, error) {
 	res, unchanged, err := s.sync(ctx, podcastPID)
 	if err != nil {
@@ -429,7 +433,7 @@ func providerErr(ctx context.Context, op string, prov source.Provider, provOp st
 	if ctx.Err() != nil {
 		return waxerr.Classify(waxerr.CodeCanceled, op, err)
 	}
-	return &source.ProviderError{SourceType: prov.SourceType(), Op: provOp, Err: err}
+	return source.NewProviderError(prov.SourceType(), provOp, err)
 }
 
 // checkEnumeration refuses the answers the provider contract rules out: no
@@ -565,7 +569,7 @@ func (s *Service) SetRetention(ctx context.Context, pid model.PID, keep int) err
 	return s.store.SetPodcastRetention(ctx, pid, keep)
 }
 
-// SetAuth stores basic-auth credentials for a private feed.
+// SetAuth stores basic-auth credentials for a private feed, scoped as AddOptions says.
 func (s *Service) SetAuth(ctx context.Context, pid model.PID, user, pass string) error {
 	if _, err := s.store.PodcastByPID(ctx, pid); err != nil {
 		return err

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -172,8 +173,9 @@ func TestSetItemKindHonoursAKindLock(t *testing.T) {
 	if err := lib.Lock(ctx, pid, model.KindLockField); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if _, err := lib.SetItemKind(ctx, []model.PID{pid}, model.KindBook, waxbin.KindOptions{}); !waxerr.Is(err, waxerr.CodeLocked) {
-		t.Fatalf("set kind over a lock = %v, want CodeLocked", err)
+	if _, err := lib.SetItemKind(ctx, []model.PID{pid}, model.KindBook, waxbin.KindOptions{}); !waxerr.Is(err, waxerr.CodeLocked) ||
+		waxerr.ReasonOf(err) != waxbin.ReasonKindLocked {
+		t.Fatalf("set kind over a lock = %v (reason %q), want CodeLocked for the kind lock", err, waxerr.ReasonOf(err))
 	}
 	if v, _ := lib.Get(ctx, pid); v.Kind != model.KindTrack {
 		t.Fatalf("kind after the refusal = %s, want the track left alone", v.Kind)
@@ -195,14 +197,15 @@ func TestSetItemKindHonoursAKindLock(t *testing.T) {
 
 // TestSetItemKindRefusals: what a kind change cannot apply to is refused before anything
 // changes: an episode, a cue track, a file another item shares, a book whose chapters a
-// cue sheet gives, a file not on disk, a target kind other than track or book, and an
-// unknown item.
+// cue sheet gives, a file not on disk, an item in the trash, a target kind other than
+// track or book, and an unknown item. Each refusal names its reason, and the three that
+// name a file carry it as a KindRefusal.
 func TestSetItemKindRefusals(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root, pod := t.TempDir(), t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	for i, title := range []string{"Plain", "Windowed", "Shared", "Sharer", "Gone"} {
+	for i, title := range []string{"Plain", "Windowed", "Shared", "Sharer", "Gone", "Trashed"} {
 		writeFile(t, filepath.Join(root, title+".mp3"), testaudio.BuildMP3WithAudio(title, "Artist", "Album "+title, 1,
 			testaudio.AudioWithSeed(byte(40+i))))
 	}
@@ -234,27 +237,50 @@ func TestSetItemKindRefusals(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "Gone.mp3")); err != nil {
 		t.Fatal(err)
 	}
+	trashed := itemPIDByTitle(t, ctx, lib, "Trashed")
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{trashed}, model.DeleteTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, c := range []struct {
-		name string
-		pids []model.PID
-		kind model.Kind
-		code waxerr.Code
+		name   string
+		pids   []model.PID
+		kind   model.Kind
+		code   waxerr.Code
+		reason waxerr.Reason
+		path   string // the file a KindRefusal names, "" for none
 	}{
-		{"episode", []model.PID{ep.EpisodePID}, model.KindBook, waxerr.CodeInvalid},
-		{"cue track", []model.PID{windowed}, model.KindBook, waxerr.CodeInvalid},
-		{"shared file", []model.PID{shared}, model.KindBook, waxerr.CodeInvalid},
+		{"episode", []model.PID{ep.EpisodePID}, model.KindBook, waxerr.CodeInvalid, waxbin.ReasonKindSourceDecides, ""},
+		{"cue track", []model.PID{windowed}, model.KindBook, waxerr.CodeInvalid, waxbin.ReasonKindCueTrack, ""},
+		{"shared file", []model.PID{shared}, model.KindBook, waxerr.CodeInvalid, waxbin.ReasonKindSharedFile, filepath.Join(root, "Shared.mp3")},
 		// As a track the sheet would carve the file into cue tracks, which no lock holds.
-		{"book chaptered by a cue sheet", []model.PID{cued}, model.KindTrack, waxerr.CodeInvalid},
-		{"file not on disk", []model.PID{gone}, model.KindBook, waxerr.CodeConflict},
-		{"episode kind", []model.PID{plain}, model.KindEpisode, waxerr.CodeInvalid},
-		{"no items", nil, model.KindBook, waxerr.CodeInvalid},
-		{"unknown item", []model.PID{"01ZZZZZZZZZZZZZZZZZZZZZZZZ"}, model.KindBook, waxerr.CodeNotFound},
+		{"book chaptered by a cue sheet", []model.PID{cued}, model.KindTrack, waxerr.CodeInvalid, waxbin.ReasonKindCueSheet,
+			filepath.Join(books, "Austen", "Emma", "emma.mp3")},
+		{"file not on disk", []model.PID{gone}, model.KindBook, waxerr.CodeConflict, waxbin.ReasonKindNotOnDisk, filepath.Join(root, "Gone.mp3")},
+		{"item in the trash", []model.PID{trashed}, model.KindBook, waxerr.CodeConflict, waxbin.ReasonKindNoFile, ""},
+		{"episode kind", []model.PID{plain}, model.KindEpisode, waxerr.CodeInvalid, waxbin.ReasonKindBadTarget, ""},
+		{"no items", nil, model.KindBook, waxerr.CodeInvalid, waxbin.ReasonKindNoItems, ""},
+		// Its class alone says it.
+		{"unknown item", []model.PID{"01ZZZZZZZZZZZZZZZZZZZZZZZZ"}, model.KindBook, waxerr.CodeNotFound, "", ""},
 		// One bad item refuses the whole request, the good one included.
-		{"mixed", []model.PID{plain, windowed}, model.KindBook, waxerr.CodeInvalid},
+		{"mixed", []model.PID{plain, windowed}, model.KindBook, waxerr.CodeInvalid, waxbin.ReasonKindCueTrack, ""},
 	} {
-		if _, err := lib.SetItemKind(ctx, c.pids, c.kind, waxbin.KindOptions{}); !waxerr.Is(err, c.code) {
-			t.Errorf("%s: err = %v, want %s", c.name, err, c.code)
+		_, err := lib.SetItemKind(ctx, c.pids, c.kind, waxbin.KindOptions{})
+		if !waxerr.Is(err, c.code) || waxerr.ReasonOf(err) != c.reason {
+			t.Errorf("%s: err = %v (reason %q), want %s %q", c.name, err, waxerr.ReasonOf(err), c.code, c.reason)
+		}
+		var refusal *waxbin.KindRefusal
+		switch named := errors.As(err, &refusal); {
+		case c.path == "" && named:
+			t.Errorf("%s: a KindRefusal for %s at %q, want no file named", c.name, refusal.Item, refusal.Path)
+		case c.path != "" && !named:
+			t.Errorf("%s: no KindRefusal, want item %s at %s", c.name, c.pids[0], c.path)
+		case c.path != "" && (refusal.Item != c.pids[0] || refusal.Path != c.path):
+			t.Errorf("%s: a KindRefusal for %s at %q, want item %s at %s", c.name, refusal.Item, refusal.Path, c.pids[0], c.path)
 		}
 	}
 	for _, pid := range []model.PID{plain, windowed, shared} {
@@ -264,6 +290,16 @@ func TestSetItemKindRefusals(t *testing.T) {
 	}
 	if v, err := lib.Get(ctx, cued); err != nil || v.Kind != model.KindBook {
 		t.Errorf("Emma after the refusals = %+v (err %v), want it still a book", v, err)
+	}
+}
+
+// TestKindRefusalReadsWithoutItsSentence: a KindRefusal built outside the package still
+// says which item and file it is about.
+func TestKindRefusalReadsWithoutItsSentence(t *testing.T) {
+	t.Parallel()
+	got := (&waxbin.KindRefusal{Item: "01ITEM", Path: "/music/a.mp3"}).Error()
+	if !strings.Contains(got, "01ITEM") || !strings.Contains(got, "/music/a.mp3") {
+		t.Fatalf("Error() = %q, want the item and the path", got)
 	}
 }
 

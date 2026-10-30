@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"testing"
 
 	"github.com/colespringer/waxbin/meta"
@@ -95,6 +96,23 @@ func TestProviderFailuresAreToldFromTheCatalogs(t *testing.T) {
 	if _, err := svc.Sync(cctx, pod.PID); !waxerr.Is(err, waxerr.CodeCanceled) || source.IsProviderError(err) {
 		t.Fatalf("a sync canceled mid-enumeration = %v (class %s), want a cancellation that is not the provider's",
 			err, waxerr.CodeOf(err))
+	}
+}
+
+// TestProviderErrorKeepsTheReasonAndStatus: a provider failure the service hands back
+// carries the reason and status its cause names.
+func TestProviderErrorKeepsTheReasonAndStatus(t *testing.T) {
+	t.Parallel()
+	yt := &source.Mock{Type: model.SourceYouTube,
+		EnumerateFunc: func(context.Context, source.Request) (*source.Enumeration, error) {
+			return nil, &waxerr.Error{Code: waxerr.CodeIO, Op: "youtube", Err: &source.StatusError{Status: http.StatusTooManyRequests},
+				Reason: source.ReasonHTTPStatus}
+		}}
+	svc, _, _ := newTestService(t, yt)
+	_, err := svc.AddSource(context.Background(), "yt://c1", model.SourceYouTube, podcast.AddOptions{})
+	var pe *source.ProviderError
+	if !errors.As(err, &pe) || pe.Reason != source.ReasonHTTPStatus || pe.Status != http.StatusTooManyRequests {
+		t.Fatalf("add = %+v (err %v), want the provider's http_status 429", pe, err)
 	}
 }
 

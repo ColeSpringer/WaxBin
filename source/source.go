@@ -12,8 +12,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 
+	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // Provider resolves URLs and fetches media for one source type (rss, youtube, ...).
@@ -47,10 +50,10 @@ type Provider interface {
 }
 
 // Request is the input for Resolve and Enumerate over a feed or channel URL.
-// User/Pass carry optional basic-auth; ETag/LastModified make Enumerate a
-// conditional GET. They are the pair the show's last committed enumeration
-// returned, and empty when a source is added or re-added (an OPML import re-adds)
-// or has never enumerated.
+// User/Pass carry optional basic-auth, sent only at the URL's own origin;
+// ETag/LastModified make Enumerate a conditional GET. They are the pair the show's
+// last committed enumeration returned, and empty when a source is added or re-added
+// (an OPML import re-adds) or has never enumerated.
 type Request struct {
 	URL          string
 	User         string
@@ -87,13 +90,16 @@ type Enumeration struct {
 	SourceID     string
 }
 
-// FetchRequest names one item's media to download. MaxBytes bounds the stream
-// (0 = the provider/client default).
+// FetchRequest names one item's media to download. User and Pass are the show's login,
+// which goes only to requests at the origin of AuthOrigin, the show's feed URL, or of URL
+// itself when AuthOrigin is empty; an enclosure another host serves is fetched without
+// it. MaxBytes bounds the stream (0 = the provider/client default).
 type FetchRequest struct {
-	URL      string
-	User     string
-	Pass     string
-	MaxBytes int64
+	URL        string
+	User       string
+	Pass       string
+	AuthOrigin string
+	MaxBytes   int64
 }
 
 // FetchResult reports a completed media fetch.
@@ -103,15 +109,67 @@ type FetchResult struct {
 	ContentType string
 }
 
+// The reasons a source fails, on the waxerr.Error the built-in provider returns and on
+// a ProviderError. An injected provider may use them too.
+const (
+	ReasonHTTPStatus     = netsafe.ReasonHTTPStatus
+	ReasonTooLarge       = netsafe.ReasonTooLarge
+	ReasonBlockedAddress = netsafe.ReasonBlockedAddress
+	ReasonMediaType      = netsafe.ReasonMediaType
+	ReasonRedirect       = netsafe.ReasonRedirect
+	ReasonTransport      = netsafe.ReasonTransport
+	// ReasonNotAFeed is a feed URL whose answer is not an RSS document.
+	ReasonNotAFeed waxerr.Reason = "not_a_feed"
+)
+
+// The typed causes behind those reasons, for errors.As.
+type (
+	StatusError         = netsafe.StatusError
+	TooLargeError       = netsafe.TooLargeError
+	BlockedAddressError = netsafe.BlockedAddressError
+	MediaTypeError      = netsafe.MediaTypeError
+	RedirectLimitError  = netsafe.RedirectLimitError
+)
+
 // ProviderError marks a failure as the provider's: the source could not be enumerated
 // or fetched, or the provider's answer broke the Provider contract. The podcast service
 // returns one from every provider call it makes, so a caller can tell a failing feed
 // from a failing catalog. Err keeps its waxerr class, which waxerr.CodeOf reads through
-// Unwrap. The type lives in-process only; a proxied error carries its class and text.
+// Unwrap; Reason and Status repeat what Err names, Status being the refused HTTP status
+// or 0. The type lives in-process only; a proxied error carries its class, reason and
+// text.
 type ProviderError struct {
 	SourceType model.SourceType
 	Op         string // "enumerate" or "fetch"
 	Err        error
+	Reason     waxerr.Reason
+	Status     int
+}
+
+// NewProviderError marks err as st's provider failing at op, with the reason err names
+// and, when that reason is ReasonHTTPStatus, the status. A status handed back with no
+// reason, as an injected provider may, is given ReasonHTTPStatus, keeping the class it
+// carries or, bare, taking the built-in provider's, so Reason, waxerr.ReasonOf and
+// waxerr.CodeOf all read it alike.
+func NewProviderError(st model.SourceType, op string, err error) *ProviderError {
+	pe := &ProviderError{SourceType: st, Op: op, Err: err, Reason: waxerr.ReasonOf(err)}
+	var se *StatusError
+	if (pe.Reason == "" || pe.Reason == ReasonHTTPStatus) && errors.As(err, &se) {
+		pe.Status = se.Status
+		if pe.Reason == "" {
+			code := waxerr.CodeIO
+			if se.Status == http.StatusNotFound {
+				code = waxerr.CodeNotFound
+			}
+			var we *waxerr.Error
+			if errors.As(err, &we) {
+				code = we.Code
+			}
+			pe.Err = &waxerr.Error{Code: code, Op: "source." + string(st), Err: err, Reason: ReasonHTTPStatus}
+			pe.Reason = ReasonHTTPStatus
+		}
+	}
+	return pe
 }
 
 func (e *ProviderError) Error() string {

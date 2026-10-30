@@ -5,6 +5,10 @@
 // alone. Two constructors override it: Classify, at a boundary that translates
 // another module's failure into a WaxBin class, and FromContext, which turns a
 // cancellation into CodeCanceled at any depth.
+//
+// A Reason can sit beside the class to say which of a class's refusals an error is,
+// such as a held lease among the conflicts. Wrap keeps it with the class; a new class
+// drops it.
 package waxerr
 
 import (
@@ -40,13 +44,19 @@ const (
 	CodeCanceled Code = "canceled"
 )
 
+// Reason names one refusal within a class, so a caller can tell two conflicts apart
+// without reading their words. The package that refuses owns its reasons; "" is none.
+type Reason string
+
 // Error is WaxBin's concrete error type. It records the failing operation, a
-// human-readable message, the stable Code, and an optional wrapped cause.
+// human-readable message, the stable Code, an optional Reason, and an optional
+// wrapped cause.
 type Error struct {
-	Code Code   // stable failure class
-	Op   string // logical operation, e.g. "store.Open" or "scan.File"
-	Msg  string // human-readable detail
-	Err  error  // wrapped cause, may be nil
+	Code   Code   // stable failure class
+	Op     string // logical operation, e.g. "store.Open" or "scan.File"
+	Msg    string // human-readable detail
+	Err    error  // wrapped cause, may be nil
+	Reason Reason // which refusal of its class this is, may be ""
 }
 
 func (e *Error) Error() string {
@@ -65,6 +75,13 @@ func (e *Error) Error() string {
 // Unwrap exposes the wrapped cause for errors.Is/errors.As.
 func (e *Error) Unwrap() error { return e.Err }
 
+// WithReason returns a copy of e carrying r.
+func (e *Error) WithReason(r Reason) *Error {
+	c := *e
+	c.Reason = r
+	return &c
+}
+
 // New builds an Error with a message but no wrapped cause.
 func New(code Code, op, msg string) *Error {
 	return &Error{Code: code, Op: op, Msg: msg}
@@ -76,29 +93,31 @@ func New(code Code, op, msg string) *Error {
 // the typed-nil pitfall where a nil *Error reads as a non-nil error.
 //
 // code classifies a cause that has no class yet. A cause that already carries one
-// keeps it, so an outer layer adding its op to a not-found, a lock, or a read-only
-// refusal does not turn it into the generic failure the outer layer would name.
+// keeps it, and its reason with it, so an outer layer adding its op to a not-found, a
+// lock, or a read-only refusal does not turn it into the generic failure the outer
+// layer would name.
 func Wrap(code Code, op string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &Error{Code: classOr(err, code), Op: op, Err: err}
+	return &Error{Code: classOr(err, code), Op: op, Err: err, Reason: ReasonOf(err)}
 }
 
 // Wrapf is Wrap with a formatted message. Like Wrap it returns a true nil for a
-// nil cause and keeps a class the cause already carries.
+// nil cause and keeps a class and reason the cause already carries.
 func Wrapf(code Code, op string, err error, format string, args ...any) error {
 	if err == nil {
 		return nil
 	}
-	return &Error{Code: classOr(err, code), Op: op, Msg: fmt.Sprintf(format, args...), Err: err}
+	return &Error{Code: classOr(err, code), Op: op, Msg: fmt.Sprintf(format, args...), Err: err, Reason: ReasonOf(err)}
 }
 
 // Classify builds an Error around a cause and sets its class to code even when the
 // cause already carries one. It is for a boundary that turns another module's
 // failure into WaxBin's own class, such as an injected cipher's or WaxFlow's;
-// everywhere else Wrap keeps the class the cause has. Like Wrap it returns a true
-// nil for a nil cause.
+// everywhere else Wrap keeps the class the cause has. The cause's reason explained
+// its old class, so the result has none. Like Wrap it returns a true nil for a nil
+// cause.
 func Classify(code Code, op string, err error) error {
 	if err == nil {
 		return nil
@@ -121,6 +140,16 @@ func classOr(err error, fallback Code) Code {
 		return e.Code
 	}
 	return fallback
+}
+
+// ReasonOf returns the reason of the outermost Error in err's chain, which Wrap keeps
+// equal to the first one given, or "" when it has none.
+func ReasonOf(err error) Reason {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Reason
+	}
+	return ""
 }
 
 // CodeOf returns err's class: the code of the outermost Error in its chain, which

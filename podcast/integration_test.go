@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/colespringer/waxbin/meta"
@@ -24,6 +25,10 @@ import (
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 )
+
+// fakeAudio is nine bytes an enclosure gate takes for audio: an MPEG frame header, then
+// payload.
+var fakeAudio = []byte("\xff\xfb\x90\x64audio")
 
 // feedXML builds a feed served from base, with `n` episodes (n=1 keeps only the
 // newer Episode Two, simulating a truncated feed).
@@ -105,7 +110,7 @@ func TestPodcastEndToEnd(t *testing.T) {
 	})
 	audio := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
-		_, _ = w.Write([]byte("audiobyte"))
+		_, _ = w.Write(fakeAudio)
 	}
 	mux.HandleFunc("/1.mp3", audio)
 	mux.HandleFunc("/2.mp3", audio)
@@ -265,7 +270,7 @@ func TestUnsubscribeRemovesEpisodesAndFiles(t *testing.T) {
 	})
 	audio := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
-		_, _ = w.Write([]byte("audiobyte"))
+		_, _ = w.Write(fakeAudio)
 	}
 	mux.HandleFunc("/1.mp3", audio)
 	mux.HandleFunc("/2.mp3", audio)
@@ -301,5 +306,57 @@ func TestUnsubscribeRemovesEpisodesAndFiles(t *testing.T) {
 	}
 	if _, err := st.GetSecret(ctx, secretKey); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("auth secret should be deleted on unsubscribe, got %v", err)
+	}
+}
+
+// TestDownloadSendsTheLoginOnlyToTheFeedsOrigin: a private feed's login goes with an
+// enclosure on the feed's own host and never to an enclosure another host serves.
+func TestDownloadSendsTheLoginOnlyToTheFeedsOrigin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var cdnSawLogin atomic.Bool
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, _, ok := r.BasicAuth(); ok {
+			cdnSawLogin.Store(true)
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write(fakeAudio)
+	}))
+	t.Cleanup(cdn.Close)
+	var base string
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if u, p, ok := r.BasicAuth(); !ok || u != "alice" || p != "pw" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path != "/feed.xml" {
+			w.Header().Set("Content-Type", "audio/mpeg")
+			_, _ = w.Write(fakeAudio)
+			return
+		}
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = fmt.Fprintf(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>Private</title>
+<item><title>Here</title><guid>here</guid><enclosure url="%s/1.mp3" type="audio/mpeg"/></item>
+<item><title>There</title><guid>there</guid><enclosure url="%s/2.mp3" type="audio/mpeg"/></item>
+</channel></rss>`, base, cdn.URL)
+	}))
+	t.Cleanup(feed.Close)
+	base = feed.URL
+	svc, _, _ := newTestService(t)
+	pod, err := svc.Add(ctx, feed.URL+"/feed.xml", podcast.AddOptions{User: "alice", Pass: "pw"})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	eps, err := svc.Episodes(ctx, pod.PID, 0)
+	if err != nil || len(eps) != 2 {
+		t.Fatalf("episodes = %d (err %v), want 2", len(eps), err)
+	}
+	for _, ep := range eps {
+		if _, err := svc.Download(ctx, ep.PID); err != nil {
+			t.Errorf("download %s: %v", ep.Title, err)
+		}
+	}
+	if cdnSawLogin.Load() {
+		t.Error("the feed's login went to another host's enclosure")
 	}
 }

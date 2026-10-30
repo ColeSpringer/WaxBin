@@ -1285,7 +1285,7 @@ func (e *watchEngine) Analyze(ctx context.Context) error {
 // next tick retries, so logging it at Warn is noise a healthy server emits routinely.
 func (e *watchEngine) logTick(msg string, err error, args ...any) {
 	args = append(args, "err", err)
-	if waxerr.Is(err, waxerr.CodeConflict) {
+	if jobs.IsLeaseHeld(err) {
 		e.lib.log.Debug(msg+" (busy; retrying next tick)", args...)
 		return
 	}

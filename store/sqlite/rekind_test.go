@@ -261,8 +261,8 @@ func TestRekindHoldsBackForAKindLock(t *testing.T) {
 	}
 	in := bookSpecInput(lib.ID, bookSpec{path: path, essence: "lk1", content: "lkc1", title: "The Hobbit",
 		author: "Tolkien", preserveLocks: true})
-	if _, err := st.PutScannedBook(ctx, in); !waxerr.Is(err, waxerr.CodeConflict) {
-		t.Fatalf("unforced put over a kind lock = %v, want a conflict", err)
+	if _, err := st.PutScannedBook(ctx, in); !waxerr.Is(err, waxerr.CodeLocked) || waxerr.ReasonOf(err) != model.ReasonKindLocked {
+		t.Fatalf("unforced put over a kind lock = %v (%s %q), want the kind-locked refusal", err, waxerr.CodeOf(err), waxerr.ReasonOf(err))
 	}
 	if v, err := st.ItemByPID(ctx, pid); err != nil || v.Kind != model.KindTrack {
 		t.Fatalf("item = %+v (err %v), want the locked track", v, err)

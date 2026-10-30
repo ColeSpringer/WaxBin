@@ -39,7 +39,7 @@ func unfetchFixture(t *testing.T) (*podcast.Service, *sqlite.Store, []*model.Epi
 	})
 	audio := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
-		_, _ = w.Write([]byte("audiobyte"))
+		_, _ = w.Write(fakeAudio)
 	}
 	mux.HandleFunc("/1.mp3", audio)
 	mux.HandleFunc("/2.mp3", audio)
@@ -94,8 +94,8 @@ func TestUnfetchReclaimsAndPreservesPlayState(t *testing.T) {
 	if !res.Unfetched {
 		t.Error("Unfetch of a downloaded episode reported Unfetched=false")
 	}
-	if res.ReclaimedBytes != int64(len("audiobyte")) {
-		t.Errorf("reclaimed %d bytes, want %d", res.ReclaimedBytes, len("audiobyte"))
+	if res.ReclaimedBytes != int64(len(fakeAudio)) {
+		t.Errorf("reclaimed %d bytes, want %d", res.ReclaimedBytes, len(fakeAudio))
 	}
 	if _, err := os.Stat(dl.Path); !os.IsNotExist(err) {
 		t.Errorf("file still on disk at %s (stat err %v)", dl.Path, err)

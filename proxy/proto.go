@@ -26,7 +26,8 @@ import (
 
 // ProtocolVersion is the wire protocol version. A request carrying a different
 // version is rejected, so a newer client cannot silently misdrive an older
-// server.
+// server. An error's reason rides on 23 as an added field, which an older peer
+// ignores.
 const ProtocolVersion = 23
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -122,12 +123,15 @@ type response struct {
 	Error *wireError      `json:"error,omitempty"`
 }
 
-// wireError is a serialized waxerr.Error: the stable code plus the operation and
-// message, so the client can rebuild an error that carries the same class.
+// wireError is a serialized waxerr.Error: the stable code and reason plus the operation
+// and message, so the client can rebuild an error that carries the same class. A typed
+// cause such as a jobs.LeaseHeldError stays in the server's process; its reason is what
+// crosses.
 type wireError struct {
-	Code string `json:"code"`
-	Op   string `json:"op,omitempty"`
-	Msg  string `json:"msg"`
+	Code   string `json:"code"`
+	Op     string `json:"op,omitempty"`
+	Msg    string `json:"msg"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // toWireError serializes err for transport, preserving its waxerr class and its text. A
@@ -136,7 +140,7 @@ func toWireError(err error) *wireError {
 	if err == nil {
 		return nil
 	}
-	we := &wireError{Code: string(waxerr.CodeOf(err)), Msg: err.Error()}
+	we := &wireError{Code: string(waxerr.CodeOf(err)), Msg: err.Error(), Reason: string(waxerr.ReasonOf(err))}
 	var e *waxerr.Error
 	if errors.As(err, &e) {
 		// The client puts the op back in front of the message, so the message is the
@@ -156,9 +160,9 @@ func toWireError(err error) *wireError {
 	return we
 }
 
-// fromWireError rebuilds a *waxerr.Error carrying the wire code, so waxerr.Is /
-// CodeOf and the CLI exit-code mapping behave the same as a local failure. A nil
-// wireError yields nil.
+// fromWireError rebuilds a *waxerr.Error carrying the wire code and reason, so
+// waxerr.Is / CodeOf / ReasonOf and the CLI exit-code mapping behave the same as a local
+// failure. A nil wireError yields nil.
 func fromWireError(we *wireError) error {
 	if we == nil {
 		return nil
@@ -167,7 +171,7 @@ func fromWireError(we *wireError) error {
 	if op == "" {
 		op = "proxy.remote"
 	}
-	return waxerr.New(waxerr.Code(we.Code), op, we.Msg)
+	return waxerr.New(waxerr.Code(we.Code), op, we.Msg).WithReason(waxerr.Reason(we.Reason))
 }
 
 // --- request/response payload DTOs ---

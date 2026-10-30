@@ -2244,6 +2244,10 @@ func TestServeProxiedRunSetKind(t *testing.T) {
 	if _, err := c.RunSetKind(ctx, proxy.SetKindParams{ItemPIDs: []string{"01ZZZZZZZZZZZZZZZZZZZZZZZZ"}, Kind: "book"}); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("run_set_kind of an unknown item = %v, want CodeNotFound", err)
 	}
+	if _, err := c.RunSetKind(ctx, proxy.SetKindParams{ItemPIDs: []string{string(one)}, Kind: "episode"}); !waxerr.Is(err, waxerr.CodeInvalid) ||
+		waxerr.ReasonOf(err) != waxbin.ReasonKindBadTarget {
+		t.Fatalf("run_set_kind to an episode = %v (reason %q), want CodeInvalid naming the target kind", err, waxerr.ReasonOf(err))
+	}
 	jobPID, err := c.RunSetKind(ctx, proxy.SetKindParams{ItemPIDs: []string{string(one), string(two)}, Kind: "book", WriteBack: true})
 	if err != nil {
 		t.Fatalf("run_set_kind: %v", err)

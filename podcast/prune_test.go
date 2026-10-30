@@ -42,7 +42,7 @@ func renamedShow(t *testing.T) (svc *podcast.Service, dir string, pod *model.Pod
 	})
 	audio := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
-		_, _ = w.Write([]byte("audiobyte"))
+		_, _ = w.Write(fakeAudio)
 	}
 	mux.HandleFunc("/1.mp3", audio)
 	mux.HandleFunc("/2.mp3", audio)

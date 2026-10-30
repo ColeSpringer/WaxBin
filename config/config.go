@@ -51,7 +51,7 @@ type PodcastConfig struct {
 	Dir               string `json:"dir,omitempty"`                 // download directory (downloads require it)
 	UserAgent         string `json:"user_agent,omitempty"`          // HTTP User-Agent
 	BlockPrivateIPs   bool   `json:"block_private_ips,omitempty"`   // SSRF guard (refuse private/loopback)
-	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`     // per-request timeout (0 = default)
+	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`     // per-request timeout; a download's body by its silences (0 = default)
 	MaxFeedBytes      int64  `json:"max_feed_bytes,omitempty"`      // cap on a feed/transcript body
 	MaxEnclosureBytes int64  `json:"max_enclosure_bytes,omitempty"` // cap on an episode download
 	DefaultRetention  int    `json:"default_retention,omitempty"`   // keep newest N per feed (0 = keep all)

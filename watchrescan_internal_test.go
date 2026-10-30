@@ -1,14 +1,19 @@
 package waxbin
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // TestWatchRescanCountsAPromotionAsAChange: a rescan whose only effect was promoting a
@@ -40,5 +45,20 @@ func TestWatchRescanCountsAPromotionAsAChange(t *testing.T) {
 	changed, err := (&watchEngine{lib: lib}).Rescan(ctx, libs[0].PID, "", false)
 	if err != nil || !changed {
 		t.Errorf("rescan changed = %v (err %v), want a change", changed, err)
+	}
+}
+
+// TestLogTickCallsOnlyAHeldLeaseBusy: a tick that lost the lease to another mutator is
+// quiet, and any other conflict, which the next tick meets again, is a warning.
+func TestLogTickCallsOnlyAHeldLeaseBusy(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	e := &watchEngine{lib: &Library{log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}}
+	e.logTick("watch: inbox import", waxerr.New(waxerr.CodeConflict, "jobs.RunLeased", "busy").WithReason(jobs.ReasonLeaseHeld))
+	e.logTick("watch: inbox import", waxerr.New(waxerr.CodeConflict, "store.EnsurePodcastLibrary", "podcast dir is already a music library root"))
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "level=DEBUG") || !strings.Contains(lines[0], "busy; retrying next tick") ||
+		!strings.Contains(lines[1], "level=WARN") || strings.Contains(lines[1], "retrying next tick") {
+		t.Fatalf("log = %q, want the held lease at debug and the other conflict a warning", lines)
 	}
 }

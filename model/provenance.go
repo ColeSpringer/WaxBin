@@ -1,6 +1,10 @@
 package model
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/colespringer/waxbin/waxerr"
+)
 
 // ProvenanceSource records where a value came from. It is shared by two surfaces
 // with different value sets. On a scalar field (field_provenance, entity_curation)
@@ -246,6 +250,11 @@ var lockOnlyFields = map[string]bool{
 // against the rule writes it (source user), as does a kind change (SetItemKind) on every
 // item it leaves; a re-kind drops it, the kind it pinned being gone.
 const KindLockField = "kind"
+
+// ReasonKindLocked is the reason on a refusal to change the kind of an item whose kind is
+// locked, whether a kind change checked the lock first or a scan's write met a lock set
+// after it read the item.
+const ReasonKindLocked waxerr.Reason = "kind_locked"
 
 // IsMetadataField reports whether field is a scalar, one-value curatable/editable
 // metadata field. The structured artifacts (lyrics/chapters/art/acquisition) and

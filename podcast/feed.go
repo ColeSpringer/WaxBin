@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/source"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -187,7 +188,8 @@ type pcSoundbite struct {
 
 // ParseFeed parses an RSS 2.0 podcast feed (iTunes + Podcasting 2.0 extensions)
 // into a normalized model.Feed. It tolerates unknown elements and namespaces and
-// only fails on XML that is not a recognizable RSS document.
+// only fails on XML that is not a recognizable RSS document, with
+// source.ReasonNotAFeed.
 func ParseFeed(data []byte) (*model.Feed, error) {
 	const op = "podcast.ParseFeed"
 	var doc rssDoc
@@ -199,11 +201,11 @@ func ParseFeed(data []byte) (*model.Feed, error) {
 	dec := xml.NewTokenDecoder(&nsReader{dec: raw})
 	dec.Strict = false
 	if err := dec.Decode(&doc); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
+		return nil, &waxerr.Error{Code: waxerr.CodeInvalid, Op: op, Err: err, Reason: source.ReasonNotAFeed}
 	}
 	ch := doc.Channel
 	if strings.TrimSpace(ch.Title) == "" && len(ch.Items) == 0 {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "not a recognizable RSS podcast feed")
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "not a recognizable RSS podcast feed").WithReason(source.ReasonNotAFeed)
 	}
 
 	feed := &model.Feed{

@@ -57,9 +57,9 @@ type KindReport struct {
 //
 // An episode, a cue track, a file another item shares, a book file whose cue sheet would
 // carve it into cue tracks once read as a track, a part not on disk and, without Force, an
-// item whose kind is locked are refused before anything changes. A file that fails
-// partway fails the job, and the report returned with the error says what changed before
-// it.
+// item whose kind is locked are refused before anything changes, each with one of the
+// ReasonKind reasons. A file that fails partway fails the job, and the report returned
+// with the error says what changed before it.
 func (l *Library) SetItemKind(ctx context.Context, pids []model.PID, kind model.Kind, opts KindOptions) (*KindReport, error) {
 	const op = "waxbin.SetItemKind"
 	if l.ReadOnly() {
@@ -92,6 +92,39 @@ func (l *Library) StartSetItemKind(ctx context.Context, pids []model.PID, kind m
 	})
 }
 
+// The reasons a kind change is refused, each beside its refusal's class.
+const (
+	ReasonKindBadTarget     waxerr.Reason = "kind_bad_target" // a target kind other than track or book
+	ReasonKindNoItems       waxerr.Reason = "kind_no_items"
+	ReasonKindSourceDecides waxerr.Reason = "kind_source_decides" // an episode or other kind its source decides
+	ReasonKindCueTrack      waxerr.Reason = "kind_cue_track"
+	ReasonKindSharedFile    waxerr.Reason = "kind_shared_file"
+	ReasonKindCueSheet      waxerr.Reason = "kind_cue_sheet" // a sheet beside the file would make it a cue rip
+	ReasonKindNotOnDisk     waxerr.Reason = "kind_not_on_disk"
+	ReasonKindNoFile        waxerr.Reason = "kind_no_file"
+	ReasonKindLocked        waxerr.Reason = model.ReasonKindLocked // a scan that met a lock set since it read the item says so too
+)
+
+// KindRefusal is the cause of a kind refusal about one file: the item refused and the
+// file's display path. The shared-file, cue-sheet and not-on-disk refusals carry one.
+type KindRefusal struct {
+	Item model.PID
+	Path string
+	msg  string
+}
+
+func (r *KindRefusal) Error() string {
+	if r.msg == "" {
+		return fmt.Sprintf("item %s cannot change kind because of %s", r.Item, r.Path)
+	}
+	return r.msg
+}
+
+// kindRefusalAt builds a refusal about one file of item, reading as msg.
+func kindRefusalAt(code waxerr.Code, op string, reason waxerr.Reason, item model.PID, path, msg string) error {
+	return &waxerr.Error{Code: code, Op: op, Err: &KindRefusal{Item: item, Path: path, msg: msg}, Reason: reason}
+}
+
 // kindSpec names a kind change's job, targeting the first item it names.
 func kindSpec(pids []model.PID) jobs.Spec {
 	spec := jobs.Spec{Kind: "set-kind", Scope: fsMutateScope, TargetType: "item"}
@@ -105,7 +138,8 @@ func kindSpec(pids []model.PID) jobs.Spec {
 // order named.
 func (l *Library) kindTargets(ctx context.Context, op string, pids []model.PID, kind model.Kind, force bool) ([]model.KindTarget, error) {
 	if kind != model.KindTrack && kind != model.KindBook {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "an item's kind can only be changed to track or book, not "+string(kind))
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "an item's kind can only be changed to track or book, not "+string(kind)).
+			WithReason(ReasonKindBadTarget)
 	}
 	var uniq []model.PID
 	for _, p := range pids {
@@ -114,7 +148,7 @@ func (l *Library) kindTargets(ctx context.Context, op string, pids []model.PID, 
 		}
 	}
 	if len(uniq) == 0 {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "no items named")
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no items named").WithReason(ReasonKindNoItems)
 	}
 	targets, err := l.store.KindTargets(ctx, uniq)
 	if err != nil {
@@ -122,7 +156,8 @@ func (l *Library) kindTargets(ctx context.Context, op string, pids []model.PID, 
 	}
 	for _, t := range targets {
 		if t.Kind != model.KindTrack && t.Kind != model.KindBook {
-			return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("item %s is a %s, whose kind its source decides", t.ItemPID, t.Kind))
+			return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("item %s is a %s, whose kind its source decides", t.ItemPID, t.Kind)).
+				WithReason(ReasonKindSourceDecides)
 		}
 		// An item already of the kind is not read, so its files refuse nothing.
 		if t.Kind == kind {
@@ -132,14 +167,16 @@ func (l *Library) kindTargets(ctx context.Context, op string, pids []model.PID, 
 		for _, f := range t.Files {
 			switch {
 			case f.Windowed:
-				return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("item %s is a cue track, whose kind follows its rip file", t.ItemPID))
+				return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("item %s is a cue track, whose kind follows its rip file", t.ItemPID)).
+					WithReason(ReasonKindCueTrack)
 			case f.Shared:
-				return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("item %s shares the file %s with another item", t.ItemPID, f.DisplayPath))
+				return nil, kindRefusalAt(waxerr.CodeInvalid, op, ReasonKindSharedFile, t.ItemPID, f.DisplayPath,
+					fmt.Sprintf("item %s shares the file %s with another item", t.ItemPID, f.DisplayPath))
 			}
 			// A book file read as a track takes a cue sheet beside it as its tracks, unless
 			// its own chapters win, and cue tracks hold no kind lock.
 			if kind == model.KindTrack && !f.Embedded && scan.CueRipTracks(string(f.Path), f.Codec, f.DurationMS) > 1 {
-				return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(
+				return nil, kindRefusalAt(waxerr.CodeInvalid, op, ReasonKindCueSheet, t.ItemPID, f.DisplayPath, fmt.Sprintf(
 					"item %s has a cue sheet beside %s, which would make the file a cue rip; move the sheet aside first",
 					t.ItemPID, f.DisplayPath))
 			}
@@ -152,14 +189,16 @@ func (l *Library) kindTargets(ctx context.Context, op string, pids []model.PID, 
 				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if !present {
-				return nil, waxerr.New(waxerr.CodeConflict, op, fmt.Sprintf("item %s cannot be read as a %s: %s is not on disk", t.ItemPID, kind, f.DisplayPath))
+				return nil, kindRefusalAt(waxerr.CodeConflict, op, ReasonKindNotOnDisk, t.ItemPID, f.DisplayPath,
+					fmt.Sprintf("item %s cannot be read as a %s: %s is not on disk", t.ItemPID, kind, f.DisplayPath))
 			}
 		}
 		if parts == 0 {
-			return nil, waxerr.New(waxerr.CodeConflict, op, fmt.Sprintf("item %s has no file to read", t.ItemPID))
+			return nil, waxerr.New(waxerr.CodeConflict, op, fmt.Sprintf("item %s has no file to read", t.ItemPID)).WithReason(ReasonKindNoFile)
 		}
 		if t.KindLocked && !force {
-			return nil, waxerr.New(waxerr.CodeLocked, op, fmt.Sprintf("item %s is locked as a %s (use force to override)", t.ItemPID, t.Kind))
+			return nil, waxerr.New(waxerr.CodeLocked, op, fmt.Sprintf("item %s is locked as a %s (use force to override)", t.ItemPID, t.Kind)).
+				WithReason(ReasonKindLocked)
 		}
 	}
 	return targets, nil
