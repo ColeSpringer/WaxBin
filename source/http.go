@@ -68,12 +68,12 @@ func (h *HTTPProvider) Enumerate(ctx context.Context, req Request) (*Enumeration
 	if err != nil {
 		return nil, err
 	}
-	if resp.NotModified {
-		return &Enumeration{NotModified: true, ETag: resp.ETag, LastModified: resp.LastModified}, nil
-	}
-	out := &Enumeration{Feed: feed, ETag: resp.ETag, LastModified: resp.LastModified}
+	out := &Enumeration{NotModified: resp.NotModified, Feed: feed, ETag: resp.ETag, LastModified: resp.LastModified}
 	if feed != nil {
 		out.IdentityKey = identity.PodcastKey(feed.GUID, req.URL)
+	}
+	if resp.Permanent {
+		out.MovedTo = resp.FinalURL
 	}
 	return out, nil
 }

@@ -81,6 +81,11 @@ type Resolved struct {
 // unchanged episode costs the store one read. IdentityKey is read when a source is
 // added, and a sync keeps the show's stored identity; SourceID is not stored, and is
 // there for a caller that enumerates a provider directly.
+//
+// MovedTo is the address an enumeration, a NotModified one included, was answered at
+// when the source said, through permanent redirects only (301 or 308), that it moved
+// there, and empty otherwise. A sync stores it as the show's address when it is at an
+// origin the show's login would go to, the feed's own or its https form.
 type Enumeration struct {
 	NotModified  bool
 	Feed         *model.Feed
@@ -88,6 +93,7 @@ type Enumeration struct {
 	LastModified string
 	IdentityKey  string
 	SourceID     string
+	MovedTo      string
 }
 
 // FetchRequest names one item's media to download. User and Pass are the show's login,

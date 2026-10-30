@@ -203,7 +203,8 @@ func (s *Server) dispatch(ctx context.Context, conn net.Conn, req request) respo
 	}
 	h, ok := s.handlers[req.Method]
 	if !ok {
-		return errResponse(waxerr.New(waxerr.CodeInvalid, "proxy.dispatch", "unknown method: "+req.Method))
+		return errResponse(waxerr.New(waxerr.CodeInvalid, "proxy.dispatch", "unknown method: "+req.Method).
+			WithReason(ReasonUnknownMethod))
 	}
 	data, err := h(ctx, req.Params)
 	if err != nil {

@@ -72,3 +72,36 @@ func TestCapDetailEscapesWhatATerminalActsOn(t *testing.T) {
 		t.Errorf("CapDetailWithTail = %q, want the body escaped", got)
 	}
 }
+
+// TestCapText: a stored line of feed text reads as one line, cut at a count of
+// characters, with what a terminal would act on escaped (bidirectional embeddings,
+// overrides and isolates among it) and the right-to-left marks and joiners kept.
+func TestCapText(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"short", 10, "short"},
+		{strings.Repeat("é", 1001), 1000, strings.Repeat("é", 1000)},
+		{"Episode 12:\n   The Return", 100, "Episode 12: The Return"},
+		{"tab\there\r\nand\u2028there", 100, "tab here and there"},
+		{"next\u0085line", 100, "next line"},
+		{"two  spaces", 100, "two  spaces"},
+		{"ansi\x1b[31m red", 100, `ansi\x1b[31m red`},
+		{"del\x7f c1\u009b", 100, `del\x7f c1\u009b`},
+		{"\xff not utf-8", 100, `\xff not utf-8`},
+		{"rtl \u200fmark \u200eltr \u061calm", 100, "rtl \u200fmark \u200eltr \u061calm"},
+		{"embed \u202b override \u202e isolate \u2067x\u2069", 100, `embed \u202b override \u202e isolate \u2067x\u2069`},
+		{"emoji \U0001F469\u200d\U0001F4BB", 100, "emoji \U0001F469\u200d\U0001F4BB"},
+		{"two words", 4, "two"},
+		{"cut\x1b", 5, "cut"},
+		{"     ", 2, ""},
+		{"ends spaced ", 100, "ends spaced "},
+	} {
+		if got := CapText(c.in, c.max); got != c.want {
+			t.Errorf("CapText(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
+		}
+	}
+}

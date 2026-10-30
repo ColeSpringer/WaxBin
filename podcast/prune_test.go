@@ -47,10 +47,11 @@ func renamedShow(t *testing.T) (svc *podcast.Service, dir string, pod *model.Pod
 	mux.HandleFunc("/1.mp3", audio)
 	mux.HandleFunc("/2.mp3", audio)
 	svc = podcast.New(st, meta.NewReader(), podcast.Config{Dir: dir}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	pod, err = svc.Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{})
+	added, err := svc.Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
+	pod = added.Podcast
 	if eps, err = svc.Episodes(ctx, pod.PID, 0); err != nil || len(eps) != 2 {
 		t.Fatalf("episodes = %d (err %v), want 2", len(eps), err)
 	}

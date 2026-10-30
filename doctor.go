@@ -20,7 +20,7 @@ type DoctorReport struct {
 	BuildSchemaVersion int
 	ReadOnly           bool
 	Owner              sqlite.OwnerInfo
-	LibraryCount       int
+	LibraryCount       int // library roots, the internal podcast library left out
 	ItemCount          int
 	FingerprintCount   int
 	LoudnessCount      int // files with a stored ReplayGain measurement
@@ -87,7 +87,7 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	rep.LibraryCount = len(libs)
+	rep.LibraryCount = len(model.UserLibraries(libs))
 
 	n, err := l.store.CountItems(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {

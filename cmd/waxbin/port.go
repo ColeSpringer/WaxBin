@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/internal/lockwait"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -168,7 +169,8 @@ func relocateRestored(cmd *cobra.Command, g *globals, root string, allowAbsent b
 	if err != nil {
 		return "", err
 	}
-	if len(libs) != 1 {
+	roots := model.UserLibraries(libs)
+	if len(roots) != 1 {
 		return "", waxerr.New(waxerr.CodeInvalid, "restore",
 			"--root relocates a single library; the restored catalog has none or several")
 	}
@@ -176,7 +178,7 @@ func relocateRestored(cmd *cobra.Command, g *globals, root string, allowAbsent b
 	if allowAbsent {
 		opts = append(opts, waxbin.AllowAbsent())
 	}
-	return abs, lib.RelocateRoot(ctx(cmd), libs[0].PID, abs, opts...)
+	return abs, lib.RelocateRoot(ctx(cmd), roots[0].PID, abs, opts...)
 }
 
 func newExportCmd(g *globals) *cobra.Command {

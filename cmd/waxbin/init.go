@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -50,12 +51,14 @@ func newInitCmd(g *globals) *cobra.Command {
 			}
 
 			fmt.Fprintf(out(cmd), "Initialized catalog at %s (schema v%d)\n", cfg.DBPath, sqlite.SchemaVersion)
-			if len(libs) == 0 {
+			roots := model.UserLibraries(libs)
+			if len(roots) == 0 {
 				fmt.Fprintln(out(cmd), "No library roots registered (pass --root path[:mode[:media[:profile]]]).")
 			}
-			for _, l := range libs {
+			for _, l := range roots {
 				fmt.Fprintf(out(cmd), "  %s  %s  [%s, %s, %s]\n", l.PID, l.DisplayRoot, l.Mode, l.MediaType(), l.Profile)
 			}
+			printPodcastLibraries(cmd, libs, "  ")
 			return nil
 		},
 	}

@@ -81,7 +81,7 @@ type Chapter struct {
 	Title       string
 	StartMS     int64 // book-timeline offset (read; input to SetChapters)
 	EndMS       int64 // book-timeline end offset, 0 if open-ended (read; input to SetChapters)
-	FilePID     PID   // the file backing this chapter
+	FilePID     PID   // the file backing this chapter; empty for an episode's feed chapters with no download
 	FileStartMS int64 // offset within FilePID's file (stored)
 	FileEndMS   int64 // end offset within FilePID's file, 0 if open-ended (stored)
 }

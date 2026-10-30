@@ -717,7 +717,7 @@ func TestEpisodeArtLockSurvivesRedownload(t *testing.T) {
 	}
 	// The download path re-attaches the feed's image on every fetch.
 	if _, err := st.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
-		EpisodePID: ep, LibraryID: podLibID,
+		EpisodePID: ep, LibraryID: podLibID.ID,
 		File: model.File{
 			Path: []byte("/pod/1.mp3"), DisplayPath: "/pod/1.mp3", RelPath: []byte("1.mp3"),
 			Kind: model.FileAudio, ContentHash: "c1", EssenceHash: "e1", ScanState: model.ScanIndexed,

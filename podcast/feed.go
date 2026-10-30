@@ -34,18 +34,22 @@ const (
 	nsContent = "http://purl.org/rss/1.0/modules/content/"
 )
 
-// nsAliases maps a namespace's spellings, lowercased with the scheme, a leading "www." and a
-// trailing slash dropped, to the URI the struct tags name. A bare prefix is what encoding/xml leaves as
-// the namespace of a prefix the feed never declared. The GitHub address is where the
-// Podcasting 2.0 namespace lived before podcastindex.org, and some feeds still declare it.
+// nsAliases maps a namespace's spellings, lowercased with the scheme, a leading "www."
+// and a trailing slash dropped, to the URI the struct tags name. A bare prefix is what
+// encoding/xml leaves as the namespace of a prefix the feed never declared. The GitHub
+// addresses, on either branch and in their raw form, are where the Podcasting 2.0
+// namespace lived before podcastindex.org, and some feeds still declare one of them.
 var nsAliases = map[string]string{
-	"itunes.com/dtds/podcast-1.0.dtd":                                     nsITunes,
-	"podcastindex.org/namespace/1.0":                                      nsPodcast,
-	"github.com/podcastindex-org/podcast-namespace/blob/main/docs/1.0.md": nsPodcast,
-	"purl.org/rss/1.0/modules/content":                                    nsContent,
-	"itunes":                                                              nsITunes,
-	"podcast":                                                             nsPodcast,
-	"content":                                                             nsContent,
+	"itunes.com/dtds/podcast-1.0.dtd":                                                 nsITunes,
+	"podcastindex.org/namespace/1.0":                                                  nsPodcast,
+	"github.com/podcastindex-org/podcast-namespace/blob/main/docs/1.0.md":             nsPodcast,
+	"github.com/podcastindex-org/podcast-namespace/blob/master/docs/1.0.md":           nsPodcast,
+	"raw.githubusercontent.com/podcastindex-org/podcast-namespace/main/docs/1.0.md":   nsPodcast,
+	"raw.githubusercontent.com/podcastindex-org/podcast-namespace/master/docs/1.0.md": nsPodcast,
+	"purl.org/rss/1.0/modules/content":                                                nsContent,
+	"itunes":                                                                          nsITunes,
+	"podcast":                                                                         nsPodcast,
+	"content":                                                                         nsContent,
 }
 
 // canonicalNS returns the URI the struct tags use for a namespace, or space unchanged.
@@ -95,21 +99,21 @@ type rssDoc struct {
 }
 
 type rssChannel struct {
-	Title          string      `xml:"title"`
-	Link           string      `xml:"link"`
-	Description    string      `xml:"description"`
-	Language       string      `xml:"language"`
-	ITunesAuthor   string      `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd author"`
-	ManagingEditor string      `xml:"managingEditor"`
-	ITunesExplicit string      `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd explicit"`
-	ITunesImage    hrefImage   `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
-	Image          rssImage    `xml:"image"`
-	ITunesCategory []itunesCat `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd category"`
-	PodcastGUID    string      `xml:"https://podcastindex.org/namespace/1.0 guid"`
-	Funding        []pcFunding `xml:"https://podcastindex.org/namespace/1.0 funding"`
-	Medium         string      `xml:"https://podcastindex.org/namespace/1.0 medium"`
-	Persons        []pcPerson  `xml:"https://podcastindex.org/namespace/1.0 person"`
-	Items          []rssItem   `xml:"item"`
+	Title          string              `xml:"title"`
+	Link           string              `xml:"link"`
+	Description    string              `xml:"description"`
+	Language       string              `xml:"language"`
+	ITunesAuthor   string              `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd author"`
+	ManagingEditor string              `xml:"managingEditor"`
+	ITunesExplicit string              `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd explicit"`
+	ITunesImage    hrefImage           `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
+	Image          rssImage            `xml:"image"`
+	ITunesCategory repeated[itunesCat] `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd category"`
+	PodcastGUID    string              `xml:"https://podcastindex.org/namespace/1.0 guid"`
+	Funding        repeated[pcFunding] `xml:"https://podcastindex.org/namespace/1.0 funding"`
+	Medium         string              `xml:"https://podcastindex.org/namespace/1.0 medium"`
+	Persons        repeated[pcPerson]  `xml:"https://podcastindex.org/namespace/1.0 person"`
+	Items          itemList            `xml:"item"`
 }
 
 type rssImage struct {
@@ -125,24 +129,24 @@ type itunesCat struct {
 }
 
 type rssItem struct {
-	Title             string         `xml:"title"`
-	Link              string         `xml:"link"`
-	Description       string         `xml:"description"`
-	ContentEncoded    string         `xml:"http://purl.org/rss/1.0/modules/content/ encoded"`
-	ITunesSummary     string         `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd summary"`
-	GUID              rssGUID        `xml:"guid"`
-	PubDate           string         `xml:"pubDate"`
-	Enclosure         rssEnclosure   `xml:"enclosure"`
-	ITunesDuration    string         `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd duration"`
-	ITunesEpisode     string         `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd episode"`
-	ITunesSeason      string         `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd season"`
-	ITunesEpisodeType string         `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd episodeType"`
-	ITunesExplicit    string         `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd explicit"`
-	ITunesImage       hrefImage      `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
-	Transcripts       []pcTranscript `xml:"https://podcastindex.org/namespace/1.0 transcript"`
-	Chapters          pcChapters     `xml:"https://podcastindex.org/namespace/1.0 chapters"`
-	Persons           []pcPerson     `xml:"https://podcastindex.org/namespace/1.0 person"`
-	Soundbites        []pcSoundbite  `xml:"https://podcastindex.org/namespace/1.0 soundbite"`
+	Title             string                 `xml:"title"`
+	Link              string                 `xml:"link"`
+	Description       string                 `xml:"description"`
+	ContentEncoded    string                 `xml:"http://purl.org/rss/1.0/modules/content/ encoded"`
+	ITunesSummary     string                 `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd summary"`
+	GUID              rssGUID                `xml:"guid"`
+	PubDate           string                 `xml:"pubDate"`
+	Enclosure         rssEnclosure           `xml:"enclosure"`
+	ITunesDuration    string                 `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd duration"`
+	ITunesEpisode     string                 `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd episode"`
+	ITunesSeason      string                 `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd season"`
+	ITunesEpisodeType string                 `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd episodeType"`
+	ITunesExplicit    string                 `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd explicit"`
+	ITunesImage       hrefImage              `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
+	Transcripts       repeated[pcTranscript] `xml:"https://podcastindex.org/namespace/1.0 transcript"`
+	Chapters          pcChapters             `xml:"https://podcastindex.org/namespace/1.0 chapters"`
+	Persons           repeated[pcPerson]     `xml:"https://podcastindex.org/namespace/1.0 person"`
+	Soundbites        repeated[pcSoundbite]  `xml:"https://podcastindex.org/namespace/1.0 soundbite"`
 }
 
 type rssGUID struct {
@@ -189,7 +193,10 @@ type pcSoundbite struct {
 // ParseFeed parses an RSS 2.0 podcast feed (iTunes + Podcasting 2.0 extensions)
 // into a normalized model.Feed. It tolerates unknown elements and namespaces and
 // only fails on XML that is not a recognizable RSS document, with
-// source.ReasonNotAFeed.
+// source.ReasonNotAFeed. Its text is held to the bounds in caps.go, and it decodes at
+// most MaxEpisodesPerFeed items and MaxPersons of any other repeated tag, counting the
+// items past the bound in EpisodesDropped, so a hostile feed costs memory and index
+// space only up to them.
 func ParseFeed(data []byte) (*model.Feed, error) {
 	const op = "podcast.ParseFeed"
 	var doc rssDoc
@@ -204,7 +211,7 @@ func ParseFeed(data []byte) (*model.Feed, error) {
 		return nil, &waxerr.Error{Code: waxerr.CodeInvalid, Op: op, Err: err, Reason: source.ReasonNotAFeed}
 	}
 	ch := doc.Channel
-	if strings.TrimSpace(ch.Title) == "" && len(ch.Items) == 0 {
+	if strings.TrimSpace(ch.Title) == "" && len(ch.Items.items) == 0 {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "not a recognizable RSS podcast feed").WithReason(source.ReasonNotAFeed)
 	}
 
@@ -220,25 +227,27 @@ func ParseFeed(data []byte) (*model.Feed, error) {
 		Medium:   strings.ToLower(strings.TrimSpace(ch.Medium)),
 		GUID:     strings.TrimSpace(ch.PodcastGUID),
 		ImageURL: firstNonEmpty(strings.TrimSpace(ch.ITunesImage.Href), strings.TrimSpace(ch.Image.URL)),
-		Persons:  normalizePersons(ch.Persons),
+		Persons:  normalizePersons(ch.Persons.list),
 	}
-	if len(ch.ITunesCategory) > 0 {
-		feed.Category = strings.TrimSpace(ch.ITunesCategory[0].Text)
+	if cats := ch.ITunesCategory.list; len(cats) > 0 {
+		feed.Category = strings.TrimSpace(cats[0].Text)
 	}
 	// A feed may list several funding tags; keep the first that carries a URL (a
 	// tag without one has nothing to link to).
-	for i := range ch.Funding {
-		if u := strings.TrimSpace(ch.Funding[i].URL); u != "" {
+	for _, f := range ch.Funding.list {
+		if u := strings.TrimSpace(f.URL); u != "" {
 			feed.FundingURL = u
-			feed.FundingMessage = strings.TrimSpace(ch.Funding[i].Message)
+			feed.FundingMessage = strings.TrimSpace(f.Message)
 			break
 		}
 	}
 
-	feed.Episodes = make([]model.FeedEpisode, 0, len(ch.Items))
-	for i := range ch.Items {
-		feed.Episodes = append(feed.Episodes, normalizeItem(&ch.Items[i]))
+	feed.Episodes = make([]model.FeedEpisode, 0, len(ch.Items.items))
+	for i := range ch.Items.items {
+		feed.Episodes = append(feed.Episodes, normalizeItem(&ch.Items.items[i]))
 	}
+	feed.EpisodesDropped = ch.Items.dropped
+	capFeed(feed)
 	return feed, nil
 }
 
@@ -260,11 +269,11 @@ func normalizeItem(it *rssItem) model.FeedEpisode {
 		EnclosureSize: atoi64Safe(it.Enclosure.Length),
 		ImageURL:      strings.TrimSpace(it.ITunesImage.Href),
 		ChaptersURL:   strings.TrimSpace(it.Chapters.URL),
-		Persons:       normalizePersons(it.Persons),
-		Soundbites:    normalizeSoundbites(it.Soundbites),
+		Persons:       normalizePersons(it.Persons.list),
+		Soundbites:    normalizeSoundbites(it.Soundbites.list),
 	}
 	ep.Year = yearOf(ep.PubDateNS)
-	if t := pickTranscript(it.Transcripts); t != nil {
+	if t := pickTranscript(it.Transcripts.list); t != nil {
 		ep.TranscriptURL = strings.TrimSpace(t.URL)
 		ep.TranscriptType = strings.TrimSpace(t.Type)
 	}

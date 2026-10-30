@@ -132,7 +132,7 @@ func (l *Library) EndMaintenance(ctx context.Context) error {
 
 // Reopen restores a Library that was suspended for a maintenance-mode hand-off. It
 // reopens the store in place (every subsystem keeps its store handle), re-ensures the
-// configured roots, mirroring a read-write Open, appends the model.ChangeCatalog row
+// configured roots and the podcast library, mirroring a read-write Open, appends the model.ChangeCatalog row
 // when the catalog was replaced, and runs Options.OnReopen. When a step after the
 // store reopened fails, the next Reopen, or the next BeginMaintenance, finishes the
 // rest. It refuses on a read-only library.
@@ -162,6 +162,8 @@ func (l *Library) finishReopenLocked(ctx context.Context) error {
 	if err := l.ensureRoots(ctx); err != nil {
 		return err
 	}
+	// A restore can bring in a catalog with no podcast library.
+	l.ensurePodcastLibrary(ctx)
 	l.warnUnknownProfiles(ctx)
 	var seq int64
 	var err error
@@ -815,6 +817,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			// The fetch runs in this (server) process, under its network policy.
 			return nil, l.podcasts.FetchTranscript(ctx, model.PID(p.EpisodePID))
+		},
+		proxy.MethodFetchChapters: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.FetchChaptersParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.podcasts.FetchChapters(ctx, model.PID(p.EpisodePID))
 		},
 		proxy.MethodUnfetch: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.UnfetchParams](raw)

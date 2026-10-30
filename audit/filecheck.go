@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
@@ -101,10 +102,15 @@ func (a *Auditor) checkInvalidFeeds(ctx context.Context, add func(model.AuditFin
 		// would false-positive a perfectly valid subscription.
 		if src == model.SourceRSS {
 			if u, err := url.Parse(p.FeedURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				// The address can carry a login or a token, so the finding names its host alone.
+				msg := "podcast \"" + p.Title + "\" has an invalid feed URL"
+				if host := netsafe.ShownHost(p.FeedURL); host != "" {
+					msg += ": " + host
+				}
 				add(model.AuditFinding{
 					Check:    model.CheckInvalidFeed,
 					Severity: model.SeverityWarn,
-					Message:  "podcast \"" + p.Title + "\" has an invalid feed URL: " + p.FeedURL,
+					Message:  msg,
 					Entities: []model.PID{p.PID},
 				})
 				continue

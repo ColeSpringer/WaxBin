@@ -45,7 +45,7 @@ func TestEditOwesNoFileAWriteCannotReach(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
-		EpisodePID: eps[0].PID, LibraryID: podLib,
+		EpisodePID: eps[0].PID, LibraryID: podLib.ID,
 		File: model.File{Path: []byte("/podcasts/a.mp3"), DisplayPath: "/podcasts/a.mp3", RelPath: []byte("a.mp3"),
 			Kind: model.FileAudio, ContentHash: "h1", ScanState: model.ScanIndexed},
 	}); err != nil {

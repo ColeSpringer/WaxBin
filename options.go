@@ -38,7 +38,8 @@ type Options struct {
 
 	// Profiles defines additional organization profiles and built-in overrides.
 	Profiles []config.ProfileDef
-	// Inbox folders are staging directories importable into a managed library.
+	// Inbox folders are staging directories importable into a managed library. Open
+	// refuses one that overlaps a root.
 	Inbox []string
 	// FreeSpaceReserveBytes is headroom an import preflight keeps free.
 	FreeSpaceReserveBytes int64
@@ -52,7 +53,9 @@ type Options struct {
 	// StampItemPID stamps the backing item's WaxBin PID into a tag during organize's
 	// tag write-back on managed roots (off by default).
 	StampItemPID bool
-	// Podcasts configures the podcast engine (download dir + network policy).
+	// Podcasts configures the podcast engine (download dir + network policy). Open
+	// refuses a dir that overlaps a root or an inbox and, read-write, makes the podcast
+	// library there before any download (Library.PodcastLibrary).
 	Podcasts config.PodcastConfig
 	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
 	Enrichment config.EnrichConfig

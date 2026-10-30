@@ -1,14 +1,18 @@
 package podcast
 
 import (
+	"bytes"
+	"cmp"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -55,7 +59,10 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	if err != nil {
 		return nil, err
 	}
-	user, pass := s.authFor(ctx, pod)
+	user, pass, err := s.authFor(ctx, pod)
+	if err != nil {
+		return nil, err
+	}
 
 	// Checked before the fetch so a misconfigured podcast dir costs no download; the
 	// id itself is read again at the commit.
@@ -87,6 +94,7 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	if err != nil {
 		return nil, err
 	}
+	login := loginOf(pod.FeedURL, user, pass)
 	n, contentHash, err := s.fetchTo(ctx, prov, tmp, source.FetchRequest{
 		URL: ep.EnclosureURL, User: user, Pass: pass, AuthOrigin: pod.FeedURL, MaxBytes: s.cfg.MaxEnclosureBytes,
 	})
@@ -97,7 +105,7 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	// Fetched above the lease region below, deliberately: it is an HTTP GET of up to
 	// episodeImageMaxBytes bounded only by cfg.Timeout, and evaluating it as an
 	// argument to AttachEpisodeFile would hold the lease across it.
-	image := s.fetchImage(ctx, ep.ImageURL)
+	image := s.fetchImage(ctx, ep.ImageURL, login)
 
 	// Only the commit tail is leased, and with a bounded wait. Holding the lease
 	// across the enclosure fetch would discard a finished multi-hundred-megabyte
@@ -165,31 +173,59 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 
 	res := &DownloadResult{EpisodePID: episodePID, FilePID: filePID, Path: dst, Bytes: n}
 	if ep.TranscriptURL != "" {
-		if s.fetchTranscript(ctx, episodePID, ep.TranscriptURL, ep.TranscriptType) {
+		if s.fetchTranscript(ctx, login, episodePID, ep.TranscriptURL, ep.TranscriptType) {
 			res.Transcript = true
 		}
 	}
 	if ep.ChaptersURL != "" {
-		if s.fetchChapters(ctx, episodePID, ep.ChaptersURL) {
+		if s.fetchChapters(ctx, login, episodePID, ep.ChaptersURL) {
 			res.Chapters = true
 		}
 	}
 	return res, nil
 }
 
-// fetchChapters fetches and parses an episode's Podcasting-2.0 chapters JSON,
-// storing it as URL-sourced chapters. It is best-effort (a fetch/parse failure is
-// logged, not fatal to the download) and hardened through netsafe (redirect/size/
-// MIME/SSRF guards). Chapter startTime is in seconds.
-func (s *Service) fetchChapters(ctx context.Context, episodePID model.PID, url string) bool {
-	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: chaptersMIME, MaxBytes: s.cfg.MaxFeedBytes})
+// FetchChapters fetches and stores the chapters document an episode's feed declared, on
+// demand, as FetchTranscript does a transcript: errors propagate, and a chapters host's
+// refusal or a document that does not parse or lists no chapters is a
+// *source.ProviderError, the chapters already stored staying. The episode need not be
+// downloaded. The show's login goes only to its feed's origin, and one the catalog
+// cannot read fails the fetch before it is made. A sync does not fetch chapters again
+// when a feed's chapters URL changes; this is the verb for that.
+func (s *Service) FetchChapters(ctx context.Context, episodePID model.PID) error {
+	const op = "podcast.FetchChapters"
+	ep, err := s.store.EpisodeMeta(ctx, episodePID)
 	if err != nil {
-		s.log.Debug("chapters fetch failed", "url", url, "err", err)
-		return false
+		return err
 	}
-	chapters, err := parseChapterDoc(resp.Body)
+	url := strings.TrimSpace(ep.ChaptersURL)
+	if url == "" {
+		return waxerr.New(waxerr.CodeInvalid, op, "episode declares no chapters url")
+	}
+	pod, err := s.store.PodcastByPID(ctx, ep.PodcastPID)
 	if err != nil {
-		s.log.Debug("chapters parse failed", "url", url, "err", err)
+		return err
+	}
+	user, pass, err := s.authFor(ctx, pod)
+	if err != nil {
+		return err
+	}
+	chapters, err := s.fetchChapterDoc(ctx, loginOf(pod.FeedURL, user, pass), url)
+	if err == nil && len(chapters) == 0 {
+		err = waxerr.New(waxerr.CodeInvalid, op, "the chapters document lists no chapters")
+	}
+	if err != nil {
+		return providerErr(ctx, op, model.SourceRSS, "fetch", err)
+	}
+	return s.store.PutEpisodeChapters(ctx, episodePID, chapters)
+}
+
+// fetchChapters is Download's best-effort fetch of an episode's chapters: a failure is
+// logged, not fatal to the download. It reports whether chapters were stored.
+func (s *Service) fetchChapters(ctx context.Context, login *netsafe.Credentials, episodePID model.PID, url string) bool {
+	chapters, err := s.fetchChapterDoc(ctx, login, url)
+	if err != nil {
+		s.log.Debug("chapters fetch failed", "host", netsafe.ShownHost(url), "err", err)
 		return false
 	}
 	if len(chapters) == 0 {
@@ -202,36 +238,135 @@ func (s *Service) fetchChapters(ctx context.Context, episodePID model.PID, url s
 	return true
 }
 
-// parseChapterDoc decodes a Podcasting-2.0 chapters JSON body into ordered chapters.
-// A feed may list chapters out of time order, which the spec permits, so it sorts by
-// start time. That keeps Position tracking the timeline, and it keeps the read path
-// (which fills each chapter's end from the next one's start) from ever producing an
-// inverted span. A malformed entry with a negative start is skipped rather than stored
-// as a negative offset, and Positions are assigned contiguously after that filtering.
-// A decode error is returned unchanged so the caller can log it.
-func parseChapterDoc(body []byte) ([]model.Chapter, error) {
-	var doc struct {
-		Chapters []struct {
-			StartTime float64 `json:"startTime"`
-			Title     string  `json:"title"`
-		} `json:"chapters"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil {
+// fetchChapterDoc fetches and parses a Podcasting-2.0 chapters document through netsafe
+// (redirect/size/MIME/SSRF guards), login going only to its origin.
+func (s *Service) fetchChapterDoc(ctx context.Context, login *netsafe.Credentials, url string) ([]model.Chapter, error) {
+	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: chaptersMIME, MaxBytes: s.cfg.MaxFeedBytes,
+		Credentials: login})
+	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(doc.Chapters, func(i, j int) bool { return doc.Chapters[i].StartTime < doc.Chapters[j].StartTime })
-	chapters := make([]model.Chapter, 0, len(doc.Chapters))
-	for _, c := range doc.Chapters {
-		if c.StartTime < 0 {
-			continue // malformed: a negative start would become a negative offset
-		}
-		chapters = append(chapters, model.Chapter{
-			Position:    len(chapters),
-			Title:       strings.TrimSpace(c.Title),
-			FileStartMS: int64(c.StartTime * 1000),
-		})
+	chapters, err := parseChapterDoc(resp.Body)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInvalid, "podcast.FetchChapters", err)
 	}
 	return chapters, nil
+}
+
+// parseChapterDoc decodes a Podcasting-2.0 chapters JSON body into ordered chapters.
+// A feed may list chapters out of time order, which the spec permits, so it orders them
+// by start time. That keeps Position tracking the timeline, and it keeps the read path
+// (which fills each chapter's end from the next one's start) from ever producing an
+// inverted span. A malformed entry with a negative or absurd start is skipped, and
+// Positions are assigned contiguously after that filtering. It keeps the first
+// MaxChaptersPerDoc chapters by start, each title one line of at most MaxTitleChars
+// characters, and reads the entries one at a time so a document of endless entries costs
+// no more memory than the ones kept. A decode error is returned unchanged so the caller
+// can log it.
+func parseChapterDoc(body []byte) ([]model.Chapter, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil || tok == nil {
+		return nil, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, errors.New("the chapters document is not a JSON object")
+	}
+	var kept chapterHeap
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		if k, _ := key.(string); !strings.EqualFold(k, "chapters") {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		// A repeated key replaces the list, as it would in a decoded struct.
+		kept = kept[:0]
+		if err := decodeChapterList(dec, &kept); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the chapters document")
+	}
+	slices.SortFunc(kept, compareEntries)
+	chapters := make([]model.Chapter, len(kept))
+	for i, c := range kept {
+		chapters[i] = model.Chapter{
+			Position:    i,
+			Title:       model.CapText(strings.TrimSpace(c.title), MaxTitleChars),
+			FileStartMS: int64(c.start * 1000),
+		}
+	}
+	return chapters, nil
+}
+
+// maxChapterSec bounds a chapter's start: one past it would overflow the milliseconds an
+// offset holds.
+const maxChapterSec = float64(1 << 40)
+
+// decodeChapterList reads a chapters array entry by entry into kept, which holds the
+// earliest MaxChaptersPerDoc of them. A null list is none.
+func decodeChapterList(dec *json.Decoder, kept *chapterHeap) error {
+	tok, err := dec.Token()
+	if err != nil || tok == nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return errors.New("the chapters member is not a list")
+	}
+	for seq := 0; dec.More(); seq++ {
+		var c struct {
+			StartTime float64 `json:"startTime"`
+			Title     string  `json:"title"`
+		}
+		if err := dec.Decode(&c); err != nil {
+			return err
+		}
+		if c.StartTime < 0 || c.StartTime > maxChapterSec {
+			continue
+		}
+		heap.Push(kept, chapterEntry{start: c.StartTime, seq: seq, title: c.Title})
+		if kept.Len() > MaxChaptersPerDoc {
+			heap.Pop(kept)
+		}
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// chapterEntry is one chapter as a document lists it, seq its place in the list.
+type chapterEntry struct {
+	start float64
+	seq   int
+	title string
+}
+
+// compareEntries orders entries by start, then by their place in the document.
+func compareEntries(a, b chapterEntry) int {
+	return cmp.Or(cmp.Compare(a.start, b.start), cmp.Compare(a.seq, b.seq))
+}
+
+// chapterHeap keeps its latest entry on top, the one to drop past the bound.
+type chapterHeap []chapterEntry
+
+func (h chapterHeap) Len() int           { return len(h) }
+func (h chapterHeap) Less(i, j int) bool { return compareEntries(h[i], h[j]) > 0 }
+func (h chapterHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *chapterHeap) Push(x any)        { *h = append(*h, x.(chapterEntry)) }
+func (h *chapterHeap) Pop() any {
+	old := *h
+	e := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return e
 }
 
 // fetchTo downloads an item through the provider into a temp file, returning the byte
@@ -259,12 +394,12 @@ func (s *Service) fetchTo(ctx context.Context, prov source.Provider, path string
 		// on over it, did not fail on its own account, and a success over it is truncated.
 		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, dst.err)
 	case ferr != nil:
-		return 0, "", providerErr(ctx, op, prov, "fetch", ferr)
+		return 0, "", providerErr(ctx, op, prov.SourceType(), "fetch", ferr)
 	case cerr != nil:
 		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, cerr)
 	case res == nil:
 		// An injected provider could return (nil, nil); guard rather than nil-deref.
-		return 0, "", providerErr(ctx, op, prov, "fetch",
+		return 0, "", providerErr(ctx, op, prov.SourceType(), "fetch",
 			waxerr.New(waxerr.CodeInternal, op, "provider returned no fetch result"))
 	}
 	return res.Bytes, res.ContentHash, nil
@@ -325,7 +460,16 @@ func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, s
 	// stays within the filesystem segment limit rather than failing with ENAMETOOLONG.
 	dst := filepath.Join(folder, string(episodePID)+"-"+capFilename(netsafe.SafeFilename(filepath.Base(srcPath), "episode"), 120))
 	// Fetched above the lease region, like Download's: it is a bounded-but-slow HTTP GET.
-	image := s.fetchImage(ctx, ep.ImageURL)
+	// A login the catalog cannot read sends none rather than half of one; the import is
+	// of a file already here, so it goes on without whatever image that costs.
+	var image *model.ArtImage
+	if strings.TrimSpace(ep.ImageURL) != "" {
+		user, pass, err := s.authFor(ctx, pod)
+		if err != nil {
+			s.log.Warn("importing an episode file without the show's login", "podcast", pod.PID, "err", err)
+		}
+		image = s.fetchImage(ctx, ep.ImageURL, loginOf(pod.FeedURL, user, pass))
+	}
 
 	// Both leases, in the fixed fs-mutate then podcast-fs order: this is the one verb
 	// that moves a file out of an arbitrary source path (which may sit in a user
@@ -535,8 +679,13 @@ type ImportResult struct {
 }
 
 // ImportOPML subscribes to every feed in an OPML document, returning a per-feed
-// result. A failed feed is recorded and the import continues.
+// result. A failed feed is recorded and the import continues. A document longer than
+// MaxFeedBytes, or listing more than MaxOPMLEntries feeds, is refused whole.
 func (s *Service) ImportOPML(ctx context.Context, data []byte) ([]ImportResult, error) {
+	if int64(len(data)) > s.cfg.MaxFeedBytes {
+		return nil, waxerr.New(waxerr.CodeInvalid, "podcast.ImportOPML",
+			fmt.Sprintf("the OPML document is longer than %d bytes", s.cfg.MaxFeedBytes))
+	}
 	entries, err := ParseOPML(data)
 	if err != nil {
 		return nil, err
@@ -550,7 +699,7 @@ func (s *Service) ImportOPML(ctx context.Context, data []byte) ([]ImportResult, 
 		pod, err := s.Add(ctx, e.FeedURL, AddOptions{})
 		if err != nil {
 			r.Err = err.Error()
-			s.log.Warn("OPML import: feed failed", "url", e.FeedURL, "err", err)
+			s.log.Warn("OPML import: feed failed", "host", netsafe.ShownHost(e.FeedURL), "err", err)
 		} else {
 			r.PID, r.Title = pod.PID, pod.Title
 		}

@@ -253,7 +253,7 @@ func (c *Config) Validate() error {
 
 	for i := 0; i < len(c.Roots); i++ {
 		for j := i + 1; j < len(c.Roots); j++ {
-			if pathsOverlap(c.Roots[i].Path, c.Roots[j].Path) {
+			if pathx.Overlap(c.Roots[i].Path, c.Roots[j].Path) {
 				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
 					fmt.Sprintf("library roots overlap: %q and %q", c.Roots[i].Path, c.Roots[j].Path))
 			}
@@ -281,21 +281,23 @@ func (c *Config) Validate() error {
 	}
 
 	// Keep podcast downloads outside user roots and inboxes. Scan should never see
-	// the podcast cache as ordinary music.
-	if strings.TrimSpace(c.Podcasts.Dir) != "" {
+	// the podcast cache as ordinary music. A blank dir is none.
+	if strings.TrimSpace(c.Podcasts.Dir) == "" {
+		c.Podcasts.Dir = ""
+	} else {
 		abs, err := filepath.Abs(c.Podcasts.Dir)
 		if err != nil {
 			return waxerr.Wrapf(waxerr.CodeInvalid, "config.Validate", err, "resolving podcast dir %q", c.Podcasts.Dir)
 		}
 		c.Podcasts.Dir = filepath.Clean(abs)
 		for _, r := range c.Roots {
-			if pathsOverlap(r.Path, c.Podcasts.Dir) {
+			if pathx.Overlap(r.Path, c.Podcasts.Dir) {
 				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
 					fmt.Sprintf("podcast dir %q overlaps library root %q", c.Podcasts.Dir, r.Path))
 			}
 		}
 		for _, in := range c.Inbox {
-			if pathsOverlap(in, c.Podcasts.Dir) {
+			if pathx.Overlap(in, c.Podcasts.Dir) {
 				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
 					fmt.Sprintf("podcast dir %q overlaps inbox %q", c.Podcasts.Dir, in))
 			}
@@ -358,8 +360,4 @@ func ParseRootSpec(spec string) (Root, error) {
 		r.Path = strings.Join(parts[:n-1], ":")
 	}
 	return r, nil
-}
-
-func pathsOverlap(a, b string) bool {
-	return pathx.UnderRoot(a, b) || pathx.UnderRoot(b, a)
 }

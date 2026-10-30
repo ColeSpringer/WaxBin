@@ -847,6 +847,68 @@ func TestBookTotalCoversChapterSpan(t *testing.T) {
 	}
 }
 
+// TestFilelessChapterRowsNeverReachTheBookReaders: a chapter row kept on an item rather
+// than a file, the shape an episode's feed chapters take, changes none of a book's
+// chapter list, total, part spans or the extents a curated split maps against.
+func TestFilelessChapterRowsNeverReachTheBookReaders(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/f/p1.mp3", essence: "fl1", content: "flc1", title: "Fileless", author: "Auth",
+		asin: "BFL", position: 1, durationMS: 1000,
+		chapters: []model.Chapter{{Position: 0, Title: "A", FileStartMS: 0}, {Position: 1, Title: "B", FileStartMS: 400}},
+	})
+	r := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/f/p2.mp3", essence: "fl2", content: "flc2", title: "Fileless", author: "Auth",
+		asin: "BFL", position: 2, durationMS: 2000,
+		chapters: []model.Chapter{{Position: 0, Title: "C", FileStartMS: 0}},
+	})
+	type view struct {
+		chapters []model.Chapter
+		total    int64
+		spans    []timelinePart
+		extents  map[int64]int64
+	}
+	read := func() view {
+		t.Helper()
+		d, err := st.BookByPID(ctx, r.ItemPID)
+		if err != nil {
+			t.Fatalf("BookByPID: %v", err)
+		}
+		v := view{chapters: d.Chapters, total: d.TotalDurationMS}
+		if err := st.writeTx(ctx, func(tx *sql.Tx) error {
+			var id int64
+			if err := tx.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid = ?", string(r.ItemPID)).Scan(&id); err != nil {
+				return err
+			}
+			if v.spans, err = bookTimelineTx(ctx, tx, id, nil); err != nil {
+				return err
+			}
+			v.extents, err = nonUserChapterExtentsTx(ctx, tx, id)
+			return err
+		}); err != nil {
+			t.Fatalf("timeline: %v", err)
+		}
+		return v
+	}
+	before := read()
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms, source)
+		SELECT id, NULL, 0, 'Kept on the item', 9000, 0, 'embedded' FROM playable_item WHERE pid = ?`, string(r.ItemPID)); err != nil {
+		t.Fatalf("item row: %v", err)
+	}
+	after := read()
+	if !slices.Equal(before.chapters, after.chapters) || before.total != after.total ||
+		!slices.Equal(before.spans, after.spans) || len(after.extents) != len(before.extents) {
+		t.Fatalf("an item-kept chapter row changed the book: before %+v, after %+v", before, after)
+	}
+	for id, ext := range before.extents {
+		if after.extents[id] != ext {
+			t.Fatalf("extent of file %d moved from %d to %d", id, ext, after.extents[id])
+		}
+	}
+}
+
 func TestTrashDetachEmitsItemUpdate(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)

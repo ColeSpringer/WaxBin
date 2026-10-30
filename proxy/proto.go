@@ -26,9 +26,18 @@ import (
 
 // ProtocolVersion is the wire protocol version. A request carrying a different
 // version is rejected, so a newer client cannot silently misdrive an older
-// server. An error's reason rides on 23 as an added field, which an older peer
-// ignores.
+// server. The version moves for a change an older peer would get wrong without
+// noticing: an added request field an older server would answer with a default
+// that loses what the caller asked for, or a result field an older client would
+// read differently. An added method, result field or error field rides on the
+// current version, since an older server refuses a method it does not know
+// (ReasonUnknownMethod) and an older peer ignores a field it does not read. On 23 an error carries its reason,
+// an added field, and fetch_chapters is an added method.
 const ProtocolVersion = 23
+
+// ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
+// client meets a server built before the method was added.
+const ReasonUnknownMethod waxerr.Reason = "unknown_method"
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -83,6 +92,7 @@ const (
 	MethodPlaylistSetRule  = "playlist_set_rule"
 	MethodPutTranscript    = "put_transcript"
 	MethodFetchTranscript  = "fetch_transcript"
+	MethodFetchChapters    = "fetch_chapters"
 	MethodUnfetch          = "unfetch"
 	MethodPodcastRemove    = "podcast_remove"
 	MethodAddRoot          = "add_root"
@@ -858,6 +868,12 @@ type PutTranscriptParams struct {
 // FetchTranscriptParams is the fetch_transcript request payload. The fetch of
 // the episode's declared transcript URL runs in the server process.
 type FetchTranscriptParams struct {
+	EpisodePID string `json:"episodePid"`
+}
+
+// FetchChaptersParams is the fetch_chapters request payload. The fetch of the
+// episode's declared chapters document runs in the server process.
+type FetchChaptersParams struct {
 	EpisodePID string `json:"episodePid"`
 }
 

@@ -61,7 +61,7 @@ func TestSetLibraryFolderFallback(t *testing.T) {
 	}
 	libs, _ = st.Libraries(ctx)
 	for _, l := range libs {
-		if l.ID == podID {
+		if l.ID == podID.ID {
 			if _, err := st.SetLibraryFolderFallback(ctx, l.PID, true); !waxerr.Is(err, waxerr.CodeInvalid) {
 				t.Errorf("setting it on the podcast library = %v, want CodeInvalid", err)
 			}

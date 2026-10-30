@@ -280,7 +280,7 @@ func (c *Client) Stream(ctx context.Context, r Request, dst io.Writer, maxBytes 
 	case err != nil:
 		return nil, n, err
 	case n > maxBytes:
-		return nil, n, &waxerr.Error{Code: waxerr.CodeInvalid, Op: op, Err: &TooLargeError{Limit: maxBytes, Host: shownHost(final)},
+		return nil, n, &waxerr.Error{Code: waxerr.CodeInvalid, Op: op, Err: &TooLargeError{Limit: maxBytes, Host: ShownHost(final)},
 			Reason: ReasonTooLarge}
 	}
 	return out, n, nil
@@ -315,7 +315,7 @@ func (w *watchdog) stop() {
 func (w *watchdog) fired() bool { return w.quiet.Load() }
 
 func (w *watchdog) err(op, rawURL string) error {
-	return waxerr.New(waxerr.CodeIO, op, fmt.Sprintf("nothing arrived from %s for %s", shownHost(rawURL), w.span)).
+	return waxerr.New(waxerr.CodeIO, op, fmt.Sprintf("nothing arrived from %s for %s", ShownHost(rawURL), w.span)).
 		WithReason(ReasonTransport)
 }
 
@@ -398,12 +398,12 @@ func (c *Client) send(ctx context.Context, hc *http.Client, req *http.Request, r
 // its query, so only its cause is kept, and any URL that cause's own text names is cut
 // to its scheme and host.
 func unanswered(op, rawURL string, err error) error {
-	at := shownHost(rawURL)
+	at := ShownHost(rawURL)
 	if ue, ok := err.(*url.Error); ok {
 		err = ue.Err
 		// The URL a hop failed at, when Go names it whole; a refused redirect names the
 		// Location as written, which can be relative.
-		at = cmp.Or(shownHost(ue.URL), at)
+		at = cmp.Or(ShownHost(ue.URL), at)
 	}
 	reason := ReasonTransport
 	var blocked *BlockedAddressError
@@ -462,7 +462,7 @@ func isSchemeByte(c byte) bool {
 
 // hostPart is a URL's scheme and host, read by its text alone when it does not parse.
 func hostPart(raw string) string {
-	if h := shownHost(raw); h != "" {
+	if h := ShownHost(raw); h != "" {
 		return h
 	}
 	scheme, rest, _ := strings.Cut(raw, "://")
@@ -533,10 +533,10 @@ func (q *quietWrite) Write(p []byte) (int, error) {
 	return q.w.Write(p)
 }
 
-// shownHost is what an error may say of a URL: its scheme and host, never a login, path
-// or query, any of which can carry a token. A URL that does not parse, or names no host,
-// shows nothing.
-func shownHost(raw string) string {
+// ShownHost is what an error or a log line may say of a URL: its scheme and host, never
+// a login, path or query, any of which can carry a token. A URL that does not parse, or
+// names no host, shows nothing.
+func ShownHost(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return ""
@@ -591,12 +591,12 @@ func checkStatus(status int, op, rawURL string, login *Credentials) error {
 	if status == http.StatusNotFound {
 		code = waxerr.CodeNotFound
 	}
-	se := &StatusError{Status: status, Host: shownHost(rawURL)}
+	se := &StatusError{Status: status, Host: ShownHost(rawURL)}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		o, ok := originOf(cmp.Or(login, &Credentials{}).Origin)
 		hop, hok := originOf(rawURL)
 		if ok && hok && !o.admits(hop) {
-			se.LoginOrigin = shownHost(login.Origin)
+			se.LoginOrigin = ShownHost(login.Origin)
 		}
 	}
 	return &waxerr.Error{Code: code, Op: op, Err: se, Reason: ReasonHTTPStatus}

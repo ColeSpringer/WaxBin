@@ -3,6 +3,7 @@ package podcast_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"github.com/colespringer/waxbin/playback"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/read"
+	"github.com/colespringer/waxbin/source"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -358,5 +361,233 @@ func TestDownloadSendsTheLoginOnlyToTheFeedsOrigin(t *testing.T) {
 	}
 	if cdnSawLogin.Load() {
 		t.Error("the feed's login went to another host's enclosure")
+	}
+}
+
+// boundCipher is a test SecretCipher that seals a value by binding it to its key.
+type boundCipher struct{}
+
+func (boundCipher) Seal(aad, plaintext []byte) ([]byte, error) {
+	return append(append(append([]byte{}, aad...), 0), plaintext...), nil
+}
+
+func (boundCipher) Open(aad, ciphertext []byte) ([]byte, error) {
+	head := append(append([]byte{}, aad...), 0)
+	if !bytes.HasPrefix(ciphertext, head) {
+		return nil, errors.New("sealed under another key")
+	}
+	return ciphertext[len(head):], nil
+}
+
+// oneEpisodeServer serves a feed with one episode whose enclosure it also serves,
+// counting every request and recording the login each carried ("user:pass", or "" for
+// none).
+func oneEpisodeServer(t *testing.T) (srv *httptest.Server, hits *atomic.Int64, lastLogin *atomic.Value) {
+	t.Helper()
+	hits, lastLogin = new(atomic.Int64), new(atomic.Value)
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		login := ""
+		if u, p, ok := r.BasicAuth(); ok {
+			login = u + ":" + p
+		}
+		lastLogin.Store(login)
+		if r.URL.Path != "/feed.xml" {
+			w.Header().Set("Content-Type", "audio/mpeg")
+			_, _ = w.Write(fakeAudio)
+			return
+		}
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = fmt.Fprintf(w, `<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Private</title>
+<item><title>One</title><guid>one</guid><enclosure url="http://%[1]s/1.mp3" type="audio/mpeg"/>
+<itunes:image href="http://%[1]s/ep.png"/><podcast:transcript url="http://%[1]s/1.srt" type="application/srt"/></item>
+</channel></rss>`, r.Host)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, hits, lastLogin
+}
+
+// TestASealedSecretWithoutACipherFailsTheDownloadAsTheCatalogs: a stored password the
+// catalog cannot open fails a download and a sync before either reaches the network,
+// as the catalog's failure rather than the feed's.
+func TestASealedSecretWithoutACipherFailsTheDownloadAsTheCatalogs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, hits, lastLogin := oneEpisodeServer(t)
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	sealing, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test", SecretCipher: boundCipher{}})
+	if err != nil {
+		t.Fatalf("open with a cipher: %v", err)
+	}
+	pod, err := podcast.New(sealing, meta.NewReader(), podcast.Config{Dir: t.TempDir()}, discard).
+		Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{User: "alice", Pass: "pw"})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := sealing.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	if err != nil {
+		t.Fatalf("open without a cipher: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := podcast.New(st, meta.NewReader(), podcast.Config{Dir: t.TempDir()}, discard)
+	eps, err := svc.Episodes(ctx, pod.PID, 0)
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("episodes = %d (err %v), want 1", len(eps), err)
+	}
+	hits.Store(0)
+
+	if _, err := svc.Download(ctx, eps[0].PID); err == nil || source.IsProviderError(err) {
+		t.Fatalf("download = %v, want the catalog's failure to read the login", err)
+	}
+	if _, err := svc.Sync(ctx, pod.PID); err == nil || source.IsProviderError(err) {
+		t.Fatalf("sync = %v, want the catalog's failure to read the login", err)
+	}
+	if err := svc.FetchTranscript(ctx, eps[0].PID); err == nil || source.IsProviderError(err) {
+		t.Fatalf("fetch transcript = %v, want the catalog's failure to read the login", err)
+	}
+	res, err := svc.SyncAll(ctx)
+	if err != nil {
+		t.Fatalf("sync all: %v", err)
+	}
+	if ferr := res.Failures[pod.PID]; ferr == nil || source.IsProviderError(ferr) {
+		t.Fatalf("sync all failure for the show = %v, want the catalog's", ferr)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("the feed's host was asked %d times with a login the catalog could not read", n)
+	}
+
+	// An import moves a file already here, so it goes on, and its image is asked for with
+	// no login rather than half of one.
+	src := filepath.Join(t.TempDir(), "one.mp3")
+	if err := os.WriteFile(src, fakeAudio, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportEpisodeFile(ctx, eps[0].PID, src, true); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if n, got := hits.Load(), lastLogin.Load(); n != 1 || got != "" {
+		t.Fatalf("the import asked %d times, last with the login %q, want once with none", n, got)
+	}
+}
+
+// TestAMissingPasswordFailsBeforeTheFeedIsAsked: a show whose password row is gone, as a
+// restore of a backup trimmed of its secrets leaves it, fails its sync before the feed is
+// asked rather than sending its user name alone, and says the password is missing.
+func TestAMissingPasswordFailsBeforeTheFeedIsAsked(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, hits, _ := oneEpisodeServer(t)
+	svc, st, _ := newTestService(t)
+	pod, err := svc.Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{User: "alice", Pass: "pw"})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := st.DeleteSecret(ctx, model.PodcastSecretKey(pod.PID)); err != nil {
+		t.Fatalf("drop the secret: %v", err)
+	}
+	hits.Store(0)
+	_, err = svc.Sync(ctx, pod.PID)
+	if err == nil || source.IsProviderError(err) || waxerr.ReasonOf(err) != podcast.ReasonPasswordMissing {
+		t.Fatalf("sync = %v (reason %q), want the catalog's %q", err, waxerr.ReasonOf(err), podcast.ReasonPasswordMissing)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("the feed was asked %d times with its password missing", n)
+	}
+}
+
+// TestAPasswordWithoutAUserIsRefused: a login is a user name, with or without a
+// password, so a password alone is refused before anything is asked or stored.
+func TestAPasswordWithoutAUserIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, hits, _ := oneEpisodeServer(t)
+	svc, _, _ := newTestService(t)
+	if _, err := svc.Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{Pass: "token"}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("add with a password alone = %v, want CodeInvalid", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("the feed was asked %d times for a refused login", n)
+	}
+	pod, err := svc.Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := svc.SetAuth(ctx, pod.PID, "", "token"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("set auth with a password alone = %v, want CodeInvalid", err)
+	}
+}
+
+// TestClearingThePasswordSendsTheUserAlone: setting a login again without a password
+// leaves none of the old one behind.
+func TestClearingThePasswordSendsTheUserAlone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, _, lastLogin := oneEpisodeServer(t)
+	svc, _, _ := newTestService(t)
+	pod, err := svc.Add(ctx, srv.URL+"/feed.xml", podcast.AddOptions{User: "alice", Pass: "pw"})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := svc.SetAuth(ctx, pod.PID, "alice", ""); err != nil {
+		t.Fatalf("set auth: %v", err)
+	}
+	if _, err := svc.Sync(ctx, pod.PID); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := lastLogin.Load(); got != "alice:" {
+		t.Fatalf("sync sent the login %q, want the user alone (alice:)", got)
+	}
+}
+
+// TestImportWithoutAnImageReadsNoLogin: importing a file for an episode with no image to
+// fetch makes no request, so it neither reads the show's login nor warns that it could
+// not.
+func TestImportWithoutAnImageReadsNoLogin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sealing, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test", SecretCipher: boundCipher{}})
+	if err != nil {
+		t.Fatalf("open with a cipher: %v", err)
+	}
+	svc := podcast.New(sealing, meta.NewReader(), podcast.Config{Dir: t.TempDir()}, discard)
+	show, err := svc.AddManual(ctx, "Private", podcast.ManualOptions{})
+	if err != nil {
+		t.Fatalf("add manual: %v", err)
+	}
+	if err := svc.SetAuth(ctx, show.PID, "alice", "pw"); err != nil {
+		t.Fatalf("set auth: %v", err)
+	}
+	ep, err := svc.AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "Plain", GUID: "plain"}, true)
+	if err != nil {
+		t.Fatalf("add episode: %v", err)
+	}
+	if err := sealing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	if err != nil {
+		t.Fatalf("open without a cipher: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	logs := &syncBuffer{}
+	svc = podcast.New(st, meta.NewReader(), podcast.Config{Dir: t.TempDir()}, slog.New(slog.NewTextHandler(logs, nil)))
+	src := filepath.Join(t.TempDir(), "plain.mp3")
+	if err := os.WriteFile(src, fakeAudio, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportEpisodeFile(ctx, ep.EpisodePID, src, true); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if out := logs.String(); strings.Contains(out, "login") {
+		t.Fatalf("the import logged %q, want nothing about a login it had no use for", out)
 	}
 }

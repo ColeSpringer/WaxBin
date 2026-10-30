@@ -145,7 +145,7 @@ func TestUpsertShowAndEpisodePinnedRetention(t *testing.T) {
 	// Download both (attach files -> state present).
 	attach := func(epPID model.PID, name string) {
 		if _, err := st.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
-			EpisodePID: epPID, LibraryID: libID,
+			EpisodePID: epPID, LibraryID: libID.ID,
 			File: model.File{
 				Path: []byte("/podcasts/" + name), DisplayPath: "/podcasts/" + name,
 				RelPath: []byte(name), Kind: model.FileAudio, ContentHash: name, ScanState: model.ScanIndexed,

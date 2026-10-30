@@ -460,7 +460,8 @@ type Census struct {
 	TrashEntries int
 	// Roots is every user-registered display_root, including ones added at runtime
 	// that configuration will not bring back. The internal podcast library is
-	// excluded: it is re-created on demand and is not a root anyone can re-add.
+	// excluded: the next read-write open with a podcast dir makes it again, and it is
+	// not a root anyone can re-add.
 	Roots []string
 	// Partial is set when a table could not be read, so the counts understate what
 	// the catalog holds. A hot -wal after a crash fails every read on a mode=ro

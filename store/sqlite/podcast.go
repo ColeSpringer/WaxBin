@@ -12,48 +12,73 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
 // EnsurePodcastLibrary finds or creates the internal library for downloaded
-// episodes. ModePodcast keeps it out of scan/organize while still letting episode
-// files satisfy the file/library foreign key and reuse path/trash code.
-func (s *Store) EnsurePodcastLibrary(ctx context.Context, dir string) (int64, error) {
+// episodes at dir and returns it. ModePodcast keeps it out of scan/organize while
+// still letting episode files satisfy the file/library foreign key and reuse
+// path/trash code. A dir that is another library's root, or nests with one either way,
+// is CodeConflict: a scan of that root would read the downloads as tracks. Finding the
+// library takes no write, so a read-write open that already has it pays one read.
+func (s *Store) EnsurePodcastLibrary(ctx context.Context, dir string) (*model.Library, error) {
 	const op = "store.EnsurePodcastLibrary"
-	var id int64
+	if lib, err := podcastLibraryAt(ctx, s.rdb(), dir, op); err != nil || lib != nil {
+		return lib, err
+	}
+	var out *model.Library
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
-		root := []byte(dir)
-		existing, err := libraryByRootTx(ctx, tx, root)
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if existing != nil {
-			// The lookup folds case where the platform's path rule does, so a podcast dir
-			// that only re-spells a music root now finds it. Adopting it would file every
-			// episode into that library and put the downloads under a scanner that treats
-			// them as tracks, so name the collision instead.
-			if existing.Mode != model.ModePodcast {
-				return waxerr.New(waxerr.CodeConflict, op,
-					"podcast dir "+dir+" is already a "+string(existing.Mode)+" library root")
-			}
-			id = existing.ID
-			return nil
+		lib, err := podcastLibraryAt(ctx, tx, dir, op)
+		if err != nil || lib != nil {
+			out = lib
+			return err
 		}
 		pid := model.NewPID()
-		r, err := tx.ExecContext(ctx,
+		root := []byte(dir)
+		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO library(pid, root, display_root, mode, profile, created_at) VALUES (?,?,?,?,?,?)",
-			string(pid), root, dir, string(model.ModePodcast), "waxbin-native", nowNS())
-		if err != nil {
+			string(pid), root, dir, string(model.ModePodcast), "waxbin-native", nowNS()); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		id, _ = r.LastInsertId()
+		if out, err = libraryByRootTx(ctx, tx, root); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		return appendChange(ctx, tx, "library", pid, model.OpCreate)
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return id, nil
+	return out, nil
+}
+
+// podcastLibraryAt returns the podcast library at dir, nil when there is none yet, and
+// CodeConflict when dir is another library's root or nests with one. The root lookup
+// folds case where the platform's path rule does, so a podcast dir that only re-spells
+// a music root finds it.
+func podcastLibraryAt(ctx context.Context, q queryer, dir, op string) (*model.Library, error) {
+	existing, err := libraryByRootDB(ctx, q, []byte(dir))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if existing != nil {
+		if existing.Mode != model.ModePodcast {
+			return nil, waxerr.New(waxerr.CodeConflict, op,
+				"podcast dir "+dir+" is already a "+string(existing.Mode)+" library root")
+		}
+		return existing, nil
+	}
+	libs, err := librariesDB(ctx, q)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	for _, lib := range libs {
+		if lib.Mode != model.ModePodcast && pathx.Overlap(string(lib.Root), dir) {
+			return nil, waxerr.New(waxerr.CodeConflict, op, "podcast dir "+dir+" overlaps library root "+lib.DisplayRoot)
+		}
+	}
+	return nil, nil
 }
 
 // UpsertFeed persists a parsed feed atomically: the podcast row is created or
@@ -72,6 +97,9 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 	if in.IdentityKey == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "feed has no identity (no guid or url)")
 	}
+	if l := in.Login; l != nil && l.User == "" && l.Pass != "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "a feed login needs a user name")
+	}
 	res := &model.UpsertFeedResult{}
 	image, err := s.examineArt(ctx, in.Image)
 	if err != nil {
@@ -84,6 +112,17 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 			return err
 		}
 		res.PodcastPID, res.Created = up.pid, up.created
+		// A new show's key is known only now, so its password is sealed in here, as
+		// ReSealSecrets seals inside its transaction.
+		if in.Login != nil {
+			stored, err := s.storedLogin(op, up.pid, *in.Login)
+			if err != nil {
+				return err
+			}
+			if err := writeLoginTx(ctx, tx, up.pid, in.Login.User, stored); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 
 		// Ingest the feed image onto the podcast entity (idempotent on hash), unless the
 		// user chose this show's cover: the feed re-points on every image-URL change.
@@ -140,7 +179,7 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 		// The show delta fires only when the show or its content actually changed;
 		// a sync that just refreshed the validators/fetch time stays silent (the
 		// silent-no-op convention, matching UpsertEpisode's gate).
-		if up.created || up.metaChanged || personsChanged || res.EpisodesAdded > 0 || res.EpisodesUpdated > 0 {
+		if up.created || up.metaChanged || personsChanged || in.Login != nil || res.EpisodesAdded > 0 || res.EpisodesUpdated > 0 {
 			return appendChange(ctx, tx, "podcast", up.pid, opFor(up.created))
 		}
 		return nil
@@ -168,6 +207,25 @@ func (s *Store) MarkPodcastsFetched(ctx context.Context, pids []model.PID, atNS 
 			}
 		}
 		return nil
+	})
+}
+
+// MovePodcastFeed moves a show to another feed address, as a sync answered NotModified
+// through permanent redirects learns, keeping the stored address when another show holds
+// the new one, as a feed write by pid does. It emits a delta when the show moved.
+func (s *Store) MovePodcastFeed(ctx context.Context, pid model.PID, feedURL string) error {
+	const op = "store.MovePodcastFeed"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		r, err := tx.ExecContext(ctx, `UPDATE podcast SET feed_url = ?, updated_at = ? WHERE pid = ? AND feed_url <> ?
+			AND NOT EXISTS (SELECT 1 FROM podcast o WHERE o.feed_url = ? AND o.pid <> ?)`,
+			feedURL, nowNS(), string(pid), feedURL, feedURL, string(pid))
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return nil
+		}
+		return appendChange(ctx, tx, "podcast", pid, model.OpUpdate)
 	})
 }
 
@@ -357,8 +415,12 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 			&old.language, &old.category, &old.explicit, &old.fundingURL, &old.fundingMessage,
 			&old.medium, &old.imageURL, &old.guid, &oldKey, &old.feedURL, &old.sourceType)
 	}
-	err := scanOld(tx.QueryRowContext(ctx, "SELECT id, pid, "+metaCols+" FROM podcast p"+feedRowWhere,
-		in.FeedURL, in.IdentityKey, in.FeedURL))
+	row := tx.QueryRowContext(ctx, "SELECT id, pid, "+metaCols+" FROM podcast p"+feedRowWhere,
+		in.FeedURL, in.IdentityKey, in.FeedURL)
+	if in.PodcastPID != "" {
+		row = tx.QueryRowContext(ctx, "SELECT id, pid, "+metaCols+" FROM podcast p WHERE p.pid = ?", string(in.PodcastPID))
+	}
+	err := scanOld(row)
 	switch {
 	case err == nil:
 		// The key flips when a feed that was subscribed without a <podcast:guid> later
@@ -385,8 +447,21 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		// A show written by pid moves to the address it was given unless another show
+		// holds that address, which keeps it.
+		feedURL := in.FeedURL
+		if feedURL != old.feedURL {
+			var held bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM podcast WHERE feed_url = ? AND id <> ?)",
+				feedURL, id).Scan(&held); err != nil {
+				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if held {
+				feedURL = old.feedURL
+			}
+		}
 		metaChanged := old.title != f.Title || old.author != f.Author || old.description != f.Description ||
-			old.link != f.Link || old.imageURL != f.ImageURL || oldKey != key || old.feedURL != in.FeedURL
+			old.link != f.Link || old.imageURL != f.ImageURL || oldKey != key || old.feedURL != feedURL
 		if synced {
 			// The fetch time never steps back, so two syncs landing out of order keep the
 			// later one.
@@ -395,7 +470,7 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 				category=?, explicit=?, funding_url=?, funding_message=?, medium=?, image_url=?, guid=?,
 				etag=?, last_modified=?, source_type=?,
 				last_fetched_at=MAX(COALESCE(last_fetched_at, 0), ?), updated_at=? WHERE id=?`,
-				key, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
+				key, feedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
 				f.Category, boolInt(f.Explicit), f.FundingURL, f.FundingMessage, f.Medium, f.ImageURL, f.GUID,
 				in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, id); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -416,7 +491,7 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 			if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
 				identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, image_url=?,
 				source_type=COALESCE(?, source_type), updated_at=? WHERE id=?`,
-				key, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link,
+				key, feedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link,
 				f.ImageURL, sourceType, now, id); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -425,6 +500,8 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 			titleChanged: old.title != f.Title}, nil
 	case !errors.Is(err, sql.ErrNoRows):
 		return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+	case in.PodcastPID != "":
+		return podcastUpsert{}, waxerr.New(waxerr.CodeNotFound, op, "no such podcast: "+string(in.PodcastPID))
 	}
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx, `INSERT INTO podcast
@@ -896,29 +973,22 @@ func stripHTML(s string) string {
 	return strings.Join(strings.Fields(html.UnescapeString(b.String())), " ")
 }
 
-// AttachEpisodeFile records a downloaded enclosure: it creates the file row in the
-// podcast library, makes it the episode's primary file, flips the episode to
-// present, and ingests any episode artwork. A prior download for the same episode
-// is replaced (its file row removed) so a re-download does not leak a row.
 // PutEpisodeChapters stores an episode's Podcasting-2.0 chapters (source
-// 'podcast_url') against its downloaded file, replacing only the URL-sourced rows so
-// a re-sync cannot clobber richer chapters with poorer embedded ones. It emits an
-// item delta on a real change. The episode must be downloaded (have a primary file).
+// 'podcast_url'), replacing only the URL-sourced rows. They are kept on the episode
+// rather than on a file, so they are stored before any download and outlast an unfetch,
+// retention and a re-download, and they outrank the chapters a downloaded file carries
+// (EpisodeChapters). It emits an item delta on a real change.
 func (s *Store) PutEpisodeChapters(ctx context.Context, episodePID model.PID, chapters []model.Chapter) error {
 	const op = "store.PutEpisodeChapters"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		var itemID, fileID int64
-		err := tx.QueryRowContext(ctx, `SELECT pi.id, f.id FROM playable_item pi
-			JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
-			JOIN file f ON f.id = pf.file_id
-			WHERE pi.pid = ? AND pi.kind = 'episode'`, string(episodePID)).Scan(&itemID, &fileID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return waxerr.New(waxerr.CodeNotFound, op, "episode not downloaded: "+string(episodePID))
-		}
+		itemID, kind, err := s.itemIDKindByPIDTx(ctx, tx, episodePID, op)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return err
 		}
-		changed, err := syncChaptersForFileSource(ctx, tx, itemID, fileID, "podcast_url", chapters)
+		if kind != string(model.KindEpisode) {
+			return waxerr.New(waxerr.CodeInvalid, op, "item is not an episode: "+string(episodePID))
+		}
+		changed, err := syncChaptersForItemSourceTx(ctx, tx, itemID, "podcast_url", chapters)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -929,6 +999,10 @@ func (s *Store) PutEpisodeChapters(ctx context.Context, episodePID model.PID, ch
 	})
 }
 
+// AttachEpisodeFile records a downloaded enclosure: it creates the file row in the
+// podcast library, makes it the episode's primary file, flips the episode to
+// present, and ingests any episode artwork. A prior download for the same episode
+// is replaced (its file row removed) so a re-download does not leak a row.
 func (s *Store) AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFileInput) (model.PID, error) {
 	const op = "store.AttachEpisodeFile"
 	var filePID model.PID
@@ -1158,10 +1232,56 @@ func (s *Store) SetPodcastRetention(ctx context.Context, podcastPID model.PID, k
 	return s.updatePodcastField(ctx, podcastPID, "retention_keep", keep, "store.SetPodcastRetention")
 }
 
-// SetPodcastAuthUser records the basic-auth username for a private feed (the
-// password lives in the secret table).
-func (s *Store) SetPodcastAuthUser(ctx context.Context, podcastPID model.PID, user string) error {
-	return s.updatePodcastField(ctx, podcastPID, "auth_user", user, "store.SetPodcastAuthUser")
+// SetPodcastAuth records a private feed's basic-auth login in one transaction: the user
+// on the show and the password in the secret table under model.PodcastSecretKey, sealed
+// like SetSecret's. A login is a user name, with or without a password, and always has
+// its secret row, so a row that is missing means a password lost, as a restore of a
+// backup trimmed of its secrets leaves; an empty login clears both, and a password with
+// no user is refused.
+func (s *Store) SetPodcastAuth(ctx context.Context, podcastPID model.PID, user, pass string) error {
+	const op = "store.SetPodcastAuth"
+	stored, err := s.storedLogin(op, podcastPID, model.FeedLogin{User: user, Pass: pass})
+	if err != nil {
+		return err
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		r, err := tx.ExecContext(ctx, "UPDATE podcast SET updated_at = ? WHERE pid = ?", nowNS(), string(podcastPID))
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such podcast: "+string(podcastPID))
+		}
+		if err := writeLoginTx(ctx, tx, podcastPID, user, stored); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return appendChange(ctx, tx, "podcast", podcastPID, model.OpUpdate)
+	})
+}
+
+// storedLogin checks a login and seals its password for the secret row of the show pid.
+func (s *Store) storedLogin(op string, pid model.PID, l model.FeedLogin) (string, error) {
+	switch {
+	case l.User == "" && l.Pass != "":
+		return "", waxerr.New(waxerr.CodeInvalid, op, "a feed login needs a user name")
+	case l.User == "":
+		return "", nil
+	}
+	return s.storedSecret(op, model.PodcastSecretKey(pid), l.Pass)
+}
+
+// writeLoginTx sets the show's login user and its secret row (stored, already sealed), or
+// clears both for an empty user.
+func writeLoginTx(ctx context.Context, tx *sql.Tx, pid model.PID, user, stored string) error {
+	if _, err := tx.ExecContext(ctx, "UPDATE podcast SET auth_user = ? WHERE pid = ?", user, string(pid)); err != nil {
+		return err
+	}
+	key := model.PodcastSecretKey(pid)
+	if user == "" {
+		_, err := tx.ExecContext(ctx, "DELETE FROM secret WHERE key = ?", key)
+		return err
+	}
+	return putSecretTx(ctx, tx, key, stored)
 }
 
 func (s *Store) updatePodcastField(ctx context.Context, podcastPID model.PID, col string, val any, op string) error {

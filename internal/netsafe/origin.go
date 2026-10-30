@@ -46,6 +46,14 @@ func originOfURL(u *url.URL) (origin, bool) {
 	return o, true
 }
 
+// WithinOrigin reports whether a login scoped to the origin of the URL origin, as
+// Credentials are, would go to the URL raw.
+func WithinOrigin(origin, raw string) bool {
+	o, ok := originOf(origin)
+	hop, hok := originOf(raw)
+	return ok && hok && o.admits(hop)
+}
+
 // admits reports whether a login scoped to o may go to hop.
 func (o origin) admits(hop origin) bool {
 	if o == hop {

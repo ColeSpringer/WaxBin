@@ -278,7 +278,7 @@ func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bo
 func nonUserChapterExtentsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[int64]int64, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT file_id, source, MAX(MAX(start_ms, end_ms)) FROM chapter
-		 WHERE book_item_id = ? AND source <> 'user' GROUP BY file_id, source`, itemID)
+		 WHERE book_item_id = ? AND file_id IS NOT NULL AND source <> 'user' GROUP BY file_id, source`, itemID)
 	if err != nil {
 		return nil, err
 	}

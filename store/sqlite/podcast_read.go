@@ -224,28 +224,79 @@ func (s *Store) EpisodesByPodcast(ctx context.Context, podcastPID model.PID, lim
 	return out, rows.Err()
 }
 
-// EpisodeChapters returns a downloaded episode's chapters in timeline order,
-// preferring the podcast:chapters JSON source over any embedded chapters. It reuses
-// the book chapter timeline over the episode's single backing file. An episode with
-// no downloaded file or no chapters returns an empty slice.
+// EpisodeChapters returns an episode's chapters in timeline order. The feed's
+// podcast:chapters, kept on the episode, outrank whatever chapters its downloaded file
+// carries, as podcast_url outranks embedded (chapterSourceRank); with none from the feed
+// it reads the file's over the book chapter timeline. The last chapter runs to the
+// file's duration, or to the feed's declared one for an episode with no file or a file of
+// unknown length, and is open-ended (EndMS 0) when neither reaches past its start. An
+// episode with no chapters, or a pid that is no episode, returns an empty slice.
 func (s *Store) EpisodeChapters(ctx context.Context, pid model.PID) ([]model.Chapter, error) {
 	const op = "store.EpisodeChapters"
-	var itemID, fileID, dur int64
-	var fpid string
-	err := s.rdb().QueryRowContext(ctx, `SELECT pi.id, f.id, f.pid, COALESCE(f.duration_ms, 0)
+	var itemID, declared, dur int64
+	var fileID sql.NullInt64
+	var fpid sql.NullString
+	err := s.rdb().QueryRowContext(ctx, `SELECT pi.id, COALESCE(e.duration_ms, 0), f.id, f.pid, COALESCE(f.duration_ms, 0)
 		FROM playable_item pi
-		JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
-		JOIN file f ON f.id = pf.file_id
-		WHERE pi.pid = ? AND pi.kind = 'episode'`, string(pid)).Scan(&itemID, &fileID, &fpid, &dur)
+		JOIN episode e ON e.item_id = pi.id
+		LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+		LEFT JOIN file f ON f.id = pf.file_id
+		WHERE pi.pid = ? AND pi.kind = 'episode'`, string(pid)).Scan(&itemID, &declared, &fileID, &fpid, &dur)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil // not downloaded (no primary file), so no chapters
+		return nil, nil
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	part := bookPart{BookPart: model.BookPart{FilePID: model.PID(fpid), DurationMS: dur}, fileID: fileID}
-	chs, _, err := s.bookChapters(ctx, itemID, []bookPart{part})
-	return chs, err
+	feed, err := s.itemChapters(ctx, itemID, "podcast_url")
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if len(feed) == 0 {
+		if !fileID.Valid {
+			return nil, nil
+		}
+		part := bookPart{BookPart: model.BookPart{FilePID: model.PID(fpid.String), DurationMS: dur}, fileID: fileID.Int64}
+		chs, _, err := s.bookChapters(ctx, itemID, []bookPart{part})
+		return chs, err
+	}
+	total := declared
+	if fileID.Valid && dur > 0 {
+		total = dur
+	}
+	for i := range feed {
+		c := &feed[i]
+		c.Position, c.FilePID = i, model.PID(fpid.String)
+		c.StartMS, c.EndMS = c.FileStartMS, c.FileEndMS
+	}
+	fillOpenEnds(feed, total)
+	// A last chapter the known length does not reach past has no known end: open.
+	if last := &feed[len(feed)-1]; last.FileEndMS == 0 && last.EndMS <= last.StartMS {
+		last.EndMS = 0
+	}
+	return feed, nil
+}
+
+// itemChaptersQ reads the chapters of a source kept on an item rather than on a file.
+const itemChaptersQ = `SELECT title, start_ms, end_ms FROM chapter
+	WHERE book_item_id = ? AND file_id IS NULL AND source = ? ORDER BY position, start_ms`
+
+// itemChapters reads the chapters of source kept on an item rather than on a file.
+func (s *Store) itemChapters(ctx context.Context, itemID int64, source string) ([]model.Chapter, error) {
+	rows, err := s.rdb().QueryContext(ctx, itemChaptersQ, itemID, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Chapter
+	for rows.Next() {
+		var c model.Chapter
+		if err := rows.Scan(&c.Title, &c.FileStartMS, &c.FileEndMS); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // EpisodeMeta returns one episode's row by public id, in one statement, for an

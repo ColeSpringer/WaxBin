@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"slices"
 	"sync"
 	"testing"
@@ -219,14 +218,10 @@ func TestOriginRule(t *testing.T) {
 		{"http://[2001:db8::1]/feed.xml", "http://[2001:db8::1]:80/ep.mp3", true},
 		{"manual:01ABCDEF", "http://feeds.example/ep.mp3", false},
 		{"", "http://feeds.example/ep.mp3", false},
+		{"http://feeds.example/feed.xml", "ftp://feeds.example/ep.mp3", false},
+		{"http://feeds.example/feed.xml", "http://feeds.example:bad/ep.mp3", false},
 	} {
-		hop, err := url.Parse(tc.hop)
-		if err != nil {
-			t.Fatal(err)
-		}
-		o, ok := originOf(tc.origin)
-		h, hok := originOfURL(hop)
-		if got := ok && hok && o.admits(h); got != tc.admits {
+		if got := WithinOrigin(tc.origin, tc.hop); got != tc.admits {
 			t.Errorf("%s to %s = %v, want %v", tc.origin, tc.hop, got, tc.admits)
 		}
 	}

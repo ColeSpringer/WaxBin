@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -18,6 +19,7 @@ import (
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -109,23 +111,9 @@ func TestAddRootValidation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = lib.Close() })
 
-	// Materialize the internal podcast library row (lazily created on the first
-	// download-path use). Its "podcast" mode is not user-settable, so mapping it
-	// into the validated root set would fail every later AddRoot; the skip is
-	// what this half of the test pins.
-	show, err := lib.Podcasts().AddManual(ctx, "Poison Check", podcast.ManualOptions{})
-	if err != nil {
-		t.Fatalf("add manual show: %v", err)
-	}
-	epRes, err := lib.Podcasts().AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "Ep", GUID: "g1"}, true)
-	if err != nil {
-		t.Fatalf("add episode: %v", err)
-	}
-	src := filepath.Join(t.TempDir(), "ep.mp3")
-	writeFile(t, src, testaudio.BuildMP3("Ep", "Host", "Show", 1))
-	if _, err := lib.Podcasts().ImportEpisodeFile(ctx, epRes.EpisodePID, src, false); err != nil {
-		t.Fatalf("import episode file: %v", err)
-	}
+	// The open made the internal podcast library row. Its "podcast" mode is not
+	// user-settable, so mapping it into the validated root set would fail every later
+	// AddRoot; the skip is what this half of the test pins.
 	if libs, err := lib.Libraries(ctx); err != nil || !hasPodcastLib(libs) {
 		t.Fatalf("libraries = %+v (err %v), want the internal podcast row present", libs, err)
 	}
@@ -792,5 +780,278 @@ func TestRelocateRootCarriesTheTrashJournal(t *testing.T) {
 	}
 	if st := stateOf(t, ctx, lib, gone); st != model.StatePresent {
 		t.Errorf("restored item state = %q, want present", st)
+	}
+}
+
+// TestPodcastLibraryExistsAfterOpen: a read-write open with a podcast dir creates the
+// podcast library before any download, and a later open with the dir spelled another
+// way finds the same library rather than making a second.
+func TestPodcastLibraryExistsAfterOpen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pods := filepath.Join(t.TempDir(), "pods")
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	library := func(dir string) *model.Library {
+		t.Helper()
+		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: dir}})
+		if err != nil {
+			t.Fatalf("open with %s: %v", dir, err)
+		}
+		defer func() { _ = lib.Close() }()
+		pl, err := lib.PodcastLibrary(ctx)
+		if err != nil {
+			t.Fatalf("podcast library with %s: %v", dir, err)
+		}
+		libs, err := lib.Libraries(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, l := range libs {
+			if l.Mode == model.ModePodcast {
+				n++
+			}
+		}
+		if n != 1 || pl.Mode != model.ModePodcast || pl.DisplayRoot != pods {
+			t.Fatalf("with %s: podcast library %+v among %d podcast rows, want one at %s", dir, pl, n, pods)
+		}
+		return pl
+	}
+	first := library(pods)
+	sep := string(filepath.Separator)
+	if again := library(pods + sep + "." + sep); again.PID != first.PID {
+		t.Fatalf("a second open's podcast library is %s, want %s", again.PID, first.PID)
+	}
+}
+
+// TestReopenEnsuresThePodcastLibrary: a restore taken through the hand-off can bring in a
+// catalog with no podcast library, and the reopen creates one, as an open does.
+func TestReopenEnsuresThePodcastLibrary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	bare, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "bare.db")})
+	if err != nil {
+		t.Fatalf("open bare: %v", err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := bare.Backup(ctx, backup, port.BackupOptions{}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if err := bare.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: t.TempDir()}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatalf("begin maintenance: %v", err)
+	}
+	if err := port.Restore(ctx, backup, db, true); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := lib.EndMaintenance(ctx); err != nil {
+		t.Fatalf("end maintenance: %v", err)
+	}
+	if pl, err := lib.PodcastLibrary(ctx); err != nil || pl.Mode != model.ModePodcast {
+		t.Fatalf("podcast library after the restore = %+v (err %v), want one", pl, err)
+	}
+}
+
+// TestOpenRefusesARootInsideThePodcastDir: an embedder's open checks the podcast dir and
+// the inbox against the roots as the CLI's does, before the catalog opens.
+func TestOpenRefusesARootInsideThePodcastDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := t.TempDir()
+	pods := filepath.Join(base, "podcasts")
+	root := func(path string) []config.Root {
+		return []config.Root{{Path: path, Mode: model.ModeManaged, Profile: "waxbin-native"}}
+	}
+	for name, opts := range map[string]waxbin.Options{
+		"a root inside the podcast dir": {Roots: root(filepath.Join(pods, "music")), Podcasts: config.PodcastConfig{Dir: pods}},
+		"the podcast dir inside a root": {Roots: root(base), Podcasts: config.PodcastConfig{Dir: pods}},
+		"an inbox inside a root":        {Roots: root(filepath.Join(base, "music")), Inbox: []string{filepath.Join(base, "music", "inbox")}},
+		"the podcast dir in the inbox":  {Inbox: []string{base}, Podcasts: config.PodcastConfig{Dir: pods}},
+	} {
+		opts.DBPath = filepath.Join(t.TempDir(), "catalog.db")
+		lib, err := waxbin.Open(ctx, opts)
+		if err == nil {
+			_ = lib.Close()
+		}
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("open with %s = %v, want CodeInvalid", name, err)
+		}
+	}
+}
+
+// TestPodcastLibraryAnswersReadOnly: a read-only open finds the podcast library a
+// read-write one made, by its dir, and answers CodeNotFound for a dir with none or for
+// no dir at all.
+func TestPodcastLibraryAnswersReadOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pods := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	rw, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: pods}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	made, err := rw.PodcastLibrary(ctx)
+	if err != nil {
+		t.Fatalf("podcast library: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{"its dir": pods, "another dir": t.TempDir(), "no dir": ""} {
+		ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true, Podcasts: config.PodcastConfig{Dir: dir}})
+		if err != nil {
+			t.Fatalf("read-only open with %s: %v", name, err)
+		}
+		pl, err := ro.PodcastLibrary(ctx)
+		_ = ro.Close()
+		switch {
+		case dir == pods && (err != nil || pl.PID != made.PID):
+			t.Errorf("read-only with %s = %+v (err %v), want %s", name, pl, err, made.PID)
+		case dir != pods && !waxerr.Is(err, waxerr.CodeNotFound):
+			t.Errorf("read-only with %s = %+v (err %v), want CodeNotFound", name, pl, err)
+		}
+	}
+}
+
+// TestReopenWithAPodcastDirConflictStillHandsBack: a restore whose catalog holds the
+// configured podcast dir as a music root still reopens, hears its hook and allows the
+// next hand-off, the podcast library left unmade as a download would report.
+func TestReopenWithAPodcastDirConflictStillHandsBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pods := t.TempDir()
+	music, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "music.db"),
+		Roots: []config.Root{{Path: pods, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatalf("open the music catalog: %v", err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := music.Backup(ctx, backup, port.BackupOptions{}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if err := music.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	var reopens atomic.Int32
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: pods},
+		OnReopen: func(context.Context, waxbin.ReopenEvent) { reopens.Add(1) }})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatalf("begin maintenance: %v", err)
+	}
+	if err := port.Restore(ctx, backup, db, true); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := lib.EndMaintenance(ctx); err != nil {
+		t.Fatalf("end maintenance over a podcast dir conflict: %v", err)
+	}
+	if reopens.Load() != 1 {
+		t.Fatalf("the reopen hook fired %d times, want once", reopens.Load())
+	}
+	if _, err := lib.PodcastLibrary(ctx); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("podcast library = %v, want CodeNotFound while its dir is a music root", err)
+	}
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatalf("the next hand-off: %v", err)
+	}
+	if err := lib.EndMaintenance(ctx); err != nil {
+		t.Fatalf("end the next hand-off: %v", err)
+	}
+}
+
+// TestAnOverlapWithAStoredRootOpensAndRefusesAtUse: a root added at runtime, which no
+// configuration names, that a podcast dir or an inbox nests with leaves the catalog
+// opening, so the command that removes the root still runs, and refuses the downloads
+// and the inbox import that would file into it; a dir apart from every root works.
+func TestAnOverlapWithAStoredRootOpensAndRefusesAtUse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := t.TempDir()
+	music := filepath.Join(base, "music")
+	writeFile(t, filepath.Join(music, ".keep"), nil)
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	root, err := lib.AddRoot(ctx, config.Root{Path: music, Mode: model.ModeManaged})
+	if err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	inbox := filepath.Join(music, "inbox")
+	writeFile(t, filepath.Join(inbox, ".keep"), nil)
+	lib, err = waxbin.Open(ctx, waxbin.Options{DBPath: db, Inbox: []string{inbox},
+		Podcasts: config.PodcastConfig{Dir: filepath.Join(music, "pods")}})
+	if err != nil {
+		t.Fatalf("open over the overlaps: %v", err)
+	}
+	if _, err := lib.PodcastLibrary(ctx); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("podcast library = %v, want none made inside the root", err)
+	}
+	show, err := lib.Podcasts().AddManual(ctx, "Local", podcast.ManualOptions{})
+	if err != nil {
+		t.Fatalf("add manual: %v", err)
+	}
+	ep, err := lib.Podcasts().AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "Ep", GUID: "g"}, true)
+	if err != nil {
+		t.Fatalf("add episode: %v", err)
+	}
+	src := filepath.Join(t.TempDir(), "ep.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Ep", "Host", "Show", 1))
+	if _, err := lib.Podcasts().ImportEpisodeFile(ctx, ep.EpisodePID, src, true); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Errorf("an episode import into the root = %v, want CodeConflict", err)
+	}
+	if _, err := os.Stat(filepath.Join(music, "pods")); !os.IsNotExist(err) {
+		t.Errorf("the refused import made %s (err %v)", filepath.Join(music, "pods"), err)
+	}
+	if _, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inbox}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("an import of the inbox inside the root = %v, want CodeInvalid", err)
+	}
+	if _, err := lib.RemoveRoot(ctx, root.PID, waxbin.RemoveRootOptions{}); err != nil {
+		t.Fatalf("remove the root the overlaps are with: %v", err)
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	lib, err = waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: filepath.Join(base, "pods")}})
+	if err != nil {
+		t.Fatalf("open with a podcast dir apart from the root: %v", err)
+	}
+	defer lib.Close()
+	if _, err := lib.PodcastLibrary(ctx); err != nil {
+		t.Fatalf("podcast library apart from the root: %v", err)
+	}
+}
+
+// TestABlankPodcastDirOpensAsNone: a podcast dir of spaces is no podcast dir.
+func TestABlankPodcastDirOpensAsNone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Podcasts: config.PodcastConfig{Dir: "  "}})
+	if err != nil {
+		t.Fatalf("open with a blank podcast dir: %v", err)
+	}
+	defer lib.Close()
+	if _, err := lib.PodcastLibrary(ctx); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("podcast library = %v, want none configured", err)
 	}
 }

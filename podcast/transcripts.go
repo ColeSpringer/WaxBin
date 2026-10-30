@@ -43,8 +43,11 @@ func (s *Service) PutTranscript(ctx context.Context, in model.PutTranscriptInput
 // FetchTranscript fetches and stores the transcript an episode's feed declared,
 // on demand. Unlike Download's opportunistic best-effort fetch, errors propagate,
 // so a caller (a client at queue-add or episode-open time) can tell "no
-// transcript declared" from a fetch or store failure. The episode does not need
-// to be downloaded, which covers a streamed-never-downloaded episode.
+// transcript declared" from a fetch or store failure: a transcript host's refusal or
+// a document that holds no text is a *source.ProviderError, as for Sync. The episode
+// does not need to be downloaded, which covers a streamed-never-downloaded episode.
+// The show's login goes only to its feed's origin, and one the catalog cannot read
+// fails the fetch before it is made.
 func (s *Service) FetchTranscript(ctx context.Context, episodePID model.PID) error {
 	const op = "podcast.FetchTranscript"
 	ep, err := s.store.EpisodeMeta(ctx, episodePID)
@@ -55,7 +58,15 @@ func (s *Service) FetchTranscript(ctx context.Context, episodePID model.PID) err
 	if url == "" {
 		return waxerr.New(waxerr.CodeInvalid, op, "episode declares no transcript url")
 	}
-	return s.fetchAndStoreTranscript(ctx, episodePID, url, ep.TranscriptType)
+	pod, err := s.store.PodcastByPID(ctx, ep.PodcastPID)
+	if err != nil {
+		return err
+	}
+	user, pass, err := s.authFor(ctx, pod)
+	if err != nil {
+		return err
+	}
+	return s.fetchAndStoreTranscript(ctx, loginOf(pod.FeedURL, user, pass), episodePID, url, ep.TranscriptType)
 }
 
 // Transcript returns an episode's stored transcript (CodeNotFound when none is
@@ -68,15 +79,18 @@ func (s *Service) Transcript(ctx context.Context, episodePID model.PID) (*model.
 // (MIME/size/SSRF guards), reduces it to searchable text, and stores it with its
 // source URL as provenance. Errors return to the caller: FetchTranscript
 // propagates them, the download path logs and moves on.
-func (s *Service) fetchAndStoreTranscript(ctx context.Context, episodePID model.PID, url, mimeType string) error {
-	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: transcriptMIME, MaxBytes: s.cfg.MaxFeedBytes})
+func (s *Service) fetchAndStoreTranscript(ctx context.Context, login *netsafe.Credentials, episodePID model.PID, url, mimeType string) error {
+	const op = "podcast.FetchTranscript"
+	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: transcriptMIME, MaxBytes: s.cfg.MaxFeedBytes,
+		Credentials: login})
 	if err != nil {
-		return err
+		return providerErr(ctx, op, model.SourceRSS, "fetch", err)
 	}
 	format := transcriptFormat(mimeType, url)
 	body := transcriptToText(resp.Body, format)
 	if strings.TrimSpace(body) == "" {
-		return waxerr.New(waxerr.CodeInvalid, "podcast.FetchTranscript", "transcript is empty after reduction")
+		return providerErr(ctx, op, model.SourceRSS, "fetch",
+			waxerr.New(waxerr.CodeInvalid, op, "transcript is empty after reduction"))
 	}
 	return s.store.PutTranscript(ctx, model.PutTranscriptInput{
 		EpisodePID: episodePID, Format: format, Body: body, SourceURL: url,
@@ -85,9 +99,9 @@ func (s *Service) fetchAndStoreTranscript(ctx context.Context, episodePID model.
 
 // fetchTranscript is Download's opportunistic wrapper: a failure is logged, not
 // fatal to the download. It reports whether a transcript was stored.
-func (s *Service) fetchTranscript(ctx context.Context, episodePID model.PID, url, mimeType string) bool {
-	if err := s.fetchAndStoreTranscript(ctx, episodePID, url, mimeType); err != nil {
-		s.log.Debug("transcript fetch failed", "url", url, "err", err)
+func (s *Service) fetchTranscript(ctx context.Context, login *netsafe.Credentials, episodePID model.PID, url, mimeType string) bool {
+	if err := s.fetchAndStoreTranscript(ctx, login, episodePID, url, mimeType); err != nil {
+		s.log.Debug("transcript fetch failed", "host", netsafe.ShownHost(url), "err", err)
 		return false
 	}
 	return true

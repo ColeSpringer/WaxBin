@@ -54,7 +54,7 @@ func TestSetLibraryReadOnly(t *testing.T) {
 	}
 	libs, _ = st.Libraries(ctx)
 	for _, l := range libs {
-		if l.ID == podID {
+		if l.ID == podID.ID {
 			if _, err := st.SetLibraryReadOnly(ctx, l.PID, true); !waxerr.Is(err, waxerr.CodeInvalid) {
 				t.Errorf("flagging the podcast library = %v, want CodeInvalid", err)
 			}

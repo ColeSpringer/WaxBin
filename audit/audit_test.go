@@ -305,6 +305,27 @@ func TestAuditFeedValidationRSSOnly(t *testing.T) {
 	}
 }
 
+// TestAuditInvalidFeedNamesTheHostOnly: an invalid feed URL's finding names the
+// address's scheme and host, never the login, path or query it carries.
+func TestAuditInvalidFeedNamesTheHostOnly(t *testing.T) {
+	t.Parallel()
+	st := &fakeStore{pods: []*model.Podcast{{PID: "p1", Title: "Members", SourceType: model.SourceRSS,
+		FeedURL: "ftp://alice:pw@feeds.example/private/feed.xml?token=t", EpisodeCount: 1}}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckInvalidFeed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := findingsFor(rep, model.CheckInvalidFeed)
+	if len(got) != 1 || !strings.Contains(got[0].Message, "ftp://feeds.example") {
+		t.Fatalf("findings = %+v, want one naming ftp://feeds.example", got)
+	}
+	for _, leak := range []string{"alice", ":pw", "/private", "token"} {
+		if strings.Contains(got[0].Message, leak) {
+			t.Errorf("the finding %q carries %q", got[0].Message, leak)
+		}
+	}
+}
+
 func TestAuditIntegrity(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.flac")

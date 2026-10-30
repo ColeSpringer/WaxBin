@@ -20,25 +20,39 @@ import (
 // the reserved sealed-value marker is refused so it can never be misread as sealed.
 func (s *Store) SetSecret(ctx context.Context, key, value string) error {
 	const op = "store.SetSecret"
-	if strings.TrimSpace(key) == "" {
-		return waxerr.New(waxerr.CodeInvalid, op, "empty secret key")
+	stored, err := s.storedSecret(op, key, value)
+	if err != nil {
+		return err
 	}
-	stored := value
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		return waxerr.Wrap(waxerr.CodeIO, op, putSecretTx(ctx, tx, key, stored))
+	})
+}
+
+// storedSecret is value as the secret table holds it under key: sealed when a cipher
+// is configured, and otherwise refused when it would read as sealed.
+func (s *Store) storedSecret(op, key, value string) (string, error) {
+	if strings.TrimSpace(key) == "" {
+		return "", waxerr.New(waxerr.CodeInvalid, op, "empty secret key")
+	}
 	if s.cipher != nil {
 		sealed, err := sealValue(s.cipher, s.cipherKeyID, key, value)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeInternal, op, err)
+			return "", waxerr.Wrap(waxerr.CodeInternal, op, err)
 		}
-		stored = sealed
-	} else if looksSealed(value) {
-		return waxerr.New(waxerr.CodeInvalid, op, "secret value cannot begin with the reserved "+sealPrefix+" marker")
+		return sealed, nil
 	}
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO secret(key, value, updated_at) VALUES (?,?,?)
-			ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-			key, stored, nowNS())
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	})
+	if looksSealed(value) {
+		return "", waxerr.New(waxerr.CodeInvalid, op, "secret value cannot begin with the reserved "+sealPrefix+" marker")
+	}
+	return value, nil
+}
+
+func putSecretTx(ctx context.Context, tx *sql.Tx, key, stored string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO secret(key, value, updated_at) VALUES (?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		key, stored, nowNS())
+	return err
 }
 
 // GetSecret returns a secret value, or CodeNotFound. A sealed value is opened with

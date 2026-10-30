@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/waxerr"
@@ -27,6 +28,7 @@ func newPodcastCmd(g *globals) *cobra.Command {
 		newPodcastDownloadCmd(g),
 		newPodcastUnfetchCmd(g),
 		newPodcastTranscriptCmd(g),
+		newPodcastChaptersCmd(g),
 		newPodcastAuthCmd(g),
 		newPodcastRetentionCmd(g),
 		newPodcastRemoveCmd(g),
@@ -123,6 +125,55 @@ func newPodcastTranscriptCmd(g *globals) *cobra.Command {
 	f.StringVar(&filePath, "file", "", "local transcript file to store")
 	f.StringVar(&format, "format", "", "format of --file: srt|vtt|json|text")
 	f.StringVar(&sourceURL, "source-url", "", "provenance URL recorded with --file")
+	return cmd
+}
+
+func newPodcastChaptersCmd(g *globals) *cobra.Command {
+	var fetch bool
+	cmd := &cobra.Command{
+		Use:   "chapters <episode-pid> [--fetch]",
+		Short: "List an episode's chapters, or fetch the ones its feed declared",
+		Long: "Without flags, lists the episode's stored chapters. --fetch fetches the chapters document the " +
+			"feed declared and stores it, with no download (errors are reported, unlike the best-effort fetch " +
+			"during download); a sync does not fetch it again when the feed's chapters URL changes.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pid := model.PID(args[0])
+			if fetch {
+				m, _, err := g.openMutator(cmd)
+				if err != nil {
+					return err
+				}
+				defer m.Close()
+				if err := m.FetchChapters(ctx(cmd), pid); err != nil {
+					return err
+				}
+				return reply(cmd, g, struct {
+					EpisodePID model.PID `json:"episodePid"`
+					Fetched    bool      `json:"fetched"`
+				}{pid, true}, "Chapters fetched and stored.\n")
+			}
+			lib, _, err := g.openRead(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			d, err := lib.Podcasts().Episode(ctx(cmd), pid)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, chapterViews(d.Chapters))
+			}
+			if len(d.Chapters) == 0 {
+				fmt.Fprintln(out(cmd), "(no chapters)")
+				return nil
+			}
+			printChapters(cmd, d.Chapters)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&fetch, "fetch", false, "fetch the feed-declared chapters and store them")
 	return cmd
 }
 
@@ -258,29 +309,50 @@ func newPodcastAddEpisodeCmd(g *globals) *cobra.Command {
 
 func newPodcastAddCmd(g *globals) *cobra.Command {
 	var user, pass string
+	var replace bool
 	cmd := &cobra.Command{
 		Use:   "add <feed-url>",
 		Short: "Subscribe to a podcast feed",
-		Args:  cobra.ExactArgs(1),
+		Long: "Subscribe to a podcast feed. A show already subscribed, at this address or by its podcast:guid at\n" +
+			"another, keeps its stored address and login; --replace-address moves it to this address with the login\n" +
+			"given, or none, so a private feed's move gives --user and --pass again.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.open(cmd)
 			if err != nil {
 				return err
 			}
 			defer lib.Close()
-			pod, err := lib.Podcasts().Add(ctx(cmd), args[0], podcast.AddOptions{User: user, Pass: pass})
+			url := strings.TrimSpace(args[0])
+			res, err := lib.Podcasts().Add(ctx(cmd), url, podcast.AddOptions{User: user, Pass: pass, ReplaceAddress: replace})
 			if err != nil {
 				return err
 			}
 			if g.jsonOut {
-				return printJSON(cmd, toPodcastView(pod))
+				return printJSON(cmd, toPodcastView(res.Podcast))
 			}
-			fmt.Fprintf(out(cmd), "Subscribed: %s (%s), %d episodes\n", pod.Title, pod.PID, pod.EpisodeCount)
+			w := out(cmd)
+			fmt.Fprintf(w, "Subscribed: %s (%s), %d episodes\n", res.Title, res.PID, res.EpisodeCount)
+			login := user != "" || pass != ""
+			switch {
+			case !res.Synced && res.FeedURL != url:
+				note := "Kept the stored address " + netsafe.ShownHost(res.FeedURL) + "; pass --replace-address to move the feed"
+				if login {
+					note += " and use this login"
+				}
+				fmt.Fprintln(w, note)
+			case !res.Synced && login:
+				fmt.Fprintln(w, "The show was already subscribed, so this login was not stored; pass --replace-address to store it, or use podcast auth")
+			case res.LoginDropped:
+				fmt.Fprintf(w, "Dropped the stored login, which was for the old address; pass --user and --pass with --replace-address to log in at %s\n",
+					netsafe.ShownHost(res.FeedURL))
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&user, "user", "", "basic-auth username for a private feed, sent only to the feed's own host and port")
 	cmd.Flags().StringVar(&pass, "pass", "", "basic-auth password for a private feed")
+	cmd.Flags().BoolVar(&replace, "replace-address", false, "move a subscribed show to this address and login")
 	return cmd
 }
 

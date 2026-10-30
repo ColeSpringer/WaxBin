@@ -935,7 +935,7 @@ func TestHasArtAcrossKinds(t *testing.T) {
 		t.Fatalf("podcast library: %v", err)
 	}
 	if _, err := st.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
-		EpisodePID: ep1.PID, LibraryID: libID,
+		EpisodePID: ep1.PID, LibraryID: libID.ID,
 		File: model.File{
 			Path: []byte("/podcasts/ep1.mp3"), DisplayPath: "/podcasts/ep1.mp3", RelPath: []byte("ep1.mp3"),
 			Kind: model.FileAudio, ContentHash: "h1", ScanState: model.ScanIndexed,

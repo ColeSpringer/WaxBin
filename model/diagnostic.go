@@ -242,12 +242,88 @@ const MaxDetailBytes = 512
 // MaxDetailBytes long. What a terminal would act on comes out escaped (see
 // escapedRune), a byte that is not UTF-8 as \xNN, and the result is truncated on a
 // rune boundary. The store applies it to every writer's detail.
-func CapDetail(s string) string { return capBytes(escapeDetail(s), MaxDetailBytes) }
+func CapDetail(s string) string { return CapBytes(escapeDetail(s), MaxDetailBytes) }
 
 // CapDetailWithTail is CapDetail for a detail that has to end with tail: s gives way,
 // so a summary that closes by saying what happened still says it.
 func CapDetailWithTail(s, tail string) string {
-	return capBytes(escapeDetail(s), max(MaxDetailBytes-len(tail), 0)) + tail
+	return CapBytes(escapeDetail(s), max(MaxDetailBytes-len(tail), 0)) + tail
+}
+
+// CapText makes s one line of stored text at most maxChars characters long, for the
+// text a remote feed supplies: a run of spaces holding a tab, a line break or another
+// whitespace control reads as one space; any other control character, a bidirectional
+// embedding, override or isolate, or a byte that is not UTF-8 is escaped as CapDetail
+// escapes it; and the cut falls between characters, never inside an escape, with no
+// space left at its end. The right-to-left marks and the joiners stay, since
+// right-to-left and emoji text carry them, while an unbalanced override would reorder
+// whatever a terminal prints after it.
+func CapText(s string, maxChars int) string {
+	var b strings.Builder
+	left, cut := maxChars, false
+	put := func(piece string) {
+		if n := utf8.RuneCountInString(piece); n <= left {
+			b.WriteString(piece)
+			left -= n
+		} else {
+			left, cut = 0, true
+		}
+	}
+	i := 0
+	for i < len(s) && left > 0 {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == ' ' || breaksLine(r):
+			j, broke := i, false
+			for j < len(s) {
+				r, n := utf8.DecodeRuneInString(s[j:])
+				if r != ' ' && !breaksLine(r) {
+					break
+				}
+				broke = broke || breaksLine(r)
+				j += n
+			}
+			if broke {
+				put(" ")
+			} else {
+				cut = cut || j-i > left
+				put(s[i:min(j, i+left)])
+			}
+			i = j
+			continue
+		case r == utf8.RuneError && size == 1, escapedRune(r) && !keptInText(r):
+			put(escapedForm(s, i, r, size))
+		default:
+			put(s[i : i+size])
+		}
+		i += size
+	}
+	if cut || i < len(s) {
+		return strings.TrimRight(b.String(), " ")
+	}
+	return b.String()
+}
+
+// keptInText reports a rune escapedRune names that a line of feed text keeps: the
+// right-to-left marks, which right-to-left titles carry, and the invisible spaces and
+// joiners; the separators CapText folds before it would get here.
+func keptInText(r rune) bool {
+	switch r {
+	case '\u200e', '\u200f', '\u061c', '\u200b', '\u2060', '\ufeff', '\u2028', '\u2029':
+		return true
+	}
+	return false
+}
+
+// breaksLine reports whitespace a single line of text cannot hold: a tab, a line feed or
+// carriage return, a vertical tab or form feed, a next-line control, or a line or
+// paragraph separator.
+func breaksLine(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', '\u0085', '\u2028', '\u2029':
+		return true
+	}
+	return false
 }
 
 // escapeDetail writes an ASCII control or a byte that is not UTF-8 as \xNN and any
@@ -259,17 +335,23 @@ func escapeDetail(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == utf8.RuneError && size == 1, r < utf8.RuneSelf && escapedRune(r):
-			fmt.Fprintf(&b, `\x%02x`, s[i])
-		case escapedRune(r):
-			fmt.Fprintf(&b, `\u%04x`, r)
-		default:
+		if r == utf8.RuneError && size == 1 || escapedRune(r) {
+			b.WriteString(escapedForm(s, i, r, size))
+		} else {
 			b.WriteString(s[i : i+size])
 		}
 		i += size
 	}
 	return b.String()
+}
+
+// escapedForm is the rune r at s[i:i+size] escaped: an ASCII control or a byte that is not
+// UTF-8 as \xNN, any other rune as \uXXXX.
+func escapedForm(s string, i int, r rune, size int) string {
+	if r == utf8.RuneError && size == 1 || r < utf8.RuneSelf {
+		return fmt.Sprintf(`\x%02x`, s[i])
+	}
+	return fmt.Sprintf(`\u%04x`, r)
 }
 
 // escapedRune reports a rune a terminal acts on rather than prints: a control
@@ -284,8 +366,8 @@ func escapedRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
 }
 
-// capBytes truncates s to n bytes on a rune boundary.
-func capBytes(s string, n int) string {
+// CapBytes truncates s to at most n bytes on a rune boundary.
+func CapBytes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}

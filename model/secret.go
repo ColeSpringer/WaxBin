@@ -1,5 +1,8 @@
 package model
 
+// PodcastSecretKey is the secret-table key a show's basic-auth password is stored under.
+func PodcastSecretKey(pid PID) string { return "podcast.auth." + string(pid) }
+
 // SecretCipher seals and opens the values WaxBin stores in its secret table
 // (today, private-feed passwords). An embedder such as WaxDeck supplies one to
 // own the key material and encrypt those values at rest; when none is supplied

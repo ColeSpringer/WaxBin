@@ -199,3 +199,11 @@ func TestLoadKeepsAnEmptyCompilationFolder(t *testing.T) {
 		t.Fatalf("profiles = %+v, want a's folder set empty and b's unset", cfg.Profiles)
 	}
 }
+
+func TestValidateTakesABlankPodcastDirAsNone(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{DBPath: filepath.Join(t.TempDir(), "c.db"), Podcasts: config.PodcastConfig{Dir: "  "}}
+	if err := cfg.Validate(); err != nil || cfg.Podcasts.Dir != "" {
+		t.Fatalf("a blank podcast dir validated to %q (err %v), want none", cfg.Podcasts.Dir, err)
+	}
+}

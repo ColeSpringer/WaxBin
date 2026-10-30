@@ -151,7 +151,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// The part's lengths are read only when its number, its duration or its chapters
 		// changed, which a plain re-read changes none of.
 		if was != nil && role != alternateRole && (position != was.position || priorMS != in.File.DurationMS || chaptersChanged) {
-			extent, err := chapterExtentTx(ctx, tx, itemID, fileID)
+			extent, err := chapterExtentTx(ctx, tx, itemID, fileKey(fileID))
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -1098,7 +1098,7 @@ func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int
 	if source == "" {
 		source = "embedded"
 	}
-	return syncChapters(ctx, tx, bookItemID, fileID, source, chapters, false)
+	return syncChapters(ctx, tx, bookItemID, fileKey(fileID), source, chapters, false, true)
 }
 
 // syncChaptersForFileSource replaces only ONE source's chapters for a file, leaving a
@@ -1106,28 +1106,60 @@ func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int
 // intact. It serves the sources that arrive without a scan of the audio: a podcast's
 // chapter URL and a user's own chapters.
 func syncChaptersForFileSource(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, error) {
-	changed, _, err := syncChapters(ctx, tx, bookItemID, fileID, source, chapters, true)
+	changed, _, err := syncChapters(ctx, tx, bookItemID, fileKey(fileID), source, chapters, true, false)
 	return changed, err
 }
 
+// syncChaptersForItemSourceTx replaces one source's chapters kept on an item rather than
+// on one of its files (file_id NULL), which no file's removal touches: an episode's feed
+// chapters, known before any download and kept across them.
+func syncChaptersForItemSourceTx(ctx context.Context, tx *sql.Tx, itemID int64, source string, chapters []model.Chapter) (bool, error) {
+	changed, _, err := syncChapters(ctx, tx, itemID, sql.NullInt64{}, source, chapters, true, false)
+	return changed, err
+}
+
+// fileKey is the chapter rows of the file with id: the file_id they are stored under.
+func fileKey(id int64) sql.NullInt64 { return sql.NullInt64{Int64: id, Valid: true} }
+
+// The statements over one file's chapter rows, or an item's own, completed by
+// chapterRowsOf.
+const (
+	chapterRowsSelect   = "SELECT position, title, start_ms, end_ms, source FROM chapter"
+	chapterRowsDelete   = "DELETE FROM chapter"
+	chapterExtentSelect = "SELECT COALESCE(MAX(MAX(start_ms, end_ms)), 0) FROM chapter"
+)
+
+// chapterRowsOf completes prefix to the chapter rows of file on the item, or the item's own
+// rows for a null file. The item's own are matched with a literal IS NULL: a NULL bound
+// to "file_id IS ?" has the planner walk chapter_file over every item's own rows.
+func chapterRowsOf(prefix string, itemID int64, file sql.NullInt64) (string, []any) {
+	if !file.Valid {
+		return prefix + " WHERE book_item_id = ? AND file_id IS NULL", []any{itemID}
+	}
+	return prefix + " WHERE book_item_id = ? AND file_id = ?", []any{itemID, file.Int64}
+}
+
 // syncChapters replaces a file's chapters with the desired set tagged with source,
-// reporting whether it changed anything and, when it did, how far the file's chapters
-// ran before. scopeToSource limits the replace (and the no-op comparison) to rows of that
-// source; otherwise it replaces every source's rows for the file. It no-ops (no write, no
-// change) when the stored rows already match, so a no-op rescan stays change_log-silent.
-func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter, scopeToSource bool) (bool, int64, error) {
+// reporting whether it changed anything and, when it did and measure is set, how far
+// the file's chapters ran before. scopeToSource limits the replace (and the no-op
+// comparison) to rows of that source; otherwise it replaces every source's rows for the
+// file. It no-ops (no write, no change) when the stored rows already match, so a no-op
+// rescan stays change_log-silent. A null file is the rows kept on the item itself.
+func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID int64, file sql.NullInt64, source string, chapters []model.Chapter, scopeToSource, measure bool) (bool, int64, error) {
 	chapters = normalizeChapterStarts(chapters)
-	if same, err := chaptersInSync(ctx, tx, bookItemID, fileID, source, chapters, scopeToSource); err != nil {
+	if same, err := chaptersInSync(ctx, tx, bookItemID, file, source, chapters, scopeToSource); err != nil {
 		return false, 0, err
 	} else if same {
 		return false, 0, nil
 	}
-	prior, err := chapterExtentTx(ctx, tx, bookItemID, fileID)
-	if err != nil {
-		return false, 0, err
+	var prior int64
+	if measure {
+		var err error
+		if prior, err = chapterExtentTx(ctx, tx, bookItemID, file); err != nil {
+			return false, 0, err
+		}
 	}
-	del := "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?"
-	args := []any{bookItemID, fileID}
+	del, args := chapterRowsOf(chapterRowsDelete, bookItemID, file)
 	if scopeToSource {
 		del += " AND source = ?"
 		args = append(args, source)
@@ -1142,7 +1174,7 @@ func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, sou
 	for _, c := range chapters {
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms, source) VALUES (?,?,?,?,?,?,?)",
-			bookItemID, fileID, c.Position, c.Title, c.FileStartMS, c.FileEndMS, source); err != nil {
+			bookItemID, file, c.Position, c.Title, c.FileStartMS, c.FileEndMS, source); err != nil {
 			return false, 0, err
 		}
 	}
@@ -1179,9 +1211,8 @@ func normalizeChapterStarts(chs []model.Chapter) []model.Chapter {
 // order, title, offsets), all under source. scopeToSource compares only that
 // source's rows; otherwise it compares every row for the file and requires each to
 // carry source (so an all-source replace no-ops only when nothing at all differs).
-func chaptersInSync(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, want []model.Chapter, scopeToSource bool) (bool, error) {
-	q := "SELECT position, title, start_ms, end_ms, source FROM chapter WHERE book_item_id = ? AND file_id = ?"
-	args := []any{bookItemID, fileID}
+func chaptersInSync(ctx context.Context, tx *sql.Tx, bookItemID int64, file sql.NullInt64, source string, want []model.Chapter, scopeToSource bool) (bool, error) {
+	q, args := chapterRowsOf(chapterRowsSelect, bookItemID, file)
 	if scopeToSource {
 		q += " AND source = ?"
 		args = append(args, source)
@@ -1433,7 +1464,7 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 	// and it avoids a per-part round trip on a heavily split book.
 	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT file_id, title, start_ms, end_ms, source FROM chapter
-		 WHERE book_item_id = ? ORDER BY position, start_ms`, bookItemID)
+		 WHERE book_item_id = ? AND file_id IS NOT NULL ORDER BY position, start_ms`, bookItemID)
 	if err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -1544,20 +1575,25 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 		}
 		cum += eff
 	}
-	// Fill open-ended chapters from the next chapter's start, and the last from the
-	// total book duration, so each chapter has a concrete [start, end) span. Starts
-	// are distinct within a file (normalizeChapterStarts), so the span is never empty.
-	for i := range out {
-		if out[i].EndMS != 0 {
+	fillOpenEnds(out, cum)
+	return out, cum, nil
+}
+
+// fillOpenEnds gives each open-ended chapter the next chapter's start for its end, and
+// the last the total, so each chapter has a concrete [start, end) span. Starts are
+// distinct within a file (normalizeChapterStarts), so only a last chapter at the total
+// has an empty one.
+func fillOpenEnds(chs []model.Chapter, total int64) {
+	for i := range chs {
+		if chs[i].EndMS != 0 {
 			continue
 		}
-		if i+1 < len(out) {
-			out[i].EndMS = out[i+1].StartMS
+		if i+1 < len(chs) {
+			chs[i].EndMS = chs[i+1].StartMS
 		} else {
-			out[i].EndMS = cum
+			chs[i].EndMS = total
 		}
 	}
-	return out, cum, nil
 }
 
 // Chapters returns a book's chapters in book-timeline order, the read backing the

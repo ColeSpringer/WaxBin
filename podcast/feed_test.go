@@ -1,9 +1,11 @@
 package podcast
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/model"
 )
@@ -175,6 +177,12 @@ func TestParseFeedBindsNamespaceSpellings(t *testing.T) {
 	for name, r := range map[string]*strings.Replacer{
 		"legacy podcast namespace": strings.NewReplacer(podcast,
 			`xmlns:podcast="https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md"`),
+		"legacy podcast namespace on master": strings.NewReplacer(podcast,
+			`xmlns:podcast="https://github.com/Podcastindex-org/podcast-namespace/blob/master/docs/1.0.md"`),
+		"raw podcast namespace": strings.NewReplacer(podcast,
+			`xmlns:podcast="https://raw.githubusercontent.com/Podcastindex-org/podcast-namespace/main/docs/1.0.md"`),
+		"raw podcast namespace on master": strings.NewReplacer(podcast,
+			`xmlns:podcast="https://raw.githubusercontent.com/Podcastindex-org/podcast-namespace/master/docs/1.0.md"`),
 		"itunes over https":     strings.NewReplacer(itunes, `xmlns:itunes="https://www.itunes.com/dtds/podcast-1.0.dtd"`),
 		"itunes mixed-case dtd": strings.NewReplacer(itunes, `xmlns:itunes="http://www.itunes.com/DTDs/Podcast-1.0.dtd"`),
 		"itunes without www":    strings.NewReplacer(itunes, `xmlns:itunes="http://itunes.com/dtds/podcast-1.0.dtd"`),
@@ -286,5 +294,149 @@ func TestParsePubDateNamedZone(t *testing.T) {
 	// A numeric-offset form still parses.
 	if parsePubDate("Tue, 02 Jan 2024 15:04:05 +0000") == 0 {
 		t.Fatal("numeric-offset pubDate should parse")
+	}
+}
+
+// TestParseFeedCapsEveryTextField: each text field a feed carries comes out at most at
+// its bound, a URL past its bound is left out rather than cut into another address, and
+// a tag the feed repeats past its bound is kept to it.
+func TestParseFeedCapsEveryTextField(t *testing.T) {
+	t.Parallel()
+	chars := func(n int) string { return strings.Repeat("é", n) }
+	bytes := func(n int) string { return strings.Repeat("x", n) }
+	url := func(n int) string { return "https://example.com/" + strings.Repeat("u", n-len("https://example.com/")) }
+	person := `<podcast:person role="host">` + chars(MaxNameChars+1) + `</podcast:person>`
+	feed := fmt.Sprintf(`<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+xmlns:podcast="https://podcastindex.org/namespace/1.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>%[1]s</title><itunes:author>%[2]s</itunes:author><description>%[3]s</description>
+<link>%[4]s</link><language>%[2]s</language><itunes:category text="%[2]s"/>
+<podcast:funding url="%[5]s">%[1]s</podcast:funding><podcast:medium>%[2]s</podcast:medium>
+<podcast:guid>%[6]s</podcast:guid><itunes:image href="%[5]s"/>%[7]s
+<item><guid>%[6]s</guid><title>%[1]s</title><content:encoded>%[3]s</content:encoded><link>%[4]s</link>
+<enclosure url="%[5]s" type="%[2]s"/><podcast:transcript url="%[4]s" type="%[2]s"/>
+<podcast:chapters url="%[5]s"/><itunes:image href="%[4]s"/>%[7]s%[8]s</item>
+</channel></rss>`,
+		chars(MaxTitleChars+1), chars(MaxNameChars+1), bytes(MaxDescriptionBytes+1), url(MaxURLBytes+1),
+		url(MaxURLBytes), bytes(MaxGUIDBytes+1), strings.Repeat(person, MaxPersons+1),
+		strings.Repeat(`<podcast:soundbite startTime="1" duration="2">`+chars(MaxTitleChars+1)+`</podcast:soundbite>`, MaxPersons+1))
+	f, err := ParseFeed([]byte(feed))
+	if err != nil {
+		t.Fatalf("ParseFeed: %v", err)
+	}
+	if len(f.Episodes) != 1 {
+		t.Fatalf("episodes = %d, want 1", len(f.Episodes))
+	}
+	e := f.Episodes[0]
+	atChars := func(field, got string, want int) {
+		t.Helper()
+		if n := utf8.RuneCountInString(got); n != want {
+			t.Errorf("%s holds %d characters, want %d", field, n, want)
+		}
+	}
+	atBytes := func(field, got string, want int) {
+		t.Helper()
+		if len(got) != want {
+			t.Errorf("%s holds %d bytes, want %d", field, len(got), want)
+		}
+	}
+	atChars("show title", f.Title, MaxTitleChars)
+	atChars("author", f.Author, MaxNameChars)
+	atChars("language", f.Language, MaxNameChars)
+	atChars("category", f.Category, MaxNameChars)
+	atChars("medium", f.Medium, MaxNameChars)
+	atChars("funding message", f.FundingMessage, MaxTitleChars)
+	atBytes("show description", f.Description, MaxDescriptionBytes)
+	atBytes("show guid", f.GUID, MaxGUIDBytes)
+	atChars("episode title", e.Title, MaxTitleChars)
+	atBytes("episode description", e.Description, MaxDescriptionBytes)
+	atBytes("episode guid", e.GUID, MaxGUIDBytes)
+	atChars("enclosure type", e.EnclosureType, MaxNameChars)
+	atChars("transcript type", e.TranscriptType, MaxNameChars)
+	for field, got := range map[string]string{"show link": f.Link, "episode link": e.Link,
+		"transcript url": e.TranscriptURL, "episode image": e.ImageURL} {
+		if got != "" {
+			t.Errorf("%s past the bound = %d bytes, want it left out", field, len(got))
+		}
+	}
+	for field, got := range map[string]string{"funding url": f.FundingURL, "show image": f.ImageURL,
+		"enclosure url": e.EnclosureURL, "chapters url": e.ChaptersURL} {
+		if got != url(MaxURLBytes) {
+			t.Errorf("%s at the bound = %d bytes, want it kept whole", field, len(got))
+		}
+	}
+	if len(f.Persons) != MaxPersons || len(e.Persons) != MaxPersons || len(e.Soundbites) != MaxPersons {
+		t.Errorf("persons %d and %d, soundbites %d, want %d each", len(f.Persons), len(e.Persons), len(e.Soundbites), MaxPersons)
+	}
+	atChars("person name", e.Persons[0].Name, MaxNameChars)
+	atChars("soundbite title", e.Soundbites[0].Title, MaxTitleChars)
+}
+
+// TestParseFeedDropsEpisodesPastTheCap: a feed listing more items than a show keeps
+// gives the first MaxEpisodesPerFeed and counts the rest.
+func TestParseFeedDropsEpisodesPastTheCap(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	b.WriteString(`<rss version="2.0"><channel><title>Long</title>`)
+	for i := range MaxEpisodesPerFeed + 2 {
+		fmt.Fprintf(&b, "<item><guid>g%d</guid></item>", i)
+	}
+	b.WriteString(`</channel></rss>`)
+	f, err := ParseFeed([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("ParseFeed: %v", err)
+	}
+	if len(f.Episodes) != MaxEpisodesPerFeed || f.EpisodesDropped != 2 {
+		t.Fatalf("kept %d and dropped %d, want %d and 2", len(f.Episodes), f.EpisodesDropped, MaxEpisodesPerFeed)
+	}
+	if last := f.Episodes[MaxEpisodesPerFeed-1].GUID; last != fmt.Sprintf("g%d", MaxEpisodesPerFeed-1) {
+		t.Fatalf("last kept episode = %s, want the feed's first %d in order", last, MaxEpisodesPerFeed)
+	}
+}
+
+// TestParseChapterDocCaps: a chapters document keeps its first MaxChaptersPerDoc
+// chapters in time order, each title one line at most MaxTitleChars long.
+func TestParseChapterDocCaps(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	b.WriteString(`{"version":"1.2.0","chapters":[`)
+	for i := range MaxChaptersPerDoc + 1 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		title := "plain"
+		switch i {
+		case MaxChaptersPerDoc:
+			title = strings.Repeat("é", MaxTitleChars+1)
+		case MaxChaptersPerDoc - 1:
+			title = `red\u001b[31m\nline`
+		}
+		// Listed latest first, so the latest is the one past the bound.
+		fmt.Fprintf(&b, `{"startTime":%d,"title":"%s"}`, MaxChaptersPerDoc-i, title)
+	}
+	b.WriteString(`]}`)
+	chapters, err := parseChapterDoc([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("parseChapterDoc: %v", err)
+	}
+	if len(chapters) != MaxChaptersPerDoc || chapters[len(chapters)-1].FileStartMS != (MaxChaptersPerDoc-1)*1000 {
+		t.Fatalf("kept %d chapters ending at %d ms, want the first %d by time",
+			len(chapters), chapters[len(chapters)-1].FileStartMS, MaxChaptersPerDoc)
+	}
+	if n := utf8.RuneCountInString(chapters[0].Title); n != MaxTitleChars {
+		t.Errorf("the long title holds %d characters, want %d", n, MaxTitleChars)
+	}
+	if got := chapters[1].Title; got != `red\x1b[31m line` {
+		t.Errorf("a title with a control = %q, want it escaped on one line", got)
+	}
+}
+
+// TestCapFeedBoundsTheEpisodeCount: a feed an injected provider hands over is held to
+// MaxEpisodesPerFeed as a parsed one is, the rest counted.
+func TestCapFeedBoundsTheEpisodeCount(t *testing.T) {
+	t.Parallel()
+	f := model.Feed{Episodes: make([]model.FeedEpisode, MaxEpisodesPerFeed+3), EpisodesDropped: 1}
+	capFeed(&f)
+	if len(f.Episodes) != MaxEpisodesPerFeed || f.EpisodesDropped != 4 {
+		t.Fatalf("kept %d and dropped %d, want %d and 4", len(f.Episodes), f.EpisodesDropped, MaxEpisodesPerFeed)
 	}
 }

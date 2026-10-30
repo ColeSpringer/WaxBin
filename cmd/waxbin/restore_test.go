@@ -321,3 +321,50 @@ func TestRestoreRelocatesOnlyToAFolder(t *testing.T) {
 		t.Errorf("relocated to %s, want the folder under the working directory", got)
 	}
 }
+
+// TestRestoreRelocatesBesideThePodcastLibrary: with a podcast dir configured, `restore
+// --root` still relocates the restored catalog's one root, the podcast library its open
+// makes not counting as a second one.
+func TestRestoreRelocatesBesideThePodcastLibrary(t *testing.T) {
+	t.Setenv("WAXBIN_CONFIG", "")
+	t.Setenv("WAXBIN_PODCAST_DIR", t.TempDir())
+	ctx := context.Background()
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "src.db"),
+		Roots: []config.Root{{Path: t.TempDir(), Mode: model.ModeInPlace}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := lib.Backup(ctx, backup, port.BackupOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, target := filepath.Join(t.TempDir(), "a.db"), t.TempDir()
+	cmd := newRootCmd(&globals{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--db", db, "restore", backup, "--root", target})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("restore --root with a podcast dir: %v", err)
+	}
+	ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	libs, err := ro.Libraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roots []string
+	for _, l := range libs {
+		if l.Mode != model.ModePodcast {
+			roots = append(roots, l.DisplayRoot)
+		}
+	}
+	if len(roots) != 1 || roots[0] != target {
+		t.Fatalf("roots after the restore = %v, want the one relocated to %s", roots, target)
+	}
+}

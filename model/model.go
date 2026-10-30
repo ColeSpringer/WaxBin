@@ -64,6 +64,18 @@ func (l *Library) MediaType() MediaType {
 	return l.Media
 }
 
+// UserLibraries is libs without the internal podcast library, which no one registers
+// and no scan or watch walks.
+func UserLibraries(libs []*Library) []*Library {
+	var out []*Library
+	for _, l := range libs {
+		if l.Mode != ModePodcast {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // File is one file on disk: an audio file or a sidecar. Paths are stored as raw
 // bytes (BLOB) to survive non-UTF8 filesystems, with a display string alongside.
 type File struct {

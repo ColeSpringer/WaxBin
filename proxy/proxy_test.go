@@ -512,13 +512,16 @@ func TestErrorCodePreserved(t *testing.T) {
 	}
 }
 
-// TestUnknownMethod checks an unregistered method is a clean CodeInvalid, not a hang.
+// TestUnknownMethod checks an unregistered method is a clean CodeInvalid, not a hang,
+// whose reason tells a client the server does not have the method, as a server built
+// before an added one does not, from a refusal of the call itself.
 func TestUnknownMethod(t *testing.T) {
 	c := dial(t, startServer(t, map[string]proxy.Handler{}, nil))
 	// Users has no handler registered here.
 	_, err := c.Users(context.Background())
-	if !waxerr.Is(err, waxerr.CodeInvalid) {
-		t.Fatalf("err = %v (code %s), want CodeInvalid", err, waxerr.CodeOf(err))
+	if !waxerr.Is(err, waxerr.CodeInvalid) || waxerr.ReasonOf(err) != proxy.ReasonUnknownMethod {
+		t.Fatalf("err = %v (code %s, reason %q), want CodeInvalid with %q",
+			err, waxerr.CodeOf(err), waxerr.ReasonOf(err), proxy.ReasonUnknownMethod)
 	}
 }
 

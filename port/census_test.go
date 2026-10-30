@@ -12,9 +12,9 @@ import (
 )
 
 // TestCensusExcludesThePodcastLibrary keeps the internal podcast download dir out
-// of the roots `db reset` tells the operator to re-add: it is re-created on demand,
-// and `library add` would pull it into scan and organize, which ModePodcast exists
-// to prevent.
+// of the roots `db reset` tells the operator to re-add: the next read-write open with
+// a podcast dir makes it again, and `library add` would pull it into scan and
+// organize, which ModePodcast exists to prevent.
 func TestCensusExcludesThePodcastLibrary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

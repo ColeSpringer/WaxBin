@@ -147,14 +147,17 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		owner = defaultOwner()
 	}
 
-	// Validate and normalize roots here so embedders get the same root isolation
-	// as the CLI. Overlapping roots could otherwise let organize move files from
-	// an in-place library.
-	cfg := &config.Config{DBPath: opts.DBPath, Roots: opts.Roots}
+	// Validate and normalize the roots, the inbox and the podcast dir here so embedders
+	// get the same isolation as the CLI. Overlapping roots could otherwise let organize
+	// move files from an in-place library, a root inside the podcast dir would scan the
+	// downloads as music, and two spellings of one podcast dir would make two libraries.
+	// Validate cleans in place, so it works on copies of the caller's slices.
+	cfg := &config.Config{DBPath: opts.DBPath, Roots: slices.Clone(opts.Roots), Inbox: slices.Clone(opts.Inbox),
+		Podcasts: opts.Podcasts}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	opts.DBPath, opts.Roots = cfg.DBPath, cfg.Roots
+	opts.DBPath, opts.Roots, opts.Inbox, opts.Podcasts.Dir = cfg.DBPath, cfg.Roots, cfg.Inbox, cfg.Podcasts.Dir
 	profiles, err := organize.NewProfileSet(toOrganizeProfiles(opts.Profiles))
 	if err != nil {
 		return nil, err
@@ -228,6 +231,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			_ = st.Close()
 			return nil, err
 		}
+		l.ensurePodcastLibrary(ctx)
 		l.warnUnknownProfiles(ctx)
 	}
 	return l, nil
@@ -372,6 +376,40 @@ func (l *Library) ensureRoots(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ensurePodcastLibrary creates the internal podcast library when a podcast dir is
+// configured, so it exists before the first download. One it cannot make, a dir that
+// nests with a stored root among them, is warned of and left for the downloads to
+// refuse: failing here would refuse every read-write open, the one that removes that
+// root included, and every later hand-off.
+func (l *Library) ensurePodcastLibrary(ctx context.Context) {
+	if l.opts.Podcasts.Dir == "" {
+		return
+	}
+	if _, err := l.podcasts.EnsureLibrary(ctx); err != nil {
+		l.log.Warn("the podcast library could not be made", "dir", l.opts.Podcasts.Dir, "err", err)
+	}
+}
+
+// PodcastLibrary returns the internal library podcast downloads land in, the one at
+// Options.Podcasts.Dir, which a read-write Open creates. A read-only open finds it by
+// its mode and directory. It is CodeNotFound when no podcast dir is configured or no
+// podcast library is at it.
+func (l *Library) PodcastLibrary(ctx context.Context) (*model.Library, error) {
+	const op = "Library.PodcastLibrary"
+	dir := l.opts.Podcasts.Dir
+	if dir == "" {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no podcast download directory is configured")
+	}
+	lib, err := l.store.LibraryByRoot(ctx, []byte(dir))
+	switch {
+	case waxerr.Is(err, waxerr.CodeNotFound), err == nil && lib.Mode != model.ModePodcast:
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no podcast library at "+dir)
+	case err != nil:
+		return nil, err
+	}
+	return lib, nil
 }
 
 // Libraries lists registered library roots.
@@ -691,7 +729,7 @@ func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, 
 	}
 	normalized := cfg.Roots[len(cfg.Roots)-1]
 	for _, pr := range podcastRoots {
-		if pathx.UnderRoot(pr, normalized.Path) || pathx.UnderRoot(normalized.Path, pr) {
+		if pathx.Overlap(pr, normalized.Path) {
 			return config.Root{}, waxerr.New(waxerr.CodeInvalid, op,
 				"root "+normalized.Path+" overlaps the internal podcast library at "+pr)
 		}
@@ -1240,7 +1278,7 @@ func (e *watchEngine) Roots(ctx context.Context) ([]watch.Root, error) {
 		if err != nil {
 			return nil, err
 		}
-		return watchRoots(userLibraries(libs)), nil
+		return watchRoots(model.UserLibraries(libs)), nil
 	}
 	libs, err := e.lib.resolveLibraries(ctx, e.libPID)
 	if waxerr.Is(err, waxerr.CodeNotFound) {
@@ -3698,6 +3736,16 @@ func (l *Library) PlanImport(ctx context.Context, req ImportRequest) (*inbox.Pla
 	if err != nil {
 		return nil, err
 	}
+	// A configured inbox nesting with a root, one added at runtime included, would have
+	// the scan read its staged files as the root's own.
+	if l.isInboxFolder(req.Source) {
+		for _, lib := range model.UserLibraries(libs) {
+			if src, err := filepath.Abs(req.Source); err == nil && pathx.Overlap(string(lib.Root), filepath.Clean(src)) {
+				return nil, waxerr.New(waxerr.CodeInvalid, op,
+					fmt.Sprintf("inbox %q overlaps library root %q", src, lib.DisplayRoot))
+			}
+		}
+	}
 	// Resolve the target and, for multiple media-typed managed roots, a per-file
 	// router so a staging folder splits its books into the audiobook root and its
 	// tracks into the music root. A named target (LibraryPID) or a single managed
@@ -4463,7 +4511,7 @@ func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model
 		return nil, err
 	}
 	if pid == "" {
-		userLibs := userLibraries(libs)
+		userLibs := model.UserLibraries(libs)
 		if len(userLibs) == 0 {
 			return nil, waxerr.New(waxerr.CodeInvalid, "Library.Scan", "no library roots configured")
 		}
@@ -4481,18 +4529,6 @@ func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model
 		}
 	}
 	return nil, waxerr.New(waxerr.CodeNotFound, "Library.Scan", "no such library: "+string(pid))
-}
-
-// userLibraries is the libraries a scan or a watch of every library covers: all but the
-// internal podcast library, whose downloads the podcast engine catalogs.
-func userLibraries(libs []*model.Library) []*model.Library {
-	var out []*model.Library
-	for _, lib := range libs {
-		if lib.Mode != model.ModePodcast {
-			out = append(out, lib)
-		}
-	}
-	return out
 }
 
 // managedLibraries returns every managed library, or an error when none exist.

@@ -339,3 +339,42 @@ func TestFetchSendsALoginWithNoOriginToItsOwnURL(t *testing.T) {
 		t.Fatalf("fetch with a login and no origin: %v", err)
 	}
 }
+
+// TestEnumerateReportsAPermanentMove: an enumeration reached only through permanent
+// redirects names where the feed now answers, and one that passed a temporary redirect
+// names nothing.
+func TestEnumerateReportsAPermanentMove(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/old.xml", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/new.xml", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/for-now.xml", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/new.xml", http.StatusFound)
+	})
+	mux.HandleFunc("/new.xml", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Header().Set("ETag", `"v1"`)
+		_, _ = fmt.Fprintf(w, feedTmpl, "http://h")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	for path, want := range map[string]string{"/old.xml": srv.URL + "/new.xml", "/for-now.xml": "", "/new.xml": ""} {
+		enum, err := httpProvider().Enumerate(context.Background(), source.Request{URL: srv.URL + path})
+		if err != nil {
+			t.Fatalf("enumerate %s: %v", path, err)
+		}
+		if enum.MovedTo != want {
+			t.Errorf("enumerating %s moved to %q, want %q", path, enum.MovedTo, want)
+		}
+	}
+	// A move whose new address answers that nothing changed is a move all the same.
+	enum, err := httpProvider().Enumerate(context.Background(), source.Request{URL: srv.URL + "/old.xml", ETag: `"v1"`})
+	if err != nil || !enum.NotModified || enum.MovedTo != srv.URL+"/new.xml" {
+		t.Errorf("a conditional enumeration through the move = %+v (err %v), want not modified at %s/new.xml", enum, err, srv.URL)
+	}
+}

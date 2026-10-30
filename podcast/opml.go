@@ -3,6 +3,7 @@ package podcast
 import (
 	"bytes"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"strings"
 
@@ -41,7 +42,7 @@ const maxOPMLDepth = 64
 // (any outline with an xmlUrl, including nested ones), de-duplicated by feed URL,
 // preserving document order. It streams tokens with a depth bound rather than
 // decoding into a recursive struct, so a deeply nested document cannot exhaust the
-// stack.
+// stack, and refuses one listing more than MaxOPMLEntries feeds.
 func ParseOPML(data []byte) ([]model.OPMLEntry, error) {
 	const op = "podcast.ParseOPML"
 	dec := xml.NewDecoder(bytes.NewReader(data))
@@ -80,8 +81,11 @@ func ParseOPML(data []byte) ([]model.OPMLEntry, error) {
 				}
 			}
 			if url != "" && !seen[url] {
+				if len(out) == MaxOPMLEntries {
+					return nil, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf("OPML lists more than %d feeds", MaxOPMLEntries))
+				}
 				seen[url] = true
-				out = append(out, model.OPMLEntry{Title: firstNonEmpty(title, text), FeedURL: url})
+				out = append(out, model.OPMLEntry{Title: model.CapText(firstNonEmpty(title, text), MaxTitleChars), FeedURL: url})
 			}
 		case xml.EndElement:
 			depth--

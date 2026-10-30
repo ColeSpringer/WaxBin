@@ -22,7 +22,9 @@ type libIDStore struct {
 	attached []int64
 }
 
-func (s *libIDStore) EnsurePodcastLibrary(context.Context, string) (int64, error) { return s.id, nil }
+func (s *libIDStore) EnsurePodcastLibrary(context.Context, string) (*model.Library, error) {
+	return &model.Library{ID: s.id, Mode: model.ModePodcast}, nil
+}
 
 func (s *libIDStore) AttachEpisodeFile(_ context.Context, in model.AttachEpisodeFileInput) (model.PID, error) {
 	s.attached = append(s.attached, in.LibraryID)

@@ -39,13 +39,15 @@ func newLibraryListCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, libViews(libs))
 			}
-			if len(libs) == 0 {
+			defer printPodcastLibraries(cmd, libs, "")
+			roots := model.UserLibraries(libs)
+			if len(roots) == 0 {
 				fmt.Fprintln(out(cmd), "(no library roots registered)")
 				return nil
 			}
 			w := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
 			fmt.Fprintln(w, "PID\tMODE\tMEDIA\tPROFILE\tREAD-ONLY\tFOLDER-FALLBACK\tROOT")
-			for _, l := range libs {
+			for _, l := range roots {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", l.PID, l.Mode, l.MediaType(), l.Profile,
 					yesNo(l.ReadOnly), yesNo(l.FolderFallback), l.DisplayRoot)
 			}
@@ -224,4 +226,13 @@ func newLibraryRemoveCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "remove a root the configuration names")
 	return cmd
+}
+
+// printPodcastLibraries names the internal podcast library apart from the roots.
+func printPodcastLibraries(cmd *cobra.Command, libs []*model.Library, indent string) {
+	for _, l := range libs {
+		if l.Mode == model.ModePodcast {
+			fmt.Fprintf(out(cmd), "%spodcast downloads: %s (%s)\n", indent, l.DisplayRoot, l.PID)
+		}
+	}
 }

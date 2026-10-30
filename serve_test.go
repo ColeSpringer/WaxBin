@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -965,6 +968,44 @@ func TestServeProxiedTranscript(t *testing.T) {
 	}
 }
 
+// TestServeProxiedFetchChapters drives fetch_chapters over the socket: the fetch runs in
+// the server process and the chapters land in its catalog, and an episode declaring none
+// keeps its class across the wire.
+func TestServeProxiedFetchChapters(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	doc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json+chapters")
+		_, _ = io.WriteString(w, `{"version":"1.2.0","chapters":[{"startTime":0,"title":"Open"},{"startTime":30,"title":"Close"}]}`)
+	}))
+	t.Cleanup(doc.Close)
+	sock := testsock.Path(t)
+	lib := openServedRW(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir(), sock)
+	show, err := lib.Podcasts().AddManual(ctx, "Proxied", podcast.ManualOptions{})
+	if err != nil {
+		t.Fatalf("add manual show: %v", err)
+	}
+	with, err := lib.Podcasts().AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "With", GUID: "g1", ChaptersURL: doc.URL + "/c.json"}, true)
+	if err != nil {
+		t.Fatalf("add episode: %v", err)
+	}
+	without, err := lib.Podcasts().AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "Without", GUID: "g2"}, true)
+	if err != nil {
+		t.Fatalf("add episode: %v", err)
+	}
+	c := dialWhenReady(t, sock)
+	if err := c.FetchChapters(ctx, with.EpisodePID); err != nil {
+		t.Fatalf("proxied fetch_chapters: %v", err)
+	}
+	d, err := lib.Podcasts().Episode(ctx, with.EpisodePID)
+	if err != nil || len(d.Chapters) != 2 || d.Chapters[1].Title != "Close" {
+		t.Fatalf("chapters after the proxied fetch = %+v (err %v), want Open and Close", d, err)
+	}
+	if err := c.FetchChapters(ctx, without.EpisodePID); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("proxied fetch for an episode declaring none = %v, want CodeInvalid", err)
+	}
+}
+
 // TestServeProxiedAddRoot drives add_root over the socket: the root lands in the
 // server's catalog (the process that scans), a proxied run_scan catalogs a file
 // under it, and a validation failure keeps its class across the wire.
@@ -1528,8 +1569,8 @@ func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Catalog A, served: one user library, then the podcast library at row 2, which an
-	// import leaves cached in the podcast service.
+	// Catalog A, served: one user library, then the podcast library at row 2, which the
+	// open leaves cached in the podcast service.
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	sock := testsock.Path(t)

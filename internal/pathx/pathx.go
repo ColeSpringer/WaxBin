@@ -28,6 +28,9 @@ func UnderRoot(root, p string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// Overlap reports whether a and b are one path, or one nests beneath the other.
+func Overlap(a, b string) bool { return UnderRoot(a, b) || UnderRoot(b, a) }
+
 // RelUnder returns p relative to root when p lies under it (UnderRoot), and otherwise its
 // base name, never a path that climbs out of the root.
 func RelUnder(root, p string) string {

@@ -48,7 +48,7 @@ func FuzzURLGuards(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
-		_ = shownHost(raw)
+		_ = ShownHost(raw)
 		_ = checkScheme(raw, "fuzz")
 		_ = guardDialAddr(raw)
 	})

@@ -178,6 +178,9 @@ type Feed struct {
 	ImageURL       string
 	Persons        []FeedPerson // channel-level <podcast:person> credits
 	Episodes       []FeedEpisode
+	// EpisodesDropped counts the items the parser left out past
+	// podcast.MaxEpisodesPerFeed, which keeps the feed's first ones in its own order.
+	EpisodesDropped int
 }
 
 // OPMLEntry is one subscription line in an OPML document (feed URL plus optional
@@ -188,12 +191,15 @@ type OPMLEntry struct {
 }
 
 // UpsertFeedInput carries a parsed feed for atomic persistence: the podcast row is
-// created or updated by IdentityKey, then every episode is upserted by its
-// per-podcast key. If a feed stops listing older episodes, the store leaves those
-// rows in place. Image, when set, is fetched feed artwork ready for the art store.
+// created or updated by IdentityKey, or by PodcastPID when that is set (a sync or a
+// re-add of a known show, which never creates one and keeps its address when another
+// show holds FeedURL), then every episode is upserted by its per-podcast key. If a
+// feed stops listing older episodes, the store leaves those rows in place. Image,
+// when set, is fetched feed artwork ready for the art store.
 // ETag, LastModified, and FetchedAtNS commit with the episodes or not at all, which
 // is what lets a provider read the pair back as its receipt.
 type UpsertFeedInput struct {
+	PodcastPID   PID
 	FeedURL      string
 	IdentityKey  string
 	Feed         Feed
@@ -205,7 +211,13 @@ type UpsertFeedInput struct {
 	// rss. A youtube channel/playlist id lives in the identity key and feed_url, not a
 	// separate column.
 	SourceType SourceType
+	// Login, when set, replaces the show's basic-auth login in the same transaction (an
+	// empty one clears it); nil leaves the stored login.
+	Login *FeedLogin
 }
+
+// FeedLogin is a show's basic-auth login: a user name, with or without a password.
+type FeedLogin struct{ User, Pass string }
 
 // UpsertShowInput creates or updates a show that has no feed sync in this call:
 // a manual show, or a youtube channel added before its first enumeration. Episodes

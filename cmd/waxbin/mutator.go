@@ -514,6 +514,13 @@ func (m *mutator) FetchTranscript(ctx context.Context, episodePID model.PID) err
 	return m.lib.Podcasts().FetchTranscript(ctx, episodePID)
 }
 
+func (m *mutator) FetchChapters(ctx context.Context, episodePID model.PID) error {
+	if m.px != nil {
+		return m.px.FetchChapters(ctx, episodePID)
+	}
+	return m.lib.Podcasts().FetchChapters(ctx, episodePID)
+}
+
 func (m *mutator) Unfetch(ctx context.Context, episodePID model.PID) (*podcast.UnfetchResult, error) {
 	if m.px != nil {
 		res, err := m.px.Unfetch(ctx, episodePID)

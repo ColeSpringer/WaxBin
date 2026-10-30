@@ -245,7 +245,7 @@ func bookTimelineTx(ctx context.Context, tx *sql.Tx, bookID int64, was map[int64
 	}
 	extents := map[int64]int64{}
 	rows, err := tx.QueryContext(ctx, `SELECT file_id, MAX(MAX(start_ms, end_ms)) FROM chapter
-		WHERE book_item_id = ? GROUP BY file_id`, bookID)
+		WHERE book_item_id = ? AND file_id IS NOT NULL GROUP BY file_id`, bookID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,10 +277,10 @@ func bookTimelineTx(ctx context.Context, tx *sql.Tx, bookID int64, was map[int64
 // chapterExtentTx is how far a part's chapters run on a book: its furthest chapter
 // start or end, which a part's length on the timeline takes when it passes the file's
 // duration (bookTimelineTx).
-func chapterExtentTx(ctx context.Context, tx *sql.Tx, bookID, fileID int64) (int64, error) {
+func chapterExtentTx(ctx context.Context, tx *sql.Tx, bookID int64, file sql.NullInt64) (int64, error) {
 	var ext int64
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(MAX(start_ms, end_ms)), 0) FROM chapter
-		WHERE book_item_id = ? AND file_id = ?`, bookID, fileID).Scan(&ext)
+	q, args := chapterRowsOf(chapterExtentSelect, bookID, file)
+	err := tx.QueryRowContext(ctx, q, args...).Scan(&ext)
 	return ext, err
 }
 

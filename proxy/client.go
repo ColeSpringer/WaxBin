@@ -778,6 +778,12 @@ func (c *Client) FetchTranscript(ctx context.Context, episodePID model.PID) erro
 	return c.call(ctx, MethodFetchTranscript, FetchTranscriptParams{EpisodePID: string(episodePID)}, nil)
 }
 
+// FetchChapters proxies an on-demand fetch of an episode's declared chapters
+// document; the network fetch runs in the server process.
+func (c *Client) FetchChapters(ctx context.Context, episodePID model.PID) error {
+	return c.call(ctx, MethodFetchChapters, FetchChaptersParams{EpisodePID: string(episodePID)}, nil)
+}
+
 // Unfetch proxies reclaiming a downloaded episode's bytes, returning what was
 // reclaimed. It goes over the socket rather than through the maintenance hand-off,
 // which paused the whole server for what is a short leased mutation.

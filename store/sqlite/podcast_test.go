@@ -2,11 +2,13 @@ package sqlite_test
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -86,7 +88,7 @@ func TestReSyncDoesNotDowngradeDownloaded(t *testing.T) {
 	}
 	if _, err := st.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
 		EpisodePID: target.PID,
-		LibraryID:  libID,
+		LibraryID:  libID.ID,
 		File: model.File{
 			Path: []byte("/podcasts/a.mp3"), DisplayPath: "/podcasts/a.mp3",
 			RelPath: []byte("a.mp3"), Kind: model.FileAudio, ContentHash: "h1", ScanState: model.ScanIndexed,
@@ -271,8 +273,8 @@ func TestEnsurePodcastLibraryRefusesAMusicRoot(t *testing.T) {
 		t.Fatalf("EnsurePodcastLibrary: %v", err)
 	}
 	again, err := st.EnsurePodcastLibrary(ctx, "/pods")
-	if err != nil || again != id {
-		t.Errorf("second EnsurePodcastLibrary = %d (err %v), want the first id %d", again, err, id)
+	if err != nil || again.ID != id.ID || again.PID != id.PID || again.Mode != model.ModePodcast {
+		t.Errorf("second EnsurePodcastLibrary = %+v (err %v), want the first, %+v", again, err, id)
 	}
 }
 
@@ -400,5 +402,202 @@ func TestMarkPodcastsFetched(t *testing.T) {
 	}
 	if after != seq {
 		t.Fatalf("MarkPodcastsFetched advanced the change feed %d -> %d", seq, after)
+	}
+}
+
+// TestUpsertFeedByPIDMovesTheAddressUnlessAnotherShowHoldsIt: a write addressed to a
+// show by pid lands on that show, moving its address to one no other show holds and
+// keeping it when another show holds the new one.
+func TestUpsertFeedByPIDMovesTheAddressUnlessAnotherShowHoldsIt(t *testing.T) {
+	t.Parallel()
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	a, err := st.UpsertFeed(ctx, feedInput("http://feed.example/a", "One"))
+	if err != nil {
+		t.Fatalf("upsert a: %v", err)
+	}
+	b, err := st.UpsertFeed(ctx, feedInput("http://feed.example/b", "Two"))
+	if err != nil {
+		t.Fatalf("upsert b: %v", err)
+	}
+	sync := func(addr string) {
+		t.Helper()
+		in := feedInput(addr, "One")
+		in.IdentityKey, in.PodcastPID = identity.PodcastKey("", "http://feed.example/a"), a.PodcastPID
+		res, err := st.UpsertFeed(ctx, in)
+		if err != nil || res.PodcastPID != a.PodcastPID {
+			t.Fatalf("sync of a at %s = %+v (err %v), want it written to a", addr, res, err)
+		}
+	}
+	show := func(pid model.PID) *model.Podcast {
+		t.Helper()
+		p, err := st.PodcastByPID(ctx, pid)
+		if err != nil {
+			t.Fatalf("read %s: %v", pid, err)
+		}
+		return p
+	}
+
+	sync("http://feed.example/b")
+	if pa, pb := show(a.PodcastPID), show(b.PodcastPID); pa.FeedURL != "http://feed.example/a" ||
+		pb.FeedURL != "http://feed.example/b" || pb.EpisodeCount != 1 {
+		t.Fatalf("after a move to b's address: a at %s, b at %s with %d episodes, want a kept and b untouched",
+			pa.FeedURL, pb.FeedURL, pb.EpisodeCount)
+	}
+	sync("http://feed.example/c")
+	if pa := show(a.PodcastPID); pa.FeedURL != "http://feed.example/c" {
+		t.Fatalf("after a move to a free address a is at %s, want http://feed.example/c", pa.FeedURL)
+	}
+}
+
+// TestUpsertFeedByPIDOfARemovedShowCreatesNothing: a sync that lands after its show was
+// removed does not bring the show back.
+func TestUpsertFeedByPIDOfARemovedShowCreatesNothing(t *testing.T) {
+	t.Parallel()
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	in := feedInput("http://feed.example/a", "One")
+	res, err := st.UpsertFeed(ctx, in)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if _, err := st.RemovePodcast(ctx, res.PodcastPID); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	in.PodcastPID = res.PodcastPID
+	if _, err := st.UpsertFeed(ctx, in); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("sync of a removed show = %v, want CodeNotFound", err)
+	}
+	if pods, err := st.Podcasts(ctx); err != nil || len(pods) != 0 {
+		t.Fatalf("shows after the sync = %d (err %v), want none", len(pods), err)
+	}
+}
+
+// TestUpsertFeedWritesTheLoginWithTheShow: a login given with a feed write lands in the
+// show's own transaction, a new show's included, and an empty one clears it.
+func TestUpsertFeedWritesTheLoginWithTheShow(t *testing.T) {
+	t.Parallel()
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	in := feedInput("http://feed.example/a", "One")
+	in.Login = &model.FeedLogin{User: "alice", Pass: "pw"}
+	res, err := st.UpsertFeed(ctx, in)
+	if err != nil {
+		t.Fatalf("upsert with a login: %v", err)
+	}
+	login := func() (string, string, error) {
+		t.Helper()
+		p, err := st.PodcastByPID(ctx, res.PodcastPID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pw, err := st.GetSecret(ctx, model.PodcastSecretKey(res.PodcastPID))
+		return p.AuthUser, pw, err
+	}
+	if user, pass, err := login(); err != nil || user != "alice" || pass != "pw" {
+		t.Fatalf("login after the add = %q/%q (err %v), want alice/pw", user, pass, err)
+	}
+	in.PodcastPID, in.FeedURL, in.Login = res.PodcastPID, "http://feed.example/b", &model.FeedLogin{}
+	if _, err := st.UpsertFeed(ctx, in); err != nil {
+		t.Fatalf("upsert clearing the login: %v", err)
+	}
+	if user, _, err := login(); user != "" || !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("login after a clearing write = %q (secret err %v), want none", user, err)
+	}
+}
+
+// TestSetPodcastAuthKeepsARowForEveryLogin: a login always has its secret row, one with
+// an empty password included, so a missing row means a lost password; an empty login
+// clears both, and a password with no user is refused.
+func TestSetPodcastAuthKeepsARowForEveryLogin(t *testing.T) {
+	t.Parallel()
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	res, err := st.UpsertFeed(ctx, feedInput("http://feed.example/a", "One"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := model.PodcastSecretKey(res.PodcastPID)
+	if err := st.SetPodcastAuth(ctx, res.PodcastPID, "alice", ""); err != nil {
+		t.Fatalf("a user-only login: %v", err)
+	}
+	if pw, err := st.GetSecret(ctx, key); err != nil || pw != "" {
+		t.Fatalf("a user-only login's secret = %q (err %v), want an empty row", pw, err)
+	}
+	if err := st.SetPodcastAuth(ctx, res.PodcastPID, "", ""); err != nil {
+		t.Fatalf("clearing: %v", err)
+	}
+	if _, err := st.GetSecret(ctx, key); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("secret after clearing = %v, want none", err)
+	}
+	if err := st.SetPodcastAuth(ctx, res.PodcastPID, "", "pw"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("a password with no user = %v, want CodeInvalid", err)
+	}
+}
+
+// TestEnsurePodcastLibraryRefusesARootItNestsWith: a podcast dir inside a library root,
+// or holding one, would file its downloads where a scan reads them as tracks, so it is
+// refused like the root itself; a dir apart from every root is made.
+func TestEnsurePodcastLibraryRefusesARootItNestsWith(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, _ := openTestStore(t)
+	for _, dir := range []string{"/lib/pods", "/"} {
+		if _, err := st.EnsurePodcastLibrary(ctx, dir); !waxerr.Is(err, waxerr.CodeConflict) {
+			t.Errorf("podcast dir %s beside root /lib = %v, want CodeConflict", dir, err)
+		}
+	}
+	if _, err := st.EnsurePodcastLibrary(ctx, "/pods"); err != nil {
+		t.Fatalf("podcast dir apart from the root: %v", err)
+	}
+}
+
+// TestEnsurePodcastLibraryReadsAnExistingRow: finding the podcast library takes no write,
+// which a read-only store shows by answering it.
+func TestEnsurePodcastLibraryReadsAnExistingRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := sqlite.SeedCatalog(t, filepath.Join(t.TempDir(), "catalog.db"))
+	rw, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	made, err := rw.EnsurePodcastLibrary(ctx, "/pods")
+	if err != nil {
+		t.Fatalf("make: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test", ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if got, err := ro.EnsurePodcastLibrary(ctx, "/pods"); err != nil || got.PID != made.PID {
+		t.Fatalf("finding it read-only = %+v (err %v), want %s", got, err, made.PID)
+	}
+}
+
+// TestMovePodcastFeedKeepsAnAddressAnotherShowHolds: a show moved to an address another
+// show holds stays where it was; moved to a free one, it goes.
+func TestMovePodcastFeedKeepsAnAddressAnotherShowHolds(t *testing.T) {
+	t.Parallel()
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	a, err := st.UpsertFeed(ctx, feedInput("http://feed.example/a", "One"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertFeed(ctx, feedInput("http://feed.example/b", "Two")); err != nil {
+		t.Fatal(err)
+	}
+	for to, want := range map[string]string{"http://feed.example/b": "http://feed.example/a", "http://feed.example/c": "http://feed.example/c"} {
+		if err := st.MovePodcastFeed(ctx, a.PodcastPID, to); err != nil {
+			t.Fatalf("move to %s: %v", to, err)
+		}
+		if p, err := st.PodcastByPID(ctx, a.PodcastPID); err != nil || p.FeedURL != want {
+			t.Fatalf("after a move to %s the show is at %s (err %v), want %s", to, p.FeedURL, err, want)
+		}
 	}
 }

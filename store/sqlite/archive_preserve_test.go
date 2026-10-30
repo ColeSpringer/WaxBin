@@ -116,7 +116,7 @@ func TestDropEpisodeFilePreservesPlayState(t *testing.T) {
 	}
 	if _, err := st.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
 		EpisodePID: target.PID,
-		LibraryID:  libID,
+		LibraryID:  libID.ID,
 		File: model.File{
 			Path: []byte("/podcasts/a.mp3"), DisplayPath: "/podcasts/a.mp3",
 			RelPath: []byte("a.mp3"), Kind: model.FileAudio, ContentHash: "h1", ScanState: model.ScanIndexed,
