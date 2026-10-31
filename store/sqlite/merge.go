@@ -159,9 +159,14 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err := refreshEntitySortKeyTx(ctx, tx, et, sid); err != nil {
 		return nil, err
 	}
-	// Re-point the per-user entity play-state rows (also polymorphic, no FK).
-	if err := repointEntityPlayState(ctx, tx, table, sid, lid); err != nil {
+	// Re-point the per-user entity play-state rows (also polymorphic, no FK), and say the
+	// survivor's moved, as a star or rating write would.
+	if moved, err := repointEntityPlayState(ctx, tx, table, sid, lid); err != nil {
 		return nil, err
+	} else if moved {
+		if err := appendChange(ctx, tx, "entity_play_state", survivorPID, model.OpUpdate); err != nil {
+			return nil, err
+		}
 	}
 	// Union the MBID: a merge driven by enrichment (two heuristic rows sharing an
 	// MBID) should leave the survivor carrying that MBID.
@@ -595,8 +600,14 @@ func repointEntityCuration(ctx context.Context, tx *sql.Tx, entityType string, s
 // below is what gives it the same non-lossy behavior. "Has a pair" tests the pair's
 // *_changed_at, not its value, so a user who rated the survivor then cleared it (rating
 // NULL, rating_changed_at set) keeps that cleared state rather than inheriting the loser's
-// stale rating. A kind whose users starred nothing finds no rows and is a no-op.
-func repointEntityPlayState(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
+// stale rating. A kind whose users starred nothing finds no rows and is a no-op. It reports
+// whether the loser held any state to bring.
+func repointEntityPlayState(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) (bool, error) {
+	var held bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM entity_play_state WHERE entity_type = ? AND entity_id = ?)",
+		entityType, lid).Scan(&held); err != nil || !held {
+		return false, err
+	}
 	// Fold the loser's disjoint pairs into the survivor's row for every user who has both.
 	// Each field's CASE keys on the survivor's own *_changed_at so a pair moves as a unit;
 	// updated_at advances to the later real row-touch of the two.
@@ -615,18 +626,18 @@ func repointEntityPlayState(ctx context.Context, tx *sql.Tx, entityType string, 
 		   AND EXISTS (SELECT 1 FROM entity_play_state lo
 		               WHERE lo.user_id = entity_play_state.user_id AND lo.entity_type = entity_play_state.entity_type AND lo.entity_id = ?)`,
 		lid, lid, lid, lid, lid, entityType, sid, lid); err != nil {
-		return err
+		return false, err
 	}
 	// Move the loser rows of users who have no survivor row (UPDATE OR IGNORE lands them on
 	// the survivor), then drop the folded leftovers whose IGNORE skipped them.
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE OR IGNORE entity_play_state SET entity_id = ? WHERE entity_type = ? AND entity_id = ?",
 		sid, entityType, lid); err != nil {
-		return err
+		return false, err
 	}
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_play_state WHERE entity_type = ? AND entity_id = ?", entityType, lid)
-	return err
+	return err == nil, err
 }
 
 // unionMBID copies the loser's MBID onto the survivor when the survivor has none,

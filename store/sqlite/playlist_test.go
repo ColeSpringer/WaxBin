@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestStaticPlaylistOrderAndEdits(t *testing.T) {
 	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "X", album: "Al"}).ItemPID
 	c := putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "X", album: "Al"}).ItemPID
 
-	pl, err := st.CreatePlaylist(ctx, "Mix", "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, "Mix", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestSmartPlaylistEvaluatedOnRead(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "New", artist: "X", album: "Al", year: 2010})
 
 	rule := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
-	pl, err := st.CreatePlaylist(ctx, "Recent", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "Recent", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestPlaylistRuleRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	_ = lib
 	rule := query.New(query.EntityItems).Where("artist", query.OpContains, "Radiohead").OrderBy("year", true).Limit(5).Build()
-	pl, err := st.CreatePlaylist(ctx, "RH", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "RH", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -127,12 +128,12 @@ func TestCreatePlaylistValidation(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	// Smart requires a rule.
-	if _, err := st.CreatePlaylist(ctx, "x", "", model.PlaylistSmart, "", nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.CreatePlaylist(ctx, "x", "", "", model.PlaylistSmart, "", nil); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("smart without rule err = %v, want CodeInvalid", err)
 	}
 	// Static must not carry a rule.
 	r := query.New(query.EntityItems).Build()
-	if _, err := st.CreatePlaylist(ctx, "x", "", model.PlaylistStatic, "", &r); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.CreatePlaylist(ctx, "x", "", "", model.PlaylistStatic, "", &r); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("static with rule err = %v, want CodeInvalid", err)
 	}
 	// Create validates the rule the way set-rule does: an unknown field, an
@@ -144,7 +145,7 @@ func TestCreatePlaylistValidation(t *testing.T) {
 		"random no limit": query.New(query.EntityItems).LimitBy(query.LimitRandom).Build(),
 	} {
 		bad := bad
-		if _, err := st.CreatePlaylist(ctx, "x", "", model.PlaylistSmart, "", &bad); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if _, err := st.CreatePlaylist(ctx, "x", "", "", model.PlaylistSmart, "", &bad); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("create with %s err = %v, want CodeInvalid", name, err)
 		}
 	}
@@ -158,7 +159,7 @@ func TestSetPlaylistRule(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "New", artist: "X", album: "Al", year: 2010})
 
 	rule := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
-	pl, err := st.CreatePlaylist(ctx, "Recent", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "Recent", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -205,7 +206,7 @@ func TestSetPlaylistRule(t *testing.T) {
 
 	// Rejections, all without a delta and without touching the stored rule: a
 	// static playlist, an unknown pid, and an uncompilable rule.
-	static, _ := st.CreatePlaylist(ctx, "S", "", model.PlaylistStatic, "", nil)
+	static, _ := st.CreatePlaylist(ctx, "S", "", "", model.PlaylistStatic, "", nil)
 	seqRej, _ := st.LatestChangeSeq(ctx)
 	if err := st.SetPlaylistRule(ctx, static, flipped); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("set-rule on static err = %v, want CodeInvalid", err)
@@ -233,7 +234,7 @@ func TestRemovePlaylistItemAt(t *testing.T) {
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
 	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "X", album: "Al"}).ItemPID
 
-	pl, _ := st.CreatePlaylist(ctx, "Dup", "", model.PlaylistStatic, "", nil)
+	pl, _ := st.CreatePlaylist(ctx, "Dup", "", "", model.PlaylistStatic, "", nil)
 	// A appears twice (indexes 0, 2); B once (index 1).
 	if err := st.AddPlaylistItems(ctx, pl, []model.PID{a, b, a}); err != nil {
 		t.Fatalf("add: %v", err)
@@ -267,7 +268,7 @@ func playlistTracks(t *testing.T, st *Store, libID int64, titles ...string) []mo
 func staticPlaylist(t *testing.T, st *Store, name string, members ...model.PID) model.PID {
 	t.Helper()
 	ctx := context.Background()
-	pl, err := st.CreatePlaylist(ctx, name, "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, name, "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
@@ -613,7 +614,7 @@ func TestRemovePlaylistItemNonMemberIsNoOp(t *testing.T) {
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
 	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "X", album: "Al"}).ItemPID
 
-	pl, _ := st.CreatePlaylist(ctx, "P", "", model.PlaylistStatic, "", nil)
+	pl, _ := st.CreatePlaylist(ctx, "P", "", "", model.PlaylistStatic, "", nil)
 	if err := st.AddPlaylistItems(ctx, pl, []model.PID{a}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -629,10 +630,19 @@ func TestRemovePlaylistItemNonMemberIsNoOp(t *testing.T) {
 	}
 }
 
-func TestItemsByPlaylistPathMatching(t *testing.T) {
+// pathItems returns what ItemsByPlaylistPaths says one path names.
+func pathItems(t *testing.T, st *Store, p string) model.PathCandidates {
+	t.Helper()
+	got, err := st.ItemsByPlaylistPaths(context.Background(), []string{p}, 100)
+	if err != nil {
+		t.Fatalf("items by %s: %v", p, err)
+	}
+	return got[p]
+}
+
+func TestItemsByPlaylistPathsMatching(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
-	ctx := context.Background()
 	// Stored paths are OS-native and absolute, as a real scan writes them. The
 	// playlist entries below stay forward-slash, which is what M3U8 carries on
 	// every platform and what the matcher normalizes; a bare "/lib" is not even
@@ -645,10 +655,7 @@ func TestItemsByPlaylistPathMatching(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/al/1.flac"), essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
 	one := func(p string) string {
 		t.Helper()
-		items, err := st.ItemsByPlaylistPath(ctx, p)
-		if err != nil {
-			t.Fatalf("items by %s: %v", p, err)
-		}
+		items := pathItems(t, st, p).Items
 		if len(items) != 1 {
 			return ""
 		}
@@ -659,13 +666,15 @@ func TestItemsByPlaylistPathMatching(t *testing.T) {
 	if got := one(vol + "/lib/al/1.flac"); got != "One" {
 		t.Errorf("absolute match = %q, want One", got)
 	}
-	// Relative path: suffix match.
-	if got := one("al/1.flac"); got != "One" {
-		t.Errorf("relative suffix match = %q, want One", got)
+	// Relative path: suffix match, ASCII letters in either case as LIKE compares.
+	for _, rel := range []string{"al/1.flac", "AL/1.FLAC"} {
+		if got := one(rel); got != "One" {
+			t.Errorf("relative suffix match %q = %q, want One", rel, got)
+		}
 	}
 	// A suffix that anchors at a separator does not match a partial path component.
-	if items, err := st.ItemsByPlaylistPath(ctx, "l/1.flac"); err != nil || len(items) != 0 {
-		t.Errorf("partial-component suffix = %d items (err %v), want none", len(items), err)
+	if items := pathItems(t, st, "l/1.flac").Items; len(items) != 0 {
+		t.Errorf("partial-component suffix = %d items, want none", len(items))
 	}
 	// Dotted relative entries are cleaned before matching.
 	for _, dotted := range []string{"./al/1.flac", "al/./1.flac", "x/../al/1.flac"} {
@@ -677,8 +686,33 @@ func TestItemsByPlaylistPathMatching(t *testing.T) {
 	// A basename in two folders names both items, for the caller to choose between.
 	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/x/dup.flac"), essence: "ex", content: "cx", title: "Dx", artist: "X", album: "Al"})
 	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/y/dup.flac"), essence: "ey", content: "cy", title: "Dy", artist: "X", album: "Al"})
-	if items, err := st.ItemsByPlaylistPath(ctx, "dup.flac"); err != nil || len(items) != 2 {
-		t.Errorf("a basename in two folders = %d items (err %v), want both", len(items), err)
+	if got := pathItems(t, st, "dup.flac"); len(got.Items) != 2 || got.Overflow {
+		t.Errorf("a basename in two folders = %+v, want both", got)
+	}
+	// Past the limit the path names nothing, and says so.
+	got, err := st.ItemsByPlaylistPaths(context.Background(), []string{"dup.flac", "al/1.flac"}, 1)
+	if err != nil || !got["dup.flac"].Overflow || len(got["dup.flac"].Items) != 0 ||
+		got["al/1.flac"].Overflow || len(got["al/1.flac"].Items) != 1 {
+		t.Errorf("limit 1 = %+v (err %v), want dup.flac overflowed and al/1.flac named", got, err)
+	}
+	if _, err := st.ItemsByPlaylistPaths(context.Background(), []string{"dup.flac"}, 0); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("limit 0: err = %v, want CodeInvalid", err)
+	}
+}
+
+// TestItemsByPlaylistPathsSeeksTheNameIndex: a relative path seeks the file-name index
+// before the LIKE checks the suffix, and an absolute path seeks the path index, so no
+// lookup reads every file.
+func TestItemsByPlaylistPathsSeeksTheNameIndex(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	rel := explainPlan(t, st, playlistPathQ(true, 101), "x.flac", "%/a/x.flac")
+	if !strings.Contains(rel, "fx USING INDEX file_name_nocase (name=?)") || strings.Contains(rel, "SCAN fx") {
+		t.Errorf("a relative path's plan does not seek the name index:\n%s", rel)
+	}
+	abs := explainPlan(t, st, playlistPathQ(false, 101), []byte("/a/x.flac"))
+	if !regexp.MustCompile(`SEARCH fx USING (COVERING )?INDEX \S+ \(path=\?\)`).MatchString(abs) || strings.Contains(abs, "SCAN fx") {
+		t.Errorf("an absolute path's plan does not seek the path index:\n%s", abs)
 	}
 }
 
@@ -698,21 +732,48 @@ func TestLikePatternAtTheCapRuns(t *testing.T) {
 		}
 	}
 	rule := query.New(query.EntityItems).Where("title", query.OpContains, strings.Repeat("a", 49999)).Build()
-	if _, err := st.CreatePlaylist(ctx, "Long", "", model.PlaylistSmart, "", &rule); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.CreatePlaylist(ctx, "Long", "", "", model.PlaylistSmart, "", &rule); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("saving a rule one byte over the cap: err = %v, want CodeInvalid", err)
 	}
 }
 
-// TestItemsByPlaylistPathPastTheLikeCap: a relative entry too long for a LIKE pattern
+// TestItemsByPlaylistPathsPastTheLikeCap: a relative entry too long for a LIKE pattern
 // names no file the catalog can hold, so it names no item rather than failing as I/O.
-// SQLite checks the length per row, so the catalog holds a file.
-func TestItemsByPlaylistPathPastTheLikeCap(t *testing.T) {
+// SQLite checks the length per row, so the catalog holds a file named as the entry ends.
+func TestItemsByPlaylistPathsPastTheLikeCap(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
-	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
-	if items, err := st.ItemsByPlaylistPath(context.Background(), strings.Repeat("a/", 30000)+"x.flac"); err != nil || len(items) != 0 {
-		t.Errorf("60,000-byte relative entry: %d items (err %v), want none and no error", len(items), err)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/x.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
+	long := strings.Repeat("a/", 30000) + "x.flac"
+	got, err := st.ItemsByPlaylistPaths(context.Background(), []string{long}, 100)
+	if err != nil || len(got[long].Items) != 0 || got[long].Overflow {
+		t.Errorf("60,000-byte relative entry: %+v (err %v), want none and no error", got[long], err)
 	}
+}
+
+// ItemsByPlaylistPathLike is the lookup ItemsByPlaylistPaths replaced, kept as the
+// reference the sqlite_test half's property test compares against: the exact path, then
+// for a relative one the separator-anchored LIKE over every file's display path.
+func (s *Store) ItemsByPlaylistPathLike(ctx context.Context, p string) ([]*model.ItemView, error) {
+	const op = "test.ItemsByPlaylistPathLike"
+	behind := func(cond string, arg any) ([]*model.ItemView, error) {
+		rows, err := s.rdb().QueryContext(ctx, itemSelect+` WHERE pi.id IN (SELECT ie.item_id FROM item_file ie
+			JOIN file fx ON fx.id = ie.file_id WHERE `+cond+`) ORDER BY pi.id`, arg)
+		if err != nil {
+			return nil, err
+		}
+		return collectItems(rows, op)
+	}
+	clean := filepath.Clean(filepath.FromSlash(p))
+	items, err := behind("fx.path = ?", []byte(clean))
+	if err != nil || len(items) > 0 || filepath.IsAbs(clean) {
+		return items, err
+	}
+	pattern := "%" + query.LikeEscape(string(filepath.Separator)+clean)
+	if len(pattern) > query.MaxLikePatternBytes {
+		return nil, nil
+	}
+	return behind(`fx.display_path LIKE ? ESCAPE '\'`, pattern)
 }
 
 func equalStrings(a, b []string) bool {
@@ -835,11 +896,11 @@ func TestTransferPlaylistsMovesEveryPlaylistOfAUser(t *testing.T) {
 	p := playlistTracks(t, st, lib.ID, "A", "B")
 	static := staticPlaylist(t, st, "Static", p...)
 	rule := query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build()
-	smart, err := st.CreatePlaylist(ctx, "Starred", "", model.PlaylistSmart, model.VisibilityShared, &rule)
+	smart, err := st.CreatePlaylist(ctx, "Starred", "", "", model.PlaylistSmart, model.VisibilityShared, &rule)
 	if err != nil {
 		t.Fatalf("smart: %v", err)
 	}
-	bobs, err := st.CreatePlaylist(ctx, "Bob's", bob.PID, model.PlaylistStatic, "", nil)
+	bobs, err := st.CreatePlaylist(ctx, "Bob's", "", bob.PID, model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("bob's: %v", err)
 	}
@@ -894,7 +955,7 @@ func TestCreatePlaylistWithItemsIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	p := playlistTracks(t, st, lib.ID, "A", "B")
 	seq := latestSeq(t, st)
-	pl, err := st.CreatePlaylistWithItems(ctx, "Imported", "", "", []model.PID{p[0], p[1], p[0]})
+	pl, err := st.CreatePlaylistWithItems(ctx, "Imported", "", "", "", []model.PID{p[0], p[1], p[0]})
 	if err != nil {
 		t.Fatalf("create with items: %v", err)
 	}
@@ -911,7 +972,7 @@ func TestCreatePlaylistWithItemsIsAtomic(t *testing.T) {
 		return scalarInt(t, st, "SELECT COUNT(*) FROM playlist")
 	}
 	before, seq := count(), latestSeq(t, st)
-	if _, err := st.CreatePlaylistWithItems(ctx, "Broken", "", "", []model.PID{p[0], "nope"}); !waxerr.Is(err, waxerr.CodeNotFound) {
+	if _, err := st.CreatePlaylistWithItems(ctx, "Broken", "", "", "", []model.PID{p[0], "nope"}); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("an entry naming no item: err = %v, want CodeNotFound", err)
 	}
 	if after := count(); after != before {
@@ -1005,4 +1066,120 @@ func TestAddPlaylistItemsClosesOldGaps(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 	assertListing(t, st, pl, "A", "B", "C", "D")
+}
+
+// TestPlaylistDescriptionRoundTrips: a description given at creation reads back on the
+// playlist and in the listing, for both kinds and for a list created with its items, and
+// SetPlaylistDescription replaces or clears it with one update delta each.
+func TestPlaylistDescriptionRoundTrips(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
+	rule := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
+	static, err := st.CreatePlaylist(ctx, "Mix", "  For the drive.\r\nSide one.  ", "", model.PlaylistStatic, "", nil)
+	if err != nil {
+		t.Fatalf("create static: %v", err)
+	}
+	smart, err := st.CreatePlaylist(ctx, "Recent", "New things", "", model.PlaylistSmart, "", &rule)
+	if err != nil {
+		t.Fatalf("create smart: %v", err)
+	}
+	packed, err := st.CreatePlaylistWithItems(ctx, "Pack", "Packed", "", "", []model.PID{a})
+	if err != nil {
+		t.Fatalf("create with items: %v", err)
+	}
+	want := map[model.PID]string{static: "For the drive.\nSide one.", smart: "New things", packed: "Packed"}
+	for pid, w := range want {
+		if p, err := st.PlaylistByPID(ctx, pid); err != nil || p.Description != w {
+			t.Errorf("playlist %s description = %+v (err %v), want %q", pid, p, err, w)
+		}
+	}
+	listed, err := st.ListPlaylists(ctx, "")
+	if err != nil || len(listed) != 3 {
+		t.Fatalf("list = %d playlists (err %v), want 3", len(listed), err)
+	}
+	for _, p := range listed {
+		if p.Description != want[p.PID] {
+			t.Errorf("listed %s description = %q, want %q", p.Name, p.Description, want[p.PID])
+		}
+	}
+
+	seq, _ := st.LatestChangeSeq(ctx)
+	if err := st.SetPlaylistDescription(ctx, static, " Rewritten "); err != nil {
+		t.Fatalf("set description: %v", err)
+	}
+	if p, _ := st.PlaylistByPID(ctx, static); p.Description != "Rewritten" {
+		t.Errorf("after the set, description = %q, want Rewritten", p.Description)
+	}
+	if err := st.SetPlaylistDescription(ctx, static, ""); err != nil {
+		t.Fatalf("clear description: %v", err)
+	}
+	if p, _ := st.PlaylistByPID(ctx, static); p.Description != "" {
+		t.Errorf("after the clear, description = %q, want none", p.Description)
+	}
+	if got := playlistChanges(t, st, seq); got[static] != 2 || len(got) != 1 {
+		t.Errorf("update deltas = %v, want two on %s alone", got, static)
+	}
+	if err := st.SetPlaylistDescription(ctx, "nope", "x"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("describing an unknown playlist: err = %v, want CodeNotFound", err)
+	}
+}
+
+// TestCheckDescriptionRefusesControlsAndLength: a description keeps its lines, every
+// line break (CRLF, CR, next line, line and paragraph separator) reads as a line feed,
+// and the marks and joiners prose needs stay, while a tab or other control, a
+// bidirectional override, embedding or isolate, a byte that is not UTF-8, or a text past
+// the bound is refused, by the check and by every store writer, with nothing written.
+func TestCheckDescriptionRefusesControlsAndLength(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	atBound := strings.Repeat("é", model.MaxPlaylistDescriptionBytes/2)
+	for _, c := range []struct{ in, want string }{
+		{"  plain  ", "plain"},
+		{"two\nlines", "two\nlines"},
+		{"crlf\r\nends\r\n", "crlf\nends"},
+		{"cr\rnel\u0085ls\u2028ps\u2029end", "cr\nnel\nls\nps\nend"},
+		{"family \U0001F468\u200d\U0001F469\u200d\U0001F467 and \u05e9\u05dc\u05d5\u05dd\u200f", "family \U0001F468\u200d\U0001F469\u200d\U0001F467 and \u05e9\u05dc\u05d5\u05dd\u200f"},
+		{atBound, atBound},
+		{"", ""},
+	} {
+		got, err := model.CheckPlaylistDescription(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("check %q = %q (err %v), want %q", c.in, got, err, c.want)
+		}
+	}
+
+	kept, err := st.CreatePlaylist(ctx, "Kept", "as it was", "", model.PlaylistStatic, "", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for name, in := range map[string]string{
+		"tab":            "a\tb",
+		"NUL":            "a\x00b",
+		"RLO":            "a\u202eb",
+		"isolate":        "a\u2067b\u2069",
+		"not UTF-8":      "a\xffb",
+		"past the bound": strings.Repeat("a", model.MaxPlaylistDescriptionBytes+1),
+	} {
+		if _, err := model.CheckPlaylistDescription(in); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("check %s: err = %v, want CodeInvalid", name, err)
+		}
+		if _, err := st.CreatePlaylist(ctx, "P", in, "", model.PlaylistStatic, "", nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("create with %s: err = %v, want CodeInvalid", name, err)
+		}
+		if _, err := st.CreatePlaylistWithItems(ctx, "P", in, "", "", nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("create with items and %s: err = %v, want CodeInvalid", name, err)
+		}
+		if err := st.SetPlaylistDescription(ctx, kept, in); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("set %s: err = %v, want CodeInvalid", name, err)
+		}
+	}
+	if p, _ := st.PlaylistByPID(ctx, kept); p.Description != "as it was" {
+		t.Errorf("refused sets left %q, want the description as it was", p.Description)
+	}
+	if listed, _ := st.ListPlaylists(ctx, ""); len(listed) != 1 {
+		t.Errorf("refused creates left %d playlists, want only the kept one", len(listed))
+	}
 }

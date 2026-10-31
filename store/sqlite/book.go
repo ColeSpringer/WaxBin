@@ -152,15 +152,15 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// The part's lengths are read only when its number, its duration or its chapters
 		// changed, which a plain re-read changes none of.
 		if was != nil && role != alternateRole && (position != was.position || priorMS != in.File.DurationMS || chaptersChanged) {
-			extent, err := chapterExtentTx(ctx, tx, itemID, fileKey(fileID))
+			extent, err := chapterExtentTx(ctx, tx, itemID, fileID)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			was.length = max(priorMS, extent)
+			was.length = partEffectiveLength(priorMS, extent)
 			if chaptersChanged {
-				was.length = max(priorMS, priorExtent)
+				was.length = partEffectiveLength(priorMS, priorExtent)
 			}
-			if length := max(in.File.DurationMS, extent); position != was.position || length != was.length {
+			if length := partEffectiveLength(in.File.DurationMS, extent); position != was.position || length != was.length {
 				before, err := bookTimelineTx(ctx, tx, itemID, map[int64]partWas{fileID: *was})
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -335,8 +335,12 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 		if changed || chaptersChanged {
 			// The book row exists now (the primary created it); refresh its denormalized
-			// total duration so a new part or a changed chapter span is reflected.
+			// total duration so a new part or a changed chapter span is reflected, and
+			// its genres' running times, which count it.
 			if err := refreshBookDuration(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := affected.collectGenres(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -973,18 +977,67 @@ func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutSc
 	return nil
 }
 
+// partEffectiveLength is how far a part advances its book's timeline: its measured length,
+// or the extent of its chapters (partExtentExpr) when they run past it, so a part of
+// unknown length with real chapters still counts and no chapter falls past the total.
+// Every reader and writer of the timeline lays a part out by this one rule: the chapter
+// list, the stored total, the spans places are remapped against, the chapter edit's
+// split, and a scan's resize.
+func partEffectiveLength(measured, extent int64) int64 { return max(measured, extent) }
+
+// derivedExtentRel is how far a file's preferred derived chapter source runs on a book,
+// as a relation of at most one row (e): the furthest start or end of the source the file
+// shows first (chapterSourcesByRank), each source's rows grouped once. %[1]s is the book's
+// item id and %[2]s the file's id.
+var derivedExtentRel = `SELECT e FROM (SELECT MAX(MAX(d.start_ms, d.end_ms)) AS e, d.source AS s FROM chapter d
+		WHERE d.book_item_id = %[1]s AND d.file_id = %[2]s AND d.source <> 'user'
+		GROUP BY d.source ORDER BY ` + chapterRankSQL("s") + `, s LIMIT 1)`
+
+// partExtentExpr is how far a part's chapters run on its book: the further of the user's
+// chapters and the file's preferred derived source, the chapters the read shows or floors
+// the timeline with (bookChapters, which reads the same rule in Go over the rows it shows,
+// chapterExtent). Another derived source the file also carries is hidden and counts for
+// nothing. Each arm reads a part's rows once; a subquery picking the source per row made
+// reading a 2,000-chapter book take seconds. %[1]s is the book's item id and %[2]s the
+// file's id.
+var partExtentExpr = `COALESCE((SELECT MAX(e) FROM (
+	SELECT MAX(MAX(c.start_ms, c.end_ms)) AS e FROM chapter c
+		WHERE c.book_item_id = %[1]s AND c.file_id = %[2]s AND c.source = 'user'
+	UNION ALL ` + derivedExtentRel + `)), 0)`
+
+// partExtentsQ is partExtentExpr for each file holding chapters on the book ?1, fileExtentQ
+// for the one file ?2, and derivedExtentQ its derived source's alone.
+var (
+	partExtentsQ = `SELECT x.file_id, ` + fmt.Sprintf(partExtentExpr, "?1", "x.file_id") + `
+		FROM (SELECT DISTINCT file_id FROM chapter WHERE book_item_id = ?1 AND file_id IS NOT NULL) x`
+	fileExtentQ    = "SELECT " + fmt.Sprintf(partExtentExpr, "?1", "?2")
+	derivedExtentQ = "SELECT COALESCE((" + fmt.Sprintf(derivedExtentRel, "?1", "?2") + "), 0)"
+)
+
+// partExtents reads how far each file's chapters run on a book (partExtentExpr), by file
+// id; a file with none is absent.
+func partExtents(ctx context.Context, q queryer, bookID int64) (map[int64]int64, error) {
+	rows, err := q.QueryContext(ctx, partExtentsQ, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var id, ext int64
+		if err := rows.Scan(&id, &ext); err != nil {
+			return nil, err
+		}
+		out[id] = ext
+	}
+	return out, rows.Err()
+}
+
 // bookEffectiveDurationSum is the SQL subquery for a book's total running time: the
-// sum over its parts of each part's EFFECTIVE duration, the larger of the file's
-// own duration and its furthest chapter offset. Using the chapter extent as a floor
-// means a part with an unknown file duration but real chapters still contributes,
-// and the stored total never falls short of the chapter timeline that bookChapters
-// builds with the identical definition. The "%s" is the correlated book item id.
-const bookEffectiveDurationSum = `(
-	SELECT COALESCE(SUM(MAX(
-		COALESCE(f.duration_ms, 0),
-		COALESCE((SELECT MAX(MAX(c.start_ms, c.end_ms)) FROM chapter c
-		          WHERE c.book_item_id = itf.item_id AND c.file_id = itf.file_id), 0)
-	)), 0)
+// sum of its parts' effective lengths (partEffectiveLength). The "%s" is the correlated
+// book item id.
+var bookEffectiveDurationSum = `(
+	SELECT COALESCE(SUM(MAX(COALESCE(f.duration_ms, 0), ` + fmt.Sprintf(partExtentExpr, "itf.item_id", "itf.file_id") + `)), 0)
 	FROM item_file itf JOIN file f ON f.id = itf.file_id
 	WHERE itf.item_id = %s AND itf.role IN ('primary', 'part'))`
 
@@ -993,11 +1046,18 @@ const bookEffectiveDurationSum = `(
 // matches no book row), so callers on the shared track/book detach paths can call it
 // unconditionally.
 func refreshBookDuration(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"UPDATE book SET total_duration_ms = "+fmt.Sprintf(bookEffectiveDurationSum, "book.item_id")+" WHERE item_id = ?",
-		itemID)
+	_, err := tx.ExecContext(ctx, refreshBookDurationQ, itemID)
 	return err
 }
+
+// refreshBookDurationQ and refreshAllBookDurationsQ write the stored totals from
+// bookEffectiveDurationSum: one book's, and every book's whose total moved.
+var (
+	refreshBookDurationQ     = "UPDATE book SET total_duration_ms = " + fmt.Sprintf(bookEffectiveDurationSum, "book.item_id") + " WHERE item_id = ?"
+	refreshAllBookDurationsQ = `UPDATE book SET total_duration_ms = s.total
+		FROM (SELECT b.item_id AS id, ` + fmt.Sprintf(bookEffectiveDurationSum, "b.item_id") + ` AS total FROM book b) s
+		WHERE book.item_id = s.id AND book.total_duration_ms <> s.total`
+)
 
 // refreshAllBookDurations recomputes every book's total from its current parts. The
 // per-write refreshes keep the column current; this whole-catalog pass is the repair
@@ -1006,9 +1066,7 @@ func refreshBookDuration(ctx context.Context, tx *sql.Tx, itemID int64) error {
 // the file it would re-read is gone. It writes only the books whose total moved, each
 // sum computed once, and returns how many.
 func refreshAllBookDurations(ctx context.Context, tx *sql.Tx) (int, error) {
-	r, err := tx.ExecContext(ctx, `UPDATE book SET total_duration_ms = s.total
-		FROM (SELECT b.item_id AS id, `+fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")+` AS total FROM book b) s
-		WHERE book.item_id = s.id AND book.total_duration_ms <> s.total`)
+	r, err := tx.ExecContext(ctx, refreshAllBookDurationsQ)
 	if err != nil {
 		return 0, err
 	}
@@ -1073,30 +1131,39 @@ func refreshAllISBNKeysTx(ctx context.Context, tx *sql.Tx) (int, error) {
 // These literals are not model.ProvenanceSource: they name a derivation method, which
 // is what the ranking is over, so unifying the two vocabularies would break it.
 func chapterSourceRank(source string) int {
-	switch source {
-	case "user":
+	if source == "user" {
 		// A user-curated chapter list is authoritative over any derived source.
 		return -1
-	case "podcast_url":
-		return 0
-	case "embedded":
-		return 1
-	case "cue":
-		return 2
-	case "synthetic":
-		return 3
-	default:
-		return 4
 	}
+	if i := slices.Index(chapterSourcesByRank, source); i >= 0 {
+		return i
+	}
+	return len(chapterSourcesByRank)
+}
+
+// chapterSourcesByRank lists the derived chapter sources, the one a file shows first.
+var chapterSourcesByRank = []string{"podcast_url", "embedded", "cue", "synthetic"}
+
+// chapterRankSQL is chapterSourceRank for a derived source column, for a statement to
+// order by.
+func chapterRankSQL(col string) string {
+	var b strings.Builder
+	b.WriteString("CASE " + col)
+	for i, s := range chapterSourcesByRank {
+		fmt.Fprintf(&b, " WHEN '%s' THEN %d", s, i)
+	}
+	fmt.Fprintf(&b, " ELSE %d END", len(chapterSourcesByRank))
+	return b.String()
 }
 
 // preferredChapters returns the chapters of the single highest-precedence source
 // present for a file (embedded over cue), so a file that briefly carries both does
-// not read back a merged, doubled chapter list.
+// not read back a merged, doubled chapter list. Two sources of one rank go by name, as
+// partExtentExpr orders them.
 func preferredChapters(bySource map[string][]model.Chapter) []model.Chapter {
 	best, bestRank := "", 1<<30
 	for source := range bySource {
-		if r := chapterSourceRank(source); r < bestRank {
+		if r := chapterSourceRank(source); r < bestRank || r == bestRank && source < best {
 			best, bestRank = source, r
 		}
 	}
@@ -1140,9 +1207,8 @@ func fileKey(id int64) sql.NullInt64 { return sql.NullInt64{Int64: id, Valid: tr
 // The statements over one file's chapter rows, or an item's own, completed by
 // chapterRowsOf.
 const (
-	chapterRowsSelect   = "SELECT position, title, start_ms, end_ms, source FROM chapter"
-	chapterRowsDelete   = "DELETE FROM chapter"
-	chapterExtentSelect = "SELECT COALESCE(MAX(MAX(start_ms, end_ms)), 0) FROM chapter"
+	chapterRowsSelect = "SELECT position, title, start_ms, end_ms, source FROM chapter"
+	chapterRowsDelete = "DELETE FROM chapter"
 )
 
 // chapterRowsOf completes prefix to the chapter rows of file on the item, or the item's own
@@ -1170,7 +1236,7 @@ func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID int64, file sql.Nu
 	var prior int64
 	if measure {
 		var err error
-		if prior, err = chapterExtentTx(ctx, tx, bookItemID, file); err != nil {
+		if prior, err = chapterExtentTx(ctx, tx, bookItemID, file.Int64); err != nil {
 			return false, 0, err
 		}
 	}
@@ -1351,17 +1417,16 @@ func (s *Store) BookByPID(ctx context.Context, pid model.PID) (*model.BookDetail
 	if err != nil {
 		return nil, err
 	}
-	d.Files = make([]model.BookPart, len(parts))
-	for i, p := range parts {
-		d.Files[i] = p.BookPart
-	}
-
 	// The total is the book-timeline length from bookChapters (the sum of effective
 	// part durations), so it always covers the chapter span and matches the
 	// denormalized book.total_duration_ms used by the list view.
 	chapters, total, err := s.bookChapters(ctx, bookItemID, parts)
 	if err != nil {
 		return nil, err
+	}
+	d.Files = make([]model.BookPart, len(parts))
+	for i, p := range parts {
+		d.Files[i] = p.BookPart
 	}
 	d.Chapters = chapters
 	d.TotalDurationMS = total
@@ -1468,42 +1533,20 @@ func sortBookParts(parts []bookPart) {
 }
 
 // bookChapters resolves a book's chapters into book-timeline order and offsets. It
-// walks the parts in reading order, accumulating each part's effective duration, so
-// a chapter's stored file-relative offset becomes an offset from the start of the
-// whole book. An open (zero) end is filled from the next chapter's start, and the
-// final open end from the total duration. It also returns the book-timeline total
-// (the accumulated effective durations), so BookByPID's reported total can never
-// fall short of the chapter span. CurrentChapter ignores the returned total.
+// walks the parts in reading order, each advancing the timeline by its effective length
+// (partEffectiveLength), so a chapter's stored file-relative offset becomes an offset
+// from the start of the whole book, and it sets each part's StartMS and EffectiveMS. An
+// open (zero) end is filled from the next chapter's start, and the final open end from
+// the total, which it returns too, so BookByPID's reported total can never fall short of
+// the chapter span. CurrentChapter ignores the returned total.
 func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []bookPart) ([]model.Chapter, int64, error) {
 	const op = "store.BookByPID"
-	// One query for the whole book's chapters; group them by file in memory, then
-	// walk the parts in reading order. Iterating parts (not the chapter rows) is what
-	// lets a part with no chapters still advance the cumulative book-timeline offset,
-	// and it avoids a per-part round trip on a heavily split book.
-	rows, err := s.rdb().QueryContext(ctx,
-		`SELECT file_id, title, start_ms, end_ms, source FROM chapter
-		 WHERE book_item_id = ? AND file_id IS NOT NULL ORDER BY position, start_ms`, bookItemID)
+	// One query for the whole book's chapters, grouped by file in memory, then a walk of
+	// the parts in reading order. Iterating parts (not the chapter rows) is what lets a
+	// part with no chapters still advance the cumulative book-timeline offset, and it
+	// avoids a per-part round trip on a heavily split book.
+	bySource, err := s.chaptersBySource(ctx, bookItemID)
 	if err != nil {
-		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	defer rows.Close()
-	// Group per file AND per source; a file may briefly carry chapters from more than
-	// one source (podcast_url chapters beside embedded ones, say), so pick the single
-	// highest-precedence source per file: embedded beats cue.
-	bySource := map[int64]map[string][]model.Chapter{}
-	for rows.Next() {
-		var fid int64
-		var source string
-		var c model.Chapter
-		if err := rows.Scan(&fid, &c.Title, &c.FileStartMS, &c.FileEndMS, &source); err != nil {
-			return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if bySource[fid] == nil {
-			bySource[fid] = map[string][]model.Chapter{}
-		}
-		bySource[fid][source] = append(bySource[fid][source], c)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	// User chapters are authored against the whole book timeline (SetItemChapters
@@ -1512,7 +1555,8 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 	// uncovered stays empty rather than falling back to its scanned chapters,
 	// which would interleave two navigations. Derived sources keep per-file
 	// precedence, since different parts can legitimately carry different sources
-	// (one part embedded, another cue).
+	// (one part embedded, another cue). A suppressed source still sets its part's
+	// length (partExtentExpr), so the timeline the curation was split against stands.
 	userCurated := false
 	for _, srcs := range bySource {
 		if len(srcs["user"]) > 0 {
@@ -1520,87 +1564,91 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 			break
 		}
 	}
-	byFile := make(map[int64][]model.Chapter, len(bySource))
-	// derivedFloor is each file's preferred derived source's furthest chapter
-	// offset, kept when user curation suppresses those rows from the output: the
-	// timeline must still advance past the content the derived chapters prove
-	// exists (a part with an unknown file duration would otherwise contribute
-	// nothing), or every later part's chapters would shift away from the
-	// timeline the curation was authored and split against.
-	var derivedFloor map[int64]int64
-	if userCurated {
-		derivedFloor = make(map[int64]int64, len(bySource))
-	}
-	for fid, srcs := range bySource {
-		if !userCurated {
-			byFile[fid] = preferredChapters(srcs)
-			continue
-		}
-		byFile[fid] = srcs["user"]
-		derived := make(map[string][]model.Chapter, len(srcs))
-		for src, chs := range srcs {
-			if src != "user" {
-				derived[src] = chs
-			}
-		}
-		var ext int64
-		for _, c := range preferredChapters(derived) {
-			if c.FileEndMS > ext {
-				ext = c.FileEndMS
-			}
-			if c.FileStartMS > ext {
-				ext = c.FileStartMS
-			}
-		}
-		derivedFloor[fid] = ext
-	}
-
 	var out []model.Chapter
 	var cum int64
 	pos := 0
-	for _, part := range parts {
-		var maxEnd int64 // furthest chapter offset within this part
-		for _, c := range byFile[part.fileID] {
+	for i := range parts {
+		part := &parts[i]
+		shown := bySource[part.fileID]["user"]
+		if !userCurated {
+			shown = preferredChapters(bySource[part.fileID])
+		}
+		for _, c := range shown {
 			c.FilePID = part.FilePID
 			c.Position = pos
 			c.StartMS = cum + c.FileStartMS
 			if c.FileEndMS > 0 {
 				c.EndMS = cum + c.FileEndMS
 			}
-			if c.FileEndMS > maxEnd {
-				maxEnd = c.FileEndMS
-			}
-			if c.FileStartMS > maxEnd {
-				maxEnd = c.FileStartMS
-			}
 			pos++
 			out = append(out, c)
 		}
-		// Advance the timeline by the part's EFFECTIVE duration: the larger of its
-		// file duration and its furthest chapter offset. This both keeps later parts
-		// from stacking when a file duration is unknown AND keeps the running total
-		// (cum) from falling short of any chapter span, so the reported total and the
-		// chapter timeline always agree (the same definition refreshBookDuration and
-		// db verify use). Under user curation the suppressed derived chapters still
-		// floor the advance (derivedFloor), matching the timeline splitBookChapters
-		// mapped the curation against.
-		eff := part.DurationMS
-		if maxEnd > eff {
-			eff = maxEnd
-		}
-		if f := derivedFloor[part.fileID]; f > eff {
-			eff = f
-		}
-		cum += eff
+		part.StartMS = cum
+		part.EffectiveMS = partEffectiveLength(part.DurationMS, chapterExtent(bySource[part.fileID]))
+		cum += part.EffectiveMS
 	}
 	fillOpenEnds(out, cum)
+	// A last chapter the book does not run past (a marker where it ends) has no end of
+	// its own, as an episode's has none, so it reads open rather than as a span ending
+	// where it starts, which no chapter list could set back.
+	if n := len(out); n > 0 && out[n-1].EndMS <= out[n-1].StartMS {
+		out[n-1].EndMS = 0
+	}
 	return out, cum, nil
+}
+
+// chaptersBySource reads a book's file chapters grouped by file and then by source, since
+// a file may briefly carry chapters from more than one source (podcast_url chapters beside
+// embedded ones, say) and the read shows one per file (preferredChapters).
+func (s *Store) chaptersBySource(ctx context.Context, bookItemID int64) (map[int64]map[string][]model.Chapter, error) {
+	rows, err := s.rdb().QueryContext(ctx,
+		`SELECT file_id, title, start_ms, end_ms, source FROM chapter
+		 WHERE book_item_id = ? AND file_id IS NOT NULL ORDER BY position, start_ms`, bookItemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bySource := map[int64]map[string][]model.Chapter{}
+	for rows.Next() {
+		var fid int64
+		var source string
+		var c model.Chapter
+		if err := rows.Scan(&fid, &c.Title, &c.FileStartMS, &c.FileEndMS, &source); err != nil {
+			return nil, err
+		}
+		if bySource[fid] == nil {
+			bySource[fid] = map[string][]model.Chapter{}
+		}
+		bySource[fid][source] = append(bySource[fid][source], c)
+	}
+	return bySource, rows.Err()
+}
+
+// chapterExtent is partExtentExpr over one file's rows as chaptersBySource groups them,
+// so the read takes a part's length from the very rows it shows: the furthest start or
+// end among the user's rows and the preferred derived source's.
+func chapterExtent(bySource map[string][]model.Chapter) int64 {
+	var ext int64
+	reach := func(chs []model.Chapter) {
+		for _, c := range chs {
+			ext = max(ext, c.FileStartMS, c.FileEndMS)
+		}
+	}
+	reach(bySource["user"])
+	derived := make(map[string][]model.Chapter, len(bySource))
+	for src, chs := range bySource {
+		if src != "user" {
+			derived[src] = chs
+		}
+	}
+	reach(preferredChapters(derived))
+	return ext
 }
 
 // fillOpenEnds gives each open-ended chapter the next chapter's start for its end, and
 // the last the total, so each chapter has a concrete [start, end) span. Starts are
 // distinct within a file (normalizeChapterStarts), so only a last chapter at the total
-// has an empty one.
+// has an empty one, which bookChapters reads as open.
 func fillOpenEnds(chs []model.Chapter, total int64) {
 	for i := range chs {
 		if chs[i].EndMS != 0 {
@@ -1633,23 +1681,24 @@ func (s *Store) Chapters(ctx context.Context, pid model.PID) ([]model.Chapter, e
 	return chs, err
 }
 
-// CurrentChapter returns the chapter whose book-timeline span contains positionMS
-// (the resume position), or the nearest preceding chapter. It returns nil when the
-// book has no chapters. positionMS is clamped into range.
+// CurrentChapter returns the chapter a book-timeline position (the resume position) is
+// in: the last chapter starting at or before it, so a position in a gap between two
+// chapters is in the one before, as a listener there last heard it, and a position at a
+// chapter's start is that chapter's (spanAt's rule). A position before the first chapter
+// names the first, and one past the end the last. It returns nil when the book has no
+// chapters.
 func (s *Store) CurrentChapter(ctx context.Context, pid model.PID, positionMS int64) (*model.Chapter, error) {
 	chs, err := s.Chapters(ctx, pid)
-	if err != nil {
+	if err != nil || len(chs) == 0 {
 		return nil, err
 	}
-	if len(chs) == 0 {
-		return nil, nil
-	}
+	at := 0
 	for i := range chs {
-		if positionMS < chs[i].EndMS {
-			return &chs[i], nil
+		if chs[i].StartMS <= positionMS {
+			at = i
 		}
 	}
-	return &chs[len(chs)-1], nil
+	return &chs[at], nil
 }
 
 // BooksInSeries returns the books of a series in sequence order (the zero-padded

@@ -87,7 +87,7 @@ func TestCountStaticPlaylistItems(t *testing.T) {
 	st, _, pids := countFixture(t)
 	ctx := context.Background()
 
-	pl, err := st.CreatePlaylist(ctx, "Mix", "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, "Mix", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestCountSmartPlaylistUnlimited(t *testing.T) {
 	ctx := context.Background()
 
 	rule := query.New(query.EntityItems).Where("artist", query.OpIs, "X").Build()
-	pl, err := st.CreatePlaylist(ctx, "All X", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "All X", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestCountSmartPlaylistLimitEvaluationOrder(t *testing.T) {
 		Where("artist", query.OpIs, "X").
 		OrderBy("title", false).
 		Limit(3).Build()
-	pl, err := st.CreatePlaylist(ctx, "First three", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "First three", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestCountSmartPlaylistOffsetEvaluationOrder(t *testing.T) {
 		Where("artist", query.OpIs, "X").
 		OrderBy("title", false).
 		Offset(4).Build()
-	pl, err := st.CreatePlaylist(ctx, "All but four", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "All but four", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestCountSmartPlaylistLimitModes(t *testing.T) {
 
 	// Count mode under the match set: min(10, 4).
 	count := base().OrderBy("title", false).Limit(4).Build()
-	countPL, err := st.CreatePlaylist(ctx, "Four", "", model.PlaylistSmart, "", &count)
+	countPL, err := st.CreatePlaylist(ctx, "Four", "", "", model.PlaylistSmart, "", &count)
 	if err != nil {
 		t.Fatalf("create count-limited: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestCountSmartPlaylistLimitModes(t *testing.T) {
 
 	// Count mode over the match set clamps to the matches, not the limit.
 	over := base().Where("genre", query.OpIs, "Rock").Limit(99).Build()
-	overPL, err := st.CreatePlaylist(ctx, "Ninety-nine", "", model.PlaylistSmart, "", &over)
+	overPL, err := st.CreatePlaylist(ctx, "Ninety-nine", "", "", model.PlaylistSmart, "", &over)
 	if err != nil {
 		t.Fatalf("create over-limited: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestCountSmartPlaylistLimitModes(t *testing.T) {
 	// Seeded random: min(n, limit) with a stable draw, so the hydrate-and-filter side
 	// of wantCount is comparable.
 	rnd := base().Limit(3).LimitBy(query.LimitRandom).Seed(42).Build()
-	rndPL, err := st.CreatePlaylist(ctx, "Three random", "", model.PlaylistSmart, "", &rnd)
+	rndPL, err := st.CreatePlaylist(ctx, "Three random", "", "", model.PlaylistSmart, "", &rnd)
 	if err != nil {
 		t.Fatalf("create random: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestCountSmartPlaylistLimitModes(t *testing.T) {
 	// A minutes budget accumulates row by row: ten one-minute tracks, so a
 	// four-minute budget fills with four.
 	budget := base().OrderBy("title", false).Limit(4).LimitBy(query.LimitMinutes).Build()
-	budgetPL, err := st.CreatePlaylist(ctx, "Four minutes", "", model.PlaylistSmart, "", &budget)
+	budgetPL, err := st.CreatePlaylist(ctx, "Four minutes", "", "", model.PlaylistSmart, "", &budget)
 	if err != nil {
 		t.Fatalf("create budget: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestCountPlaylistItemsPerUser(t *testing.T) {
 	}
 
 	rule := query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build()
-	pl, err := st.CreatePlaylist(ctx, "Faves", "", model.PlaylistSmart, model.VisibilityPrivate, &rule)
+	pl, err := st.CreatePlaylist(ctx, "Faves", "", "", model.PlaylistSmart, model.VisibilityPrivate, &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestCountEvaluatedPlaylistChunkBoundary(t *testing.T) {
 		Where("artist", query.OpIs, "X").
 		OrderBy("title", false).
 		Offset(1).Build()
-	pl, err := st.CreatePlaylist(ctx, "All but one", "", model.PlaylistSmart, "", &rule)
+	pl, err := st.CreatePlaylist(ctx, "All but one", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestCountPlaylistItemsMatrix(t *testing.T) {
 	st, _, pids := countFixture(t)
 	ctx := context.Background()
 
-	static, err := st.CreatePlaylist(ctx, "Static", "", model.PlaylistStatic, "", nil)
+	static, err := st.CreatePlaylist(ctx, "Static", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create static: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestCountPlaylistItemsMatrix(t *testing.T) {
 	}
 	mk := func(name string, q query.Query) model.PID {
 		t.Helper()
-		pid, err := st.CreatePlaylist(ctx, name, "", model.PlaylistSmart, "", &q)
+		pid, err := st.CreatePlaylist(ctx, name, "", "", model.PlaylistSmart, "", &q)
 		if err != nil {
 			t.Fatalf("create %s: %v", name, err)
 		}
@@ -339,7 +339,7 @@ func TestCountStaticPlaylistDrivesFromPlaylist(t *testing.T) {
 	t.Parallel()
 	st, _, pids := countFixture(t)
 	ctx := context.Background()
-	pl, err := st.CreatePlaylist(ctx, "Mix", "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, "Mix", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

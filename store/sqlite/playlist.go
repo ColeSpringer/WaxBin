@@ -8,6 +8,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
@@ -16,11 +17,12 @@ import (
 )
 
 // CreatePlaylist creates a static or smart playlist owned by ownerPID (empty =
-// default user). A smart playlist requires a rule, stored as a versioned query
-// document; a static one must not carry one.
-func (s *Store) CreatePlaylist(ctx context.Context, name string, ownerPID model.PID, kind model.PlaylistKind, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error) {
+// default user), with a description model.CheckPlaylistDescription accepts. A smart
+// playlist requires a rule, stored as a versioned query document; a static one must
+// not carry one.
+func (s *Store) CreatePlaylist(ctx context.Context, name, description string, ownerPID model.PID, kind model.PlaylistKind, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error) {
 	const op = "store.CreatePlaylist"
-	row, err := newPlaylistRow(op, name, kind, vis, rule)
+	row, err := newPlaylistRow(op, name, description, kind, vis, rule)
 	if err != nil {
 		return "", err
 	}
@@ -36,9 +38,9 @@ func (s *Store) CreatePlaylist(ctx context.Context, name string, ownerPID model.
 // CreatePlaylistWithItems creates a static playlist holding itemPIDs in order, the
 // playlist and its entries in one write, so an entry naming no item (CodeNotFound)
 // leaves no playlist behind. It emits the one create delta.
-func (s *Store) CreatePlaylistWithItems(ctx context.Context, name string, ownerPID model.PID, vis model.PlaylistVisibility, itemPIDs []model.PID) (model.PID, error) {
+func (s *Store) CreatePlaylistWithItems(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility, itemPIDs []model.PID) (model.PID, error) {
 	const op = "store.CreatePlaylistWithItems"
-	row, err := newPlaylistRow(op, name, model.PlaylistStatic, vis, nil)
+	row, err := newPlaylistRow(op, name, description, model.PlaylistStatic, vis, nil)
 	if err != nil {
 		return "", err
 	}
@@ -56,17 +58,22 @@ func (s *Store) CreatePlaylistWithItems(ctx context.Context, name string, ownerP
 
 // playlistRow is a validated playlist ready to insert.
 type playlistRow struct {
-	pid  model.PID
-	name string
-	kind model.PlaylistKind
-	vis  model.PlaylistVisibility
-	rule any // the marshaled smart rule, nil for a static playlist
+	pid         model.PID
+	name        string
+	description string
+	kind        model.PlaylistKind
+	vis         model.PlaylistVisibility
+	rule        any // the marshaled smart rule, nil for a static playlist
 }
 
-func newPlaylistRow(op, name string, kind model.PlaylistKind, vis model.PlaylistVisibility, rule *query.Query) (playlistRow, error) {
+func newPlaylistRow(op, name, description string, kind model.PlaylistKind, vis model.PlaylistVisibility, rule *query.Query) (playlistRow, error) {
 	row := playlistRow{pid: model.NewPID(), name: strings.TrimSpace(name), kind: kind, vis: vis}
 	if row.name == "" {
 		return row, waxerr.New(waxerr.CodeInvalid, op, "playlist name is required")
+	}
+	var err error
+	if row.description, err = model.CheckPlaylistDescription(description); err != nil {
+		return row, err
 	}
 	if !kind.Valid() {
 		return row, waxerr.New(waxerr.CodeInvalid, op, "unknown playlist kind: "+string(kind))
@@ -106,9 +113,9 @@ func (row playlistRow) insertTx(ctx context.Context, tx *sql.Tx, op string, owne
 	}
 	now := nowNS()
 	r, err := tx.ExecContext(ctx,
-		`INSERT INTO playlist(pid, name, owner_user_id, kind, visibility, rule, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		string(row.pid), row.name, userID, string(row.kind), string(row.vis), row.rule, now, now)
+		`INSERT INTO playlist(pid, name, description, owner_user_id, kind, visibility, rule, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		string(row.pid), row.name, row.description, userID, string(row.kind), string(row.vis), row.rule, now, now)
 	if err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -134,7 +141,7 @@ func insertPlaylistEntriesTx(ctx context.Context, tx *sql.Tx, op string, plID in
 	return nil
 }
 
-const playlistSelect = `SELECT p.pid, p.name, u.pid, u.name, p.kind, p.visibility, p.rule,
+const playlistSelect = `SELECT p.pid, p.name, p.description, u.pid, u.name, p.kind, p.visibility, p.rule,
 	p.created_at, p.updated_at,
 	(SELECT COUNT(*) FROM playlist_item pli WHERE pli.playlist_id = p.id),
 	EXISTS(SELECT 1 FROM art_map am
@@ -145,7 +152,7 @@ func scanPlaylist(sc rowScanner) (*model.Playlist, error) {
 	var p model.Playlist
 	var kind, vis string
 	var rule sql.NullString
-	if err := sc.Scan(&p.PID, &p.Name, &p.OwnerPID, &p.OwnerName, &kind, &vis, &rule,
+	if err := sc.Scan(&p.PID, &p.Name, &p.Description, &p.OwnerPID, &p.OwnerName, &kind, &vis, &rule,
 		&p.CreatedAt, &p.UpdatedAt, &p.ItemCount, &p.HasArt); err != nil {
 		return nil, err
 	}
@@ -234,6 +241,17 @@ func (s *Store) RenamePlaylist(ctx context.Context, pid model.PID, name string) 
 		return waxerr.New(waxerr.CodeInvalid, op, "playlist name is required")
 	}
 	return s.playlistUpdate(ctx, op, pid, "UPDATE playlist SET name = ?, updated_at = ? WHERE pid = ?", name)
+}
+
+// SetPlaylistDescription replaces a playlist's description as model.CheckPlaylistDescription
+// stores it; an empty one clears it.
+func (s *Store) SetPlaylistDescription(ctx context.Context, pid model.PID, description string) error {
+	const op = "store.SetPlaylistDescription"
+	description, err := model.CheckPlaylistDescription(description)
+	if err != nil {
+		return err
+	}
+	return s.playlistUpdate(ctx, op, pid, "UPDATE playlist SET description = ?, updated_at = ? WHERE pid = ?", description)
 }
 
 // SetPlaylistVisibility changes who can see a playlist.
@@ -899,49 +917,77 @@ func (h *entryHolders) settleTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// maxPathCandidates bounds the items a relative M3U8 entry may name: past it the entry
-// names nothing, since no label could pick among so many.
-const maxPathCandidates = 100
-
-// ItemsByPlaylistPath returns the cataloged items an M3U8 entry's path names, through
-// any of their files: a copy's path names its item, a later book part's path its book,
-// and a cue rip's file every track carved from it. An absolute entry is matched
-// against the raw path using the UNIQUE path index; that is the round-trip case for
-// WaxBin exports, where display-path bytes are the stored path. A relative entry,
-// common in playlists authored by other tools, matches the files whose display path
-// ends with it at a separator, so "b/x.mp3" does not match "prefix/ab/x.mp3". Choosing
-// among several items is the caller's; an entry that names none returns none.
-func (s *Store) ItemsByPlaylistPath(ctx context.Context, p string) ([]*model.ItemView, error) {
-	const op = "store.ItemsByPlaylistPath"
-	// Normalize separators and fold away "." / redundant separators so a dotted entry
-	// like "./Artist/Track.mp3" or "a/./b.mp3" matches the stored path.
-	clean := filepath.Clean(filepath.FromSlash(p))
-	items, err := s.itemsBehindFiles(ctx, op, "fx.path = ?", []byte(clean), 0)
-	if err != nil || len(items) > 0 || filepath.IsAbs(clean) {
-		return items, err
+// ItemsByPlaylistPaths returns what each M3U8 path names: the cataloged items behind the
+// files it names, through any edge, so a copy's path names its item, a later book part's
+// path its book, and a cue rip's file every track carved from it. An absolute path is
+// matched against the raw stored path, which is the round trip for WaxBin's exports, whose
+// display-path bytes are the stored path. A relative path, common in playlists other tools
+// write, names the files whose display path ends with it at a separator, so "b/x.mp3" does
+// not match "prefix/ab/x.mp3"; it is compared as LIKE compares (ASCII letters in either
+// case), seeking the file-name index first. Each path is cleaned before it is matched
+// ("./a/x.mp3" and "a/./x.mp3" name a/x.mp3) and answered under the key it was given;
+// where backslashes are no separator, a path naming nothing is read again with them as
+// separators, as a playlist written on Windows means them. A
+// path naming more than limit items answers Overflow with no items, since a cut list
+// could leave a caller one wrong item to pick. The lookups share no snapshot.
+func (s *Store) ItemsByPlaylistPaths(ctx context.Context, paths []string, limit int) (map[string]model.PathCandidates, error) {
+	const op = "store.ItemsByPlaylistPaths"
+	if limit < 1 {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "the limit must be positive")
 	}
-	// A pattern past SQLite's LIKE limit names no path a file can have.
-	pattern := "%" + query.LikeEscape(string(filepath.Separator)+clean)
-	if len(pattern) > query.MaxLikePatternBytes {
-		return nil, nil
+	out := make(map[string]model.PathCandidates, len(paths))
+	for _, p := range paths {
+		if _, done := out[p]; done {
+			continue
+		}
+		items, err := s.itemsBehindPath(ctx, op, p, limit+1)
+		if err == nil && len(items) == 0 && filepath.Separator == '/' && strings.Contains(p, `\`) {
+			// A line written on Windows splits its folders with backslashes, which a
+			// name here may hold, so it is read that way only once it names nothing.
+			items, err = s.itemsBehindPath(ctx, op, strings.ReplaceAll(p, `\`, "/"), limit+1)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(items) > limit {
+			out[p] = model.PathCandidates{Overflow: true}
+		} else {
+			out[p] = model.PathCandidates{Items: items}
+		}
 	}
-	items, err = s.itemsBehindFiles(ctx, op, `fx.display_path LIKE ? ESCAPE '\'`, pattern, maxPathCandidates+1)
-	if err != nil || len(items) > maxPathCandidates {
-		return nil, err
-	}
-	return items, nil
+	return out, nil
 }
 
-// itemsBehindFiles reads the items with an edge of any role to the files cond selects.
-func (s *Store) itemsBehindFiles(ctx context.Context, op, cond string, arg any, limit int) ([]*model.ItemView, error) {
-	q := itemSelect + ` WHERE pi.id IN (SELECT ie.item_id FROM item_file ie
-		JOIN file fx ON fx.id = ie.file_id WHERE ` + cond + `) ORDER BY pi.id`
-	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
+// itemsBehindPath reads at most fetch of the items one playlist path names.
+func (s *Store) itemsBehindPath(ctx context.Context, op, p string, fetch int) ([]*model.ItemView, error) {
+	clean := filepath.Clean(filepath.FromSlash(p))
+	var args []any
+	if filepath.IsAbs(clean) {
+		args = []any{[]byte(clean)}
+	} else {
+		// A pattern past SQLite's LIKE limit names no path a file can have.
+		pattern := "%" + query.LikeEscape(string(filepath.Separator)+clean)
+		if len(pattern) > query.MaxLikePatternBytes {
+			return nil, nil
+		}
+		args = []any{clean[strings.LastIndexAny(clean, `/\`)+1:], pattern}
 	}
-	rows, err := s.rdb().QueryContext(ctx, q, arg)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), playlistPathQ(len(args) == 2, fetch), args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return collectItems(rows, op)
+}
+
+// playlistPathQ is the lookup of the items one playlist path names: an absolute path by
+// the path index, a relative one by its last segment, cut at either separator as the
+// file.name column is, then the suffix. The fetch is written into the text, since a bound
+// LIMIT would plan the cached statement again on every run.
+func playlistPathQ(relative bool, fetch int) string {
+	cond := "fx.path = ?"
+	if relative {
+		cond = `fx.name = ? COLLATE NOCASE AND fx.display_path LIKE ? ESCAPE '\'`
+	}
+	return itemSelect + ` WHERE pi.id IN (SELECT ie.item_id FROM item_file ie
+		JOIN file fx ON fx.id = ie.file_id WHERE ` + cond + `) ORDER BY pi.id LIMIT ` + strconv.Itoa(fetch)
 }

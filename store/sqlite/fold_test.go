@@ -75,7 +75,7 @@ func TestFoldMovesPlayStateIntoTheBook(t *testing.T) {
 	lists := map[string][]model.PID{"P1": {t2, t3}, "P2": {t1, t3}}
 	listPIDs := map[string]model.PID{}
 	for name, members := range lists {
-		pl, err := st.CreatePlaylist(ctx, name, "", model.PlaylistStatic, model.VisibilityPrivate, nil)
+		pl, err := st.CreatePlaylist(ctx, name, "", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
 		if err != nil {
 			t.Fatalf("playlist: %v", err)
 		}

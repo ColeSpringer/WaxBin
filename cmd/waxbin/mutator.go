@@ -401,7 +401,7 @@ func (m *mutator) PlayState(ctx context.Context, userPID, itemPID model.PID) (*m
 }
 
 // PlaylistCreate creates a static playlist, or a smart one when rule is non-nil.
-func (m *mutator) PlaylistCreate(ctx context.Context, name string, owner model.PID, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error) {
+func (m *mutator) PlaylistCreate(ctx context.Context, name, description string, owner model.PID, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error) {
 	if m.px != nil {
 		var doc []byte
 		if rule != nil {
@@ -410,12 +410,12 @@ func (m *mutator) PlaylistCreate(ctx context.Context, name string, owner model.P
 				return "", err
 			}
 		}
-		return m.px.PlaylistCreate(ctx, name, owner, string(vis), doc)
+		return m.px.PlaylistCreate(ctx, name, description, owner, string(vis), doc)
 	}
 	if rule != nil {
-		return m.lib.Playlists().CreateSmart(ctx, name, owner, vis, *rule)
+		return m.lib.Playlists().CreateSmart(ctx, name, description, owner, vis, *rule)
 	}
-	return m.lib.Playlists().CreateStatic(ctx, name, owner, vis)
+	return m.lib.Playlists().CreateStatic(ctx, name, description, owner, vis)
 }
 
 func (m *mutator) PlaylistDelete(ctx context.Context, playlistPID model.PID) error {
@@ -432,12 +432,19 @@ func (m *mutator) PlaylistRename(ctx context.Context, playlistPID model.PID, nam
 	return m.lib.Playlists().Rename(ctx, playlistPID, name)
 }
 
+func (m *mutator) PlaylistSetDescription(ctx context.Context, playlistPID model.PID, description string) error {
+	if m.px != nil {
+		return m.px.PlaylistSetDescription(ctx, playlistPID, description)
+	}
+	return m.lib.Playlists().SetDescription(ctx, playlistPID, description)
+}
+
 // PlaylistImportM3U8 imports an M3U8 document as a new static playlist. The
 // document is read whole rather than streamed: the proxied form has to put it in
 // a frame anyway, and a playlist file is small.
-func (m *mutator) PlaylistImportM3U8(ctx context.Context, name string, owner model.PID, vis model.PlaylistVisibility, doc []byte) (*playlist.ImportResult, error) {
+func (m *mutator) PlaylistImportM3U8(ctx context.Context, name, description string, owner model.PID, vis model.PlaylistVisibility, doc []byte) (*playlist.ImportResult, error) {
 	if m.px != nil {
-		res, err := m.px.PlaylistImportM3U8(ctx, name, owner, string(vis), doc)
+		res, err := m.px.PlaylistImportM3U8(ctx, name, description, owner, string(vis), doc)
 		if err != nil {
 			return nil, err
 		}
@@ -446,7 +453,7 @@ func (m *mutator) PlaylistImportM3U8(ctx context.Context, name string, owner mod
 			Unmatched: res.Unmatched, UnmatchedPaths: res.UnmatchedPaths,
 		}, nil
 	}
-	return m.lib.Playlists().ImportM3U8(ctx, name, owner, vis, bytes.NewReader(doc))
+	return m.lib.Playlists().ImportM3U8(ctx, name, description, owner, vis, bytes.NewReader(doc))
 }
 
 func (m *mutator) PlaylistAdd(ctx context.Context, playlistPID model.PID, itemPIDs ...model.PID) error {

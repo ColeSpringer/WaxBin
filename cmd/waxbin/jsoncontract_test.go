@@ -102,17 +102,17 @@ func newJSONFixture(t *testing.T) *jsonFixture {
 		t.Fatal(err)
 	}
 	writeAsset(t, filepath.Join(fx.assets, "rule.json"), doc)
-	if fx.smart, err = lib.Playlists().CreateSmart(ctx, "Smart", "", "", rule); err != nil {
+	if fx.smart, err = lib.Playlists().CreateSmart(ctx, "Smart", "", "", "", rule); err != nil {
 		t.Fatalf("smart: %v", err)
 	}
-	if fx.mix, err = lib.Playlists().CreateStatic(ctx, "Mix", "", ""); err != nil {
+	if fx.mix, err = lib.Playlists().CreateStatic(ctx, "Mix", "", "", ""); err != nil {
 		t.Fatalf("mix: %v", err)
 	}
 	if err := lib.Playlists().Set(ctx, fx.mix, []model.PID{fx.one, fx.two, fx.one}); err != nil {
 		t.Fatalf("mix items: %v", err)
 	}
 	var m3u bytes.Buffer
-	if err := lib.Playlists().ExportM3U8(ctx, fx.mix, &m3u, ""); err != nil {
+	if _, err := lib.Playlists().ExportM3U8(ctx, fx.mix, &m3u, ""); err != nil {
 		t.Fatalf("m3u8: %v", err)
 	}
 	writeAsset(t, filepath.Join(fx.assets, "mix.m3u8"), m3u.Bytes())
@@ -295,6 +295,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"playlist", "add", p(fx.mix), p(fx.three)}},
 		{args: []string{"playlist", "remove", p(fx.mix), "--index", "0"}},
 		{args: []string{"playlist", "rename", p(fx.mix), "Renamed"}},
+		{args: []string{"playlist", "set-description", p(fx.mix), "For the drive"}},
 		{args: []string{"playlist", "set-owner", p(fx.mix), p(fx.bob)}},
 		{args: []string{"playlist", "import", "Imported", "--file", asset("mix.m3u8")}},
 		{args: []string{"smartplaylist", "create", "Smart Two", "--rule", asset("rule.json")}},

@@ -272,7 +272,7 @@ func playlistFacetFixture(t *testing.T) (st *Store, bob *model.User, mine, bobSh
 	}
 	mkList := func(name string, owner model.PID, vis model.PlaylistVisibility, items ...model.PID) model.PID {
 		t.Helper()
-		pid, err := st.CreatePlaylist(ctx, name, owner, model.PlaylistStatic, vis, nil)
+		pid, err := st.CreatePlaylist(ctx, name, "", owner, model.PlaylistStatic, vis, nil)
 		if err != nil {
 			t.Fatalf("create %s: %v", name, err)
 		}
@@ -355,7 +355,7 @@ func TestFacetByPlaylistExcludesSmart(t *testing.T) {
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"})
 	rule := query.New(query.EntityItems).Where("artist", query.OpIs, "X").Build()
-	if _, err := st.CreatePlaylist(ctx, "Smart", "", model.PlaylistSmart, "", &rule); err != nil {
+	if _, err := st.CreatePlaylist(ctx, "Smart", "", "", model.PlaylistSmart, "", &rule); err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
 
@@ -383,7 +383,7 @@ func TestFacetByPlaylistWithUserFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	pl, err := st.CreatePlaylist(ctx, "Bobs", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
+	pl, err := st.CreatePlaylist(ctx, "Bobs", "", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -586,7 +586,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	}
 	// The playlist dimension needs a default-user playlist or its loop iteration
 	// asserts nothing.
-	pl, err := st.CreatePlaylist(ctx, "Mix", "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, "Mix", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}

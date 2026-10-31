@@ -24,7 +24,10 @@ type fakeStore struct {
 	owners    map[model.PID]model.PID
 	failSet   error
 	shared    map[string][]*model.ItemView // paths behind several items, a cue rip's file
-	lookups   int
+	lookups   int                          // paths looked up
+	calls     int                          // lookup calls
+	asked     []string
+	limits    []int // each call's limit
 	playlists map[model.PID]*model.Playlist
 }
 
@@ -48,7 +51,7 @@ func (f *fakeStore) add(path string, pid model.PID, title, artist string) {
 	f.byPath[path] = &model.ItemView{PID: pid, Title: title, Artist: artist, DisplayPath: path, DurationMS: 200000}
 }
 
-func (f *fakeStore) CreatePlaylist(_ context.Context, name string, _ model.PID, kind model.PlaylistKind, _ model.PlaylistVisibility, _ *query.Query) (model.PID, error) {
+func (f *fakeStore) CreatePlaylist(_ context.Context, name, _ string, _ model.PID, kind model.PlaylistKind, _ model.PlaylistVisibility, _ *query.Query) (model.PID, error) {
 	f.nextID++
 	pid := model.PID("pl" + string(rune('0'+f.nextID)))
 	f.createdAs[pid] = kind
@@ -56,23 +59,20 @@ func (f *fakeStore) CreatePlaylist(_ context.Context, name string, _ model.PID, 
 	return pid, nil
 }
 
-func (f *fakeStore) CreatePlaylistWithItems(ctx context.Context, name string, owner model.PID, vis model.PlaylistVisibility, itemPIDs []model.PID) (model.PID, error) {
+func (f *fakeStore) CreatePlaylistWithItems(ctx context.Context, name, description string, owner model.PID, vis model.PlaylistVisibility, itemPIDs []model.PID) (model.PID, error) {
 	if f.failSet != nil {
 		return "", f.failSet
 	}
-	pid, _ := f.CreatePlaylist(ctx, name, owner, model.PlaylistStatic, vis, nil)
+	pid, _ := f.CreatePlaylist(ctx, name, description, owner, model.PlaylistStatic, vis, nil)
 	f.members[pid] = append([]model.PID(nil), itemPIDs...)
 	return pid, nil
 }
 
-func (f *fakeStore) PlaylistItems(_ context.Context, pid model.PID, _ model.PID) ([]*model.ItemView, error) {
+func (f *fakeStore) PlaylistItems(ctx context.Context, pid model.PID, _ model.PID) ([]*model.ItemView, error) {
 	var out []*model.ItemView
 	for _, ip := range f.members[pid] {
-		for _, it := range f.byPath {
-			if it.PID == ip {
-				out = append(out, it)
-			}
-		}
+		items, _ := f.ItemsByPIDs(ctx, []model.PID{ip})
+		out = append(out, items...)
 	}
 	return out, nil
 }
@@ -98,15 +98,48 @@ func (f *fakeStore) UserByPID(_ context.Context, pid model.PID) (*model.User, er
 	return nil, waxerr.New(waxerr.CodeNotFound, "fake", "no such user")
 }
 
-func (f *fakeStore) ItemsByPlaylistPath(_ context.Context, path string) ([]*model.ItemView, error) {
-	f.lookups++
-	if items, ok := f.shared[path]; ok {
-		return items, nil
+func (f *fakeStore) ItemsByPlaylistPaths(_ context.Context, paths []string, limit int) (map[string]model.PathCandidates, error) {
+	f.calls++
+	f.limits = append(f.limits, limit)
+	out := map[string]model.PathCandidates{}
+	for _, path := range paths {
+		f.lookups++
+		f.asked = append(f.asked, path)
+		items := f.shared[path]
+		if it, ok := f.byPath[path]; ok && items == nil {
+			items = []*model.ItemView{it}
+		}
+		if len(items) > limit {
+			out[path] = model.PathCandidates{Overflow: true}
+			continue
+		}
+		out[path] = model.PathCandidates{Items: items}
 	}
-	if it, ok := f.byPath[path]; ok {
-		return []*model.ItemView{it}, nil
+	return out, nil
+}
+
+// ItemsByPIDs reads as the store's does: input order, unknown pids skipped, a repeat
+// collapsed to its first place.
+func (f *fakeStore) ItemsByPIDs(_ context.Context, pids []model.PID) ([]*model.ItemView, error) {
+	var out []*model.ItemView
+	seen := map[model.PID]bool{}
+	for _, pid := range pids {
+		for _, it := range f.byPath {
+			if it.PID == pid && !seen[pid] {
+				seen[pid] = true
+				out = append(out, it)
+			}
+		}
+		for _, items := range f.shared {
+			for _, it := range items {
+				if it.PID == pid && !seen[pid] {
+					seen[pid] = true
+					out = append(out, it)
+				}
+			}
+		}
 	}
-	return nil, nil
+	return out, nil
 }
 
 func (f *fakeStore) PlaylistByPID(_ context.Context, pid model.PID) (*model.Playlist, error) {
@@ -135,6 +168,9 @@ func (f *fakeStore) ListPlaylists(context.Context, model.PID) ([]*model.Playlist
 }
 func (f *fakeStore) DeletePlaylist(context.Context, model.PID) error         { return nil }
 func (f *fakeStore) RenamePlaylist(context.Context, model.PID, string) error { return nil }
+func (f *fakeStore) SetPlaylistDescription(context.Context, model.PID, string) error {
+	return nil
+}
 func (f *fakeStore) SetPlaylistVisibility(context.Context, model.PID, model.PlaylistVisibility) error {
 	return nil
 }
@@ -234,13 +270,13 @@ func TestM3U8RoundTrip(t *testing.T) {
 	svc := New(fs)
 	ctx := context.Background()
 
-	src, _ := svc.CreateStatic(ctx, "src", "", "")
+	src, _ := svc.CreateStatic(ctx, "src", "", "", "")
 	if err := svc.Set(ctx, src, []model.PID{"ia", "ib"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
 	var buf bytes.Buffer
-	if err := svc.ExportM3U8(ctx, src, &buf, ""); err != nil {
+	if _, err := svc.ExportM3U8(ctx, src, &buf, ""); err != nil {
 		t.Fatalf("export: %v", err)
 	}
 	text := buf.String()
@@ -252,7 +288,7 @@ func TestM3U8RoundTrip(t *testing.T) {
 	}
 
 	// Re-import the exported document: both items match by path.
-	res, err := svc.ImportM3U8(ctx, "copy", "", "", strings.NewReader(text))
+	res, err := svc.ImportM3U8(ctx, "copy", "", "", "", strings.NewReader(text))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -270,11 +306,11 @@ func TestExportM3U8RefusesNewlinePath(t *testing.T) {
 	fs.add("/music/a\nb.flac", "ia", "Title", "Artist") // path with an embedded newline
 	svc := New(fs)
 	ctx := context.Background()
-	src, _ := svc.CreateStatic(ctx, "s", "", "")
+	src, _ := svc.CreateStatic(ctx, "s", "", "", "")
 	if err := svc.Set(ctx, src, []model.PID{"ia"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	if err := svc.ExportM3U8(ctx, src, &bytes.Buffer{}, ""); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := svc.ExportM3U8(ctx, src, &bytes.Buffer{}, ""); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("exporting a newline path err = %v, want CodeInvalid (refuse, not corrupt)", err)
 	}
 }
@@ -284,12 +320,12 @@ func TestExportM3U8FoldsMetadataNewlines(t *testing.T) {
 	fs.add("/music/a.flac", "ia", "Title\nWith\nBreaks", "The\rArtist")
 	svc := New(fs)
 	ctx := context.Background()
-	src, _ := svc.CreateStatic(ctx, "s", "", "")
+	src, _ := svc.CreateStatic(ctx, "s", "", "", "")
 	if err := svc.Set(ctx, src, []model.PID{"ia"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	var buf bytes.Buffer
-	if err := svc.ExportM3U8(ctx, src, &buf, ""); err != nil {
+	if _, err := svc.ExportM3U8(ctx, src, &buf, ""); err != nil {
 		t.Fatalf("export: %v", err)
 	}
 	// The #EXTINF directive must stay one line: title/artist newlines folded to spaces.
@@ -388,7 +424,7 @@ func TestImportM3U8MergesARunOfOneItemsFiles(t *testing.T) {
 	if want := []bool{false, true, true, false, false, false, false}; fmt.Sprint(merged) != fmt.Sprint(want) {
 		t.Errorf("merged = %v, want %v", merged, want)
 	}
-	res, err := svc.ImportM3U8(ctx, "p", "", "", strings.NewReader(doc))
+	res, err := svc.ImportM3U8(ctx, "p", "", "", "", strings.NewReader(doc))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -456,17 +492,17 @@ func TestImportM3U8ChecksBeforeResolving(t *testing.T) {
 		{"p", "", "bogus", waxerr.CodeInvalid},
 		{"p", "nobody", "", waxerr.CodeNotFound},
 	} {
-		if err := svc.CheckImport(ctx, c.name, c.owner, c.vis); !waxerr.Is(err, c.code) {
+		if err := svc.CheckImport(ctx, c.name, "", c.owner, c.vis); !waxerr.Is(err, c.code) {
 			t.Errorf("check %+v: err = %v, want %s", c, err, c.code)
 		}
-		if _, err := svc.ImportM3U8(ctx, c.name, c.owner, c.vis, strings.NewReader("/music/a.flac\n")); !waxerr.Is(err, c.code) {
+		if _, err := svc.ImportM3U8(ctx, c.name, "", c.owner, c.vis, strings.NewReader("/music/a.flac\n")); !waxerr.Is(err, c.code) {
 			t.Errorf("import %+v: err = %v, want %s", c, err, c.code)
 		}
 	}
 	if fs.lookups != 0 {
 		t.Errorf("refused imports looked up %d entries, want none", fs.lookups)
 	}
-	if err := svc.CheckImport(ctx, "p", "bob", model.VisibilityShared); err != nil {
+	if err := svc.CheckImport(ctx, "p", "", "bob", model.VisibilityShared); err != nil {
 		t.Errorf("check of a valid import: %v", err)
 	}
 }
@@ -478,7 +514,7 @@ func TestImportM3U8CreatesInOneStep(t *testing.T) {
 	fs := newFakeStore()
 	fs.add("/music/a.flac", "ia", "A", "X")
 	fs.failSet = waxerr.New(waxerr.CodeNotFound, "fake", "no such item: ia")
-	_, err := New(fs).ImportM3U8(context.Background(), "p", "", "", strings.NewReader("/music/a.flac\n"))
+	_, err := New(fs).ImportM3U8(context.Background(), "p", "", "", "", strings.NewReader("/music/a.flac\n"))
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("import err = %v, want the store's CodeNotFound", err)
 	}
@@ -494,7 +530,7 @@ func TestM3U8ImportReportsUnmatched(t *testing.T) {
 	ctx := context.Background()
 
 	doc := "#EXTM3U\n#EXTINF:200,X - A\n/music/a.flac\n/music/missing.flac\n"
-	res, err := svc.ImportM3U8(ctx, "p", "", "", strings.NewReader(doc))
+	res, err := svc.ImportM3U8(ctx, "p", "", "", "", strings.NewReader(doc))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -527,5 +563,247 @@ func TestServiceReadsUserState(t *testing.T) {
 	}
 	if _, err := svc.ReadsUserState(ctx, "nope"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("ReadsUserState(unknown) = %v, want CodeNotFound", err)
+	}
+}
+
+// TestResolveM3U8LooksEachDistinctPathUpOnce: a document is resolved in one lookup that
+// names each distinct path once, its first spelling standing for the ones that clean to
+// it, and every line is still answered.
+func TestResolveM3U8LooksEachDistinctPathUpOnce(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	fs.add("a.flac", "ia", "A", "X")
+	fs.add("b.flac", "ib", "B", "X")
+	doc := "a.flac\nb.flac\n./a.flac\na.flac\nmissing.flac\nx/../b.flac\nmissing.flac\n"
+	matches, err := New(fs).ResolveM3U8(context.Background(), strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if fs.calls != 1 || fmt.Sprint(fs.asked) != "[a.flac b.flac missing.flac]" {
+		t.Errorf("lookups = %d calls of %v, want one of [a.flac b.flac missing.flac]", fs.calls, fs.asked)
+	}
+	var got []string
+	for _, m := range matches {
+		pid := "-"
+		if m.Item != nil {
+			pid = string(m.Item.PID)
+		}
+		got = append(got, pid)
+	}
+	if strings.Join(got, " ") != "ia ib ia ia - ib -" {
+		t.Errorf("matches = %v, want ia ib ia ia - ib -", got)
+	}
+	if _, err := New(fs).ResolveM3U8(context.Background(), strings.NewReader("#EXTM3U\n")); err != nil || fs.calls != 1 {
+		t.Errorf("a document with no paths: err %v, %d calls, want no lookup", err, fs.calls)
+	}
+}
+
+// TestResolveM3U8AcceptPicksTheOnlyVisibleCandidate: a path naming 150 items the caller
+// may not hold and one it may names that one, while unscoped it names too many to pick
+// from and names nothing; an import scoped the same way lists it.
+func TestResolveM3U8AcceptPicksTheOnlyVisibleCandidate(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	var items []*model.ItemView
+	for i := range 150 {
+		items = append(items, &model.ItemView{PID: model.PID(fmt.Sprintf("hidden%03d", i)), Title: "Song"})
+	}
+	fs.shared["song.flac"] = append(items, &model.ItemView{PID: "mine", Title: "Song"})
+	svc := New(fs)
+	ctx := context.Background()
+	mine := ResolveOptions{Accept: func(v *model.ItemView) bool { return v.PID == "mine" }}
+	if matches, err := svc.ResolveM3U8(ctx, strings.NewReader("song.flac\n")); err != nil || matches[0].Item != nil {
+		t.Errorf("unscoped = %+v (err %v), want no item among 151", matches, err)
+	}
+	matches, err := svc.ResolveM3U8With(ctx, strings.NewReader("song.flac\n"), mine)
+	if err != nil || len(matches) != 1 || matches[0].Item == nil || matches[0].Item.PID != "mine" {
+		t.Errorf("scoped = %+v (err %v), want the one visible item", matches, err)
+	}
+	res, err := svc.ImportM3U8With(ctx, "Mine", "", "", "", strings.NewReader("song.flac\n"), mine)
+	if err != nil || res.Matched != 1 || fmt.Sprint(fs.members[res.PlaylistPID]) != "[mine]" {
+		t.Errorf("scoped import = %+v (err %v), want the one visible item listed", res, err)
+	}
+}
+
+// TestResolveM3U8AnOverflowedPathNamesNothing: a path the lookup could not read whole
+// names nothing, even when the part it read holds one item the caller may hold, since
+// what it did not read could hold another.
+func TestResolveM3U8AnOverflowedPathNamesNothing(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	var items []*model.ItemView
+	for i := range 1001 {
+		items = append(items, &model.ItemView{PID: model.PID(fmt.Sprintf("i%04d", i)), Title: "Song"})
+	}
+	fs.shared["01.flac"] = items
+	fs.add("other.flac", "io", "Other", "X")
+	only := ResolveOptions{Accept: func(v *model.ItemView) bool { return v.PID == "i0000" || v.PID == "io" }}
+	matches, err := New(fs).ResolveM3U8With(context.Background(), strings.NewReader("01.flac\nother.flac\n"), only)
+	if err != nil || len(matches) != 2 || matches[0].Item != nil || matches[1].Item == nil {
+		t.Errorf("matches = %+v (err %v), want the overflowed path unmatched and the other matched", matches, err)
+	}
+}
+
+// TestResolveM3U8MergedRunsStillMerge: a book listed by its parts merges into one entry
+// when each part's path is looked up once, a part path that also names a copy the caller
+// may not hold still names the book, and a part given again in another spelling is the
+// listener's repeat, a new entry the next part merges into.
+func TestResolveM3U8MergedRunsStillMerge(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	book := &model.ItemView{PID: "bk", Title: "Book", Artist: "Author", DurationMS: 200000}
+	for _, part := range []string{"/b/p1.m4b", "/b/p3.m4b"} {
+		fs.shared[part] = []*model.ItemView{book}
+	}
+	fs.shared["/b/p2.m4b"] = []*model.ItemView{book, {PID: "theirs", Title: "Book", Artist: "Author"}}
+	doc := "/b/p1.m4b\n/b/p2.m4b\n/b/p3.m4b\n/b/./p3.m4b\n/b/p1.m4b\n"
+	mine := ResolveOptions{Accept: func(v *model.ItemView) bool { return v.PID != "theirs" }}
+	res, err := New(fs).ImportM3U8With(context.Background(), "Book", "", "", "", strings.NewReader(doc), mine)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if got := fs.members[res.PlaylistPID]; fmt.Sprint(got) != "[bk bk]" || res.Matched != 2 || res.Merged != 3 {
+		t.Errorf("entries = %v, result %+v; want [bk bk], 2 matched and 3 merged", got, res)
+	}
+	if fs.calls != 1 || len(fs.asked) != 3 {
+		t.Errorf("lookups = %d calls of %v, want one of the three parts", fs.calls, fs.asked)
+	}
+}
+
+// TestResolveM3U8RefusesALineTooLongAsInvalid: a document whose line runs past what a
+// path line can be is refused as invalid input, not as a failure to read it.
+func TestResolveM3U8RefusesALineTooLongAsInvalid(t *testing.T) {
+	t.Parallel()
+	doc := strings.Repeat("a", 2<<20) + "\n"
+	if _, err := New(newFakeStore()).ResolveM3U8(context.Background(), strings.NewReader(doc)); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("a 2 MiB line: err = %v, want CodeInvalid", err)
+	}
+}
+
+// TestExportM3U8ForKeepsOrderAndDuplicatesAndSkipsFileless: a list exports in its order,
+// a repeat written each time, while an item with no file and a pid naming no item are
+// left out and named in their places, with no line written for either.
+func TestExportM3U8ForKeepsOrderAndDuplicatesAndSkipsFileless(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	fs.add("/music/a.flac", "ia", "A", "X")
+	fs.add("/music/b.flac", "ib", "B", "Y")
+	fs.shared["(no file)"] = []*model.ItemView{{PID: "ep", Title: "Episode", Artist: "Show"}}
+	var buf bytes.Buffer
+	res, err := New(fs).ExportM3U8For(context.Background(), []model.PID{"ib", "ep", "ia", "nope", "ib", "ep"}, &buf)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	want := "#EXTM3U\n#EXTINF:200,Y - B\n/music/b.flac\n#EXTINF:200,X - A\n/music/a.flac\n#EXTINF:200,Y - B\n/music/b.flac\n"
+	if buf.String() != want {
+		t.Errorf("document =\n%s\nwant\n%s", buf.String(), want)
+	}
+	if res.Written != 3 || fmt.Sprint(res.Skipped) != "[ep nope ep]" {
+		t.Errorf("result = %+v, want 3 written and [ep nope ep] skipped", res)
+	}
+}
+
+// TestExportM3U8NoLongerWritesBlankPaths: a playlist holding an item with no file writes
+// no #EXTINF and no empty path line for it, so a re-import does not hand that item's
+// label to the entry after it.
+func TestExportM3U8NoLongerWritesBlankPaths(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	fs.add("/music/a.flac", "ia", "A", "X")
+	fs.shared["(no file)"] = []*model.ItemView{{PID: "ep", Title: "Episode", Artist: "Show"}}
+	svc := New(fs)
+	ctx := context.Background()
+	pl, _ := svc.CreateStatic(ctx, "p", "", "", "")
+	fs.members[pl] = []model.PID{"ep", "ia"}
+	var buf bytes.Buffer
+	res, err := svc.ExportM3U8(ctx, pl, &buf, "")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if buf.String() != "#EXTM3U\n#EXTINF:200,X - A\n/music/a.flac\n" || res.Written != 1 || fmt.Sprint(res.Skipped) != "[ep]" {
+		t.Errorf("export = %q, %+v; want only A written and ep skipped", buf.String(), res)
+	}
+}
+
+// ripOf lists n windows of one file, Track 1 to Track n by Artist.
+func ripOf(n int) []*model.ItemView {
+	var out []*model.ItemView
+	for i := 1; i <= n; i++ {
+		out = append(out, &model.ItemView{PID: model.PID(fmt.Sprintf("t%03d", i)), Title: fmt.Sprintf("Track %d", i),
+			Artist: "Artist", DurationMS: 200000})
+	}
+	return out
+}
+
+// TestResolveM3U8ScopedLabelStillHasToMatch: a path naming several items, one of which the
+// caller may hold, still needs its label to name that one; a label naming a hidden item
+// matches nothing, and a line with no label takes the one the caller may hold.
+func TestResolveM3U8ScopedLabelStillHasToMatch(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	fs.shared["/music/rip.flac"] = ripOf(12)
+	seven := ResolveOptions{Accept: func(v *model.ItemView) bool { return v.PID == "t007" }}
+	doc := "#EXTINF:200,Artist - Track 1\n/music/rip.flac\n#EXTINF:200,Artist - Track 7\n/music/rip.flac\n/music/rip.flac\n"
+	matches, err := New(fs).ResolveM3U8With(context.Background(), strings.NewReader(doc), seven)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range matches {
+		pid := "-"
+		if m.Item != nil {
+			pid = string(m.Item.PID)
+		}
+		got = append(got, pid)
+	}
+	if strings.Join(got, " ") != "- t007 t007" {
+		t.Errorf("matches = %v, want - t007 t007 (Track 1 hidden, Track 7 named, the unlabeled line the one held)", got)
+	}
+}
+
+// TestResolveM3U8AnAbsolutePathTakesNoCap: an exported rip's absolute path names every
+// window behind it however many there are, and each line's label picks its window, while
+// a relative suffix naming that many still names nothing.
+func TestResolveM3U8AnAbsolutePathTakesNoCap(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	fs.shared["/music/big.flac"] = ripOf(120)
+	fs.shared["big.flac"] = ripOf(120)
+	doc := "#EXTINF:200,Artist - Track 1\n/music/big.flac\n#EXTINF:200,Artist - Track 120\n/music/big.flac\n" +
+		"#EXTINF:200,Artist - Track 1\nbig.flac\n"
+	matches, err := New(fs).ResolveM3U8(context.Background(), strings.NewReader(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 3 || matches[0].Item == nil || matches[0].Item.PID != "t001" ||
+		matches[1].Item == nil || matches[1].Item.PID != "t120" || matches[2].Item != nil {
+		t.Errorf("matches = %+v, want t001 and t120 by label and nothing for the relative suffix", matches)
+	}
+}
+
+// TestResolveM3U8FetchesNoMoreThanItCanUse: unscoped, a relative path is read only as far
+// as the cap, since more names nothing; a scoped document and an absolute path read to the
+// fetch bound.
+func TestResolveM3U8FetchesNoMoreThanItCanUse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, c := range []struct {
+		name string
+		doc  string
+		opts ResolveOptions
+		want string
+	}{
+		{"relative", "a.flac\nb.flac\n", ResolveOptions{}, "[100]"},
+		{"absolute", "/m/a.flac\n", ResolveOptions{}, "[1000]"},
+		{"both", "a.flac\n/m/a.flac\n", ResolveOptions{}, "[1000 100]"},
+		{"scoped", "a.flac\n/m/a.flac\n", ResolveOptions{Accept: func(*model.ItemView) bool { return true }}, "[1000]"},
+	} {
+		fs := newFakeStore()
+		if _, err := New(fs).ResolveM3U8With(ctx, strings.NewReader(c.doc), c.opts); err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprint(fs.limits); got != c.want {
+			t.Errorf("%s: limits %s, want %s", c.name, got, c.want)
+		}
 	}
 }

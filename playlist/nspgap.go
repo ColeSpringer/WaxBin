@@ -84,6 +84,8 @@ const (
 	// Entity.
 	NSPReasonEntityWidens NSPReason = "entity_widens" // a note; Value
 	NSPReasonEntityFiles  NSPReason = "entity_files"  // Value
+	// Import only, a note: a comment no playlist description can hold. Key.
+	NSPReasonBadComment NSPReason = "bad_comment"
 )
 
 // NSPReasons returns every reason code.
@@ -101,7 +103,7 @@ func NSPReasons() []NSPReason {
 		NSPReasonDurationNotWholeMS, NSPReasonValueTooLarge,
 		NSPReasonUnsupportedSortField, NSPReasonRandomWithSorts, NSPReasonExtraSortTerm,
 		NSPReasonRandomNeedsLimit, NSPReasonLimitMode, NSPReasonLimitSeed, NSPReasonLimitBudget,
-		NSPReasonEntityWidens, NSPReasonEntityFiles,
+		NSPReasonEntityWidens, NSPReasonEntityFiles, NSPReasonBadComment,
 	}
 }
 
@@ -306,6 +308,8 @@ func (g NSPGap) sentence(dir NSPDirection) string {
 		return "nsp: .nsp has no track/book distinction, so this rule re-imports as one over every kind of item"
 	case NSPReasonEntityFiles:
 		return "nsp: a selection over file rows is not a playlist of items"
+	case NSPReasonBadComment:
+		return "nsp: the " + g.Key + " is not text a playlist description can hold"
 	}
 	return ""
 }

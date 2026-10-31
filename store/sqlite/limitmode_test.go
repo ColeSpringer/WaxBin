@@ -423,7 +423,7 @@ func TestSmartPlaylistLimitModesEndToEnd(t *testing.T) {
 	// A "3 random" smart playlist evaluates deterministically under its stored
 	// seed, through the normal PlaylistItems path, which runs on QueryItems.
 	random := query.New(query.EntityItems).Limit(3).LimitBy(query.LimitRandom).Seed(7).Build()
-	rpl, err := st.CreatePlaylist(ctx, "Random 3", "", model.PlaylistSmart, "", &random)
+	rpl, err := st.CreatePlaylist(ctx, "Random 3", "", "", model.PlaylistSmart, "", &random)
 	if err != nil {
 		t.Fatalf("create random smart playlist: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestSmartPlaylistLimitModesEndToEnd(t *testing.T) {
 	// A "2 minutes" smart playlist fills the budget in canonical order (every
 	// fixture track is 60s, so exactly two fit).
 	minutes := query.New(query.EntityItems).Limit(2).LimitBy(query.LimitMinutes).Build()
-	mpl, err := st.CreatePlaylist(ctx, "Two Minutes", "", model.PlaylistSmart, "", &minutes)
+	mpl, err := st.CreatePlaylist(ctx, "Two Minutes", "", "", model.PlaylistSmart, "", &minutes)
 	if err != nil {
 		t.Fatalf("create minutes smart playlist: %v", err)
 	}

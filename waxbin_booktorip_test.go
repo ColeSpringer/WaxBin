@@ -52,7 +52,7 @@ func TestABookReadAgainAsACueRipKeepsItsState(t *testing.T) {
 	if _, err := pb.AddBookmark(ctx, "", book, 12000, "mark"); err != nil {
 		t.Fatal(err)
 	}
-	pl, err := lib.Playlists().CreateStatic(ctx, "Keep", "", model.VisibilityPrivate)
+	pl, err := lib.Playlists().CreateStatic(ctx, "Keep", "", "", model.VisibilityPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestARipReadBackAsOneFileKeepsItsState(t *testing.T) {
 	if err := pb.Checkpoint(ctx, "", second, 3000, nil); err != nil {
 		t.Fatal(err)
 	}
-	pl, err := lib.Playlists().CreateStatic(ctx, "Keep", "", model.VisibilityPrivate)
+	pl, err := lib.Playlists().CreateStatic(ctx, "Keep", "", "", model.VisibilityPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}

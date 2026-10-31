@@ -89,7 +89,7 @@ func newBookCmd(g *globals) *cobra.Command {
 			if len(d.Files) > 1 {
 				fmt.Fprintln(w, "parts:")
 				for _, p := range d.Files {
-					fmt.Fprintf(w, "  [%d] %s  (%s)\n", p.Position, p.DisplayPath, durationLabel(p.DurationMS))
+					fmt.Fprintf(w, "  [%d] %s  from %s (%s)\n", p.Position, p.DisplayPath, durationLabel(p.StartMS), durationLabel(p.DurationMS))
 				}
 			}
 			printChapters(cmd, d.Chapters)
@@ -142,9 +142,12 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 		Short: "Set (or clear) a book's user chapters from a .cue file",
 		Long: "Sets user-curated chapters on a book from a .cue file, which win on read over the " +
 			"scanned chapters and survive a `scan --force`. The cue's INDEX offsets are read as " +
-			"book-timeline positions (cumulative across the parts of a multi-file book; for a " +
-			"single file the two are the same). --clear removes the user chapters, falling back " +
-			"to the scanned ones. Locks the chapters field by default.",
+			"book-timeline positions, the timeline `book` shows (each part starting where the " +
+			"one before it ends; for a single file the two are the same). A chapter belongs to " +
+			"the part its start falls in and ends by that part's end, except in the last part. " +
+			"When the edit changes how long a part runs, resume positions and bookmarks move " +
+			"with their audio. --clear removes the user chapters, falling back to the scanned " +
+			"ones. Locks the chapters field by default.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var chapters []model.Chapter

@@ -304,7 +304,7 @@ func TestSmartPlaylistPerUser(t *testing.T) {
 	}
 
 	rule := query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build()
-	plPID, err := st.CreatePlaylist(ctx, "Faves", "", model.PlaylistSmart, model.VisibilityPrivate, &rule)
+	plPID, err := st.CreatePlaylist(ctx, "Faves", "", "", model.PlaylistSmart, model.VisibilityPrivate, &rule)
 	if err != nil {
 		t.Fatalf("create smart playlist: %v", err)
 	}

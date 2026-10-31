@@ -464,7 +464,7 @@ func TestSetItemKindMergesTracksIntoOneBook(t *testing.T) {
 	if _, err := pb.RecordSession(ctx, "", t3, "test", 1, 2, 1); err != nil {
 		t.Fatal(err)
 	}
-	pl, err := lib.Playlists().CreateStatic(ctx, "Listen", "", model.VisibilityPrivate)
+	pl, err := lib.Playlists().CreateStatic(ctx, "Listen", "", "", model.VisibilityPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}

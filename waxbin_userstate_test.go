@@ -87,7 +87,7 @@ func TestUserStateQueryThroughFacade(t *testing.T) {
 	}
 
 	// One smart-playlist rule, evaluated per user, yields each user's own faves.
-	plPID, err := lib.Playlists().CreateSmart(ctx, "Faves", "", model.VisibilityShared, starredQ)
+	plPID, err := lib.Playlists().CreateSmart(ctx, "Faves", "", "", model.VisibilityShared, starredQ)
 	if err != nil {
 		t.Fatalf("create smart playlist: %v", err)
 	}
@@ -221,11 +221,11 @@ func TestRuleReadsUserStateThroughFacade(t *testing.T) {
 		t.Errorf("RuleReadsUserState(year) = %v, %v; want false", got, err)
 	}
 	pls := lib.Playlists()
-	smart, err := pls.CreateSmart(ctx, "Starred", "", model.VisibilityPrivate, starred)
+	smart, err := pls.CreateSmart(ctx, "Starred", "", "", model.VisibilityPrivate, starred)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
-	static, err := pls.CreateStatic(ctx, "Mine", "", model.VisibilityPrivate)
+	static, err := pls.CreateStatic(ctx, "Mine", "", "", model.VisibilityPrivate)
 	if err != nil {
 		t.Fatalf("create static: %v", err)
 	}

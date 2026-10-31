@@ -7,9 +7,12 @@ package playlist
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,24 +24,26 @@ import (
 
 // Store is the persistence the playlist service needs (satisfied by store/sqlite).
 type Store interface {
-	CreatePlaylist(ctx context.Context, name string, ownerPID model.PID, kind model.PlaylistKind, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error)
-	CreatePlaylistWithItems(ctx context.Context, name string, ownerPID model.PID, vis model.PlaylistVisibility, itemPIDs []model.PID) (model.PID, error)
+	CreatePlaylist(ctx context.Context, name, description string, ownerPID model.PID, kind model.PlaylistKind, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error)
+	CreatePlaylistWithItems(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility, itemPIDs []model.PID) (model.PID, error)
 	PlaylistByPID(ctx context.Context, pid model.PID) (*model.Playlist, error)
 	ListPlaylists(ctx context.Context, ownerPID model.PID) ([]*model.Playlist, error)
 	DeletePlaylist(ctx context.Context, pid model.PID) error
 	RenamePlaylist(ctx context.Context, pid model.PID, name string) error
+	SetPlaylistDescription(ctx context.Context, pid model.PID, description string) error
 	SetPlaylistVisibility(ctx context.Context, pid model.PID, vis model.PlaylistVisibility) error
 	SetPlaylistRule(ctx context.Context, pid model.PID, rule query.Query) error
 	SetPlaylistOwner(ctx context.Context, pid, ownerPID model.PID) error
 	TransferPlaylists(ctx context.Context, fromPID, toPID model.PID) (int, error)
 	PlaylistItems(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error)
+	ItemsByPIDs(ctx context.Context, pids []model.PID) ([]*model.ItemView, error)
 	CountPlaylistItems(ctx context.Context, pid model.PID, userPID model.PID, narrow query.Node) (int, error)
 	AddPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	SetPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	RemovePlaylistItem(ctx context.Context, pid model.PID, itemPID model.PID) error
 	RemovePlaylistItemAt(ctx context.Context, pid model.PID, index int, expect model.PID) error
 	RemovePlaylistItemsAt(ctx context.Context, pid model.PID, indexes []int, expect []model.PID) error
-	ItemsByPlaylistPath(ctx context.Context, path string) ([]*model.ItemView, error)
+	ItemsByPlaylistPaths(ctx context.Context, paths []string, limit int) (map[string]model.PathCandidates, error)
 	UserByPID(ctx context.Context, pid model.PID) (*model.User, error)
 	QueryNeedsUser(q query.Query) (bool, error)
 }
@@ -50,15 +55,16 @@ type Service struct{ store Store }
 func New(store Store) *Service { return &Service{store: store} }
 
 // CreateStatic creates an empty static playlist owned by ownerPID (empty =
-// default user).
-func (s *Service) CreateStatic(ctx context.Context, name string, ownerPID model.PID, vis model.PlaylistVisibility) (model.PID, error) {
-	return s.store.CreatePlaylist(ctx, name, ownerPID, model.PlaylistStatic, vis, nil)
+// default user). The description may be empty; model.CheckPlaylistDescription says
+// what it may hold.
+func (s *Service) CreateStatic(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility) (model.PID, error) {
+	return s.store.CreatePlaylist(ctx, name, description, ownerPID, model.PlaylistStatic, vis, nil)
 }
 
 // CreateSmart creates a smart playlist whose membership is the rule evaluated on
 // read.
-func (s *Service) CreateSmart(ctx context.Context, name string, ownerPID model.PID, vis model.PlaylistVisibility, rule query.Query) (model.PID, error) {
-	return s.store.CreatePlaylist(ctx, name, ownerPID, model.PlaylistSmart, vis, &rule)
+func (s *Service) CreateSmart(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility, rule query.Query) (model.PID, error) {
+	return s.store.CreatePlaylist(ctx, name, description, ownerPID, model.PlaylistSmart, vis, &rule)
 }
 
 // List returns the playlists visible to ownerPID (own plus shared).
@@ -134,6 +140,11 @@ func (s *Service) Rename(ctx context.Context, pid model.PID, name string) error 
 	return s.store.RenamePlaylist(ctx, pid, name)
 }
 
+// SetDescription replaces a playlist's description; an empty one clears it.
+func (s *Service) SetDescription(ctx context.Context, pid model.PID, description string) error {
+	return s.store.SetPlaylistDescription(ctx, pid, description)
+}
+
 // SetVisibility changes a playlist's visibility.
 func (s *Service) SetVisibility(ctx context.Context, pid model.PID, vis model.PlaylistVisibility) error {
 	return s.store.SetPlaylistVisibility(ctx, pid, vis)
@@ -190,39 +201,76 @@ func (s *Service) RemoveAtMany(ctx context.Context, pid model.PID, indexes []int
 	return s.store.RemovePlaylistItemsAt(ctx, pid, indexes, expect)
 }
 
+// M3U8Export reports an export: how many entries were written, and the pids left out
+// in their places, an item with no file (an episode not downloaded) or a pid naming no
+// item. Written plus len(Skipped) is the length of the list exported.
+type M3U8Export struct {
+	Written int
+	Skipped []model.PID
+}
+
 // ExportM3U8 writes a playlist's current members as an extended M3U (#EXTM3U)
-// document: a #EXTINF metadata line plus the file path per item. Smart playlists
-// export their evaluated membership, so the file is a static snapshot; that
-// membership is evaluated for userPID (empty selects the default user) when the
-// rule references per-user state.
+// document, as ExportM3U8For writes a list. Smart playlists export their evaluated
+// membership, so the file is a static snapshot; that membership is evaluated for
+// userPID (empty selects the default user) when the rule references per-user state.
 //
 // A playlist's cover art is not exported: the format has no standard cover
 // directive, and this document carries track metadata only. A consumer that wants
 // the cover reads it through ResolveArt on the playlist reference instead.
-func (s *Service) ExportM3U8(ctx context.Context, pid model.PID, w io.Writer, userPID model.PID) error {
-	const op = "playlist.ExportM3U8"
+func (s *Service) ExportM3U8(ctx context.Context, pid model.PID, w io.Writer, userPID model.PID) (M3U8Export, error) {
 	items, err := s.store.PlaylistItems(ctx, pid, userPID)
 	if err != nil {
-		return err
+		return M3U8Export{}, err
 	}
-	// M3U8 is line-based; a path containing a newline cannot be represented.
-	// Reject it before writing a playlist that would split the path on re-import.
+	pids := make([]model.PID, len(items))
+	byPID := make(map[model.PID]*model.ItemView, len(items))
+	for i, it := range items {
+		pids[i], byPID[it.PID] = it.PID, it
+	}
+	return writeM3U8("playlist.ExportM3U8", w, pids, byPID)
+}
+
+// ExportM3U8For writes a list of items as an extended M3U (#EXTM3U) document in its
+// order, a pid listed twice written twice: a #EXTINF metadata line plus the file path
+// per entry. An item with no file and a pid naming no item are left out and named in the
+// result. A path holding a line break is refused (CodeInvalid) before anything is
+// written, since the format is line-based and a re-import would split it.
+func (s *Service) ExportM3U8For(ctx context.Context, pids []model.PID, w io.Writer) (M3U8Export, error) {
+	items, err := s.store.ItemsByPIDs(ctx, pids)
+	if err != nil {
+		return M3U8Export{}, err
+	}
+	byPID := make(map[model.PID]*model.ItemView, len(items))
 	for _, it := range items {
+		byPID[it.PID] = it
+	}
+	return writeM3U8("playlist.ExportM3U8For", w, pids, byPID)
+}
+
+func writeM3U8(op string, w io.Writer, pids []model.PID, byPID map[model.PID]*model.ItemView) (M3U8Export, error) {
+	var res M3U8Export
+	for _, it := range byPID {
 		if strings.ContainsAny(it.DisplayPath, "\r\n") {
-			return waxerr.New(waxerr.CodeInvalid, op,
+			return res, waxerr.New(waxerr.CodeInvalid, op,
 				"item path contains a newline and cannot be written to M3U8: "+string(it.PID))
 		}
 	}
 	bw := bufio.NewWriter(w)
 	fmt.Fprintln(bw, "#EXTM3U")
-	for _, it := range items {
+	for _, pid := range pids {
+		it := byPID[pid]
+		if it == nil || it.DisplayPath == "" {
+			res.Skipped = append(res.Skipped, pid)
+			continue
+		}
 		fmt.Fprintf(bw, "#EXTINF:%d,%s\n", it.DurationMS/1000, m3uMeta(it.Artist, it.Title))
 		fmt.Fprintln(bw, it.DisplayPath)
+		res.Written++
 	}
 	if err := bw.Flush(); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+		return M3U8Export{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return nil
+	return res, nil
 }
 
 // m3uMeta renders the "#EXTINF" artist-title label with line breaks folded to
@@ -244,13 +292,17 @@ type ImportResult struct {
 	UnmatchedPaths []string
 }
 
-// CheckImport refuses what no import could create a playlist with (a blank name, an
-// unknown visibility, an owner that is no user), so ImportM3U8 fails before it looks
-// any entry up, and a preview fails where the import would.
-func (s *Service) CheckImport(ctx context.Context, name string, ownerPID model.PID, vis model.PlaylistVisibility) error {
+// CheckImport refuses what no import could create a playlist with (a blank name, a
+// description model.CheckPlaylistDescription refuses, an unknown visibility, an owner
+// that is no user), so ImportM3U8 fails before it looks any entry up, and a preview
+// fails where the import would.
+func (s *Service) CheckImport(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility) error {
 	const op = "playlist.ImportM3U8"
 	if strings.TrimSpace(name) == "" {
 		return waxerr.New(waxerr.CodeInvalid, op, "playlist name is required")
+	}
+	if _, err := model.CheckPlaylistDescription(description); err != nil {
+		return err
 	}
 	if vis != "" && !vis.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown visibility: "+string(vis))
@@ -270,32 +322,106 @@ type M3UMatch struct {
 	Merged bool
 }
 
+// ResolveOptions scopes a document's resolution. Accept, when set, admits the items the
+// caller may hold: a path names only the items it admits, before any label picks among
+// them, so an item it refuses is never matched, even as the only one a path names.
+type ResolveOptions struct {
+	Accept model.ItemFilter
+}
+
+const (
+	// maxPathFetch bounds the items one path's lookup reads. A path naming more names
+	// nothing, since what was not read could hold an item the caller would admit.
+	maxPathFetch = 1000
+	// maxPathCandidates bounds the admitted items a relative path may name: past it the
+	// entry names nothing, since a suffix that common says too little to pick from.
+	maxPathCandidates = 100
+)
+
 // ResolveM3U8 matches every path line of an M3U8 document against the catalog in
 // document order and writes nothing, so it answers on a read-only library and shows
 // what an import would build. A path names the items behind its file through any of
 // their files (an exact path, or a relative-path suffix); when it names several, as a
-// cue rip's file names each of its tracks, the entry's #EXTINF label picks one.
+// cue rip's file names each of its tracks, the entry's #EXTINF label picks one. Each
+// distinct path is looked up once, however many lines name it. A line past 1 MiB is
+// CodeInvalid.
 func (s *Service) ResolveM3U8(ctx context.Context, r io.Reader) ([]M3UMatch, error) {
-	return s.resolveM3U8(ctx, "playlist.ResolveM3U8", r)
+	return s.ResolveM3U8With(ctx, r, ResolveOptions{})
 }
 
-func (s *Service) resolveM3U8(ctx context.Context, op string, r io.Reader) ([]M3UMatch, error) {
+// ResolveM3U8With is ResolveM3U8 scoped by opts.
+func (s *Service) ResolveM3U8With(ctx context.Context, r io.Reader, opts ResolveOptions) ([]M3UMatch, error) {
+	return s.resolveM3U8(ctx, "playlist.ResolveM3U8", r, opts)
+}
+
+func (s *Service) resolveM3U8(ctx context.Context, op string, r io.Reader, opts ResolveOptions) ([]M3UMatch, error) {
 	entries, err := parseM3U8(r)
+	if errors.Is(err, bufio.ErrTooLong) {
+		return nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
+	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	names, err := s.namedByPath(ctx, entries, opts)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]M3UMatch, 0, len(entries))
 	for i, e := range entries {
-		items, err := s.store.ItemsByPlaylistPath(ctx, e.path)
-		if err != nil {
-			return nil, err
-		}
-		m := M3UMatch{Path: e.path, Item: e.pick(items)}
+		n := names[cleanPath(e.path)]
+		m := M3UMatch{Path: e.path, Item: e.pick(n.items, n.several)}
 		if i > 0 && m.Item != nil {
 			prev := out[i-1]
 			m.Merged = prev.Item != nil && prev.Item.PID == m.Item.PID && cleanPath(prev.Path) != cleanPath(m.Path)
 		}
 		out = append(out, m)
+	}
+	return out, nil
+}
+
+// named is what one distinct path names: the items the caller may hold, and whether the
+// path named several before the scope, when a label still has to pick among them.
+type named struct {
+	items   []*model.ItemView
+	several bool
+}
+
+// namedByPath looks each distinct path of the entries up once, the first line spelling
+// it standing for the rest, keyed by the cleaned path. An absolute path names whatever
+// its file holds (an exported rip names every window), while a relative one naming more
+// than maxPathCandidates admitted items names nothing, so unscoped it is read no further
+// than that; a path the lookup could not read whole names nothing either.
+func (s *Service) namedByPath(ctx context.Context, entries []m3uEntry, opts ResolveOptions) (map[string]named, error) {
+	spelling := map[string]string{}
+	byLimit := map[int][]string{}
+	for _, e := range entries {
+		c := cleanPath(e.path)
+		if _, ok := spelling[c]; ok {
+			continue
+		}
+		spelling[c] = e.path
+		limit := maxPathFetch
+		if !filepath.IsAbs(c) && opts.Accept == nil {
+			limit = maxPathCandidates
+		}
+		byLimit[limit] = append(byLimit[limit], e.path)
+	}
+	found := map[string]model.PathCandidates{}
+	for _, limit := range slices.Backward(slices.Sorted(maps.Keys(byLimit))) {
+		got, err := s.store.ItemsByPlaylistPaths(ctx, byLimit[limit], limit)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(found, got)
+	}
+	out := make(map[string]named, len(spelling))
+	for c, p := range spelling {
+		got := found[p]
+		items := opts.Accept.Admit(got.Items)
+		if got.Overflow || !filepath.IsAbs(c) && len(items) > maxPathCandidates {
+			continue
+		}
+		out[c] = named{items: items, several: len(got.Items) > 1}
 	}
 	return out, nil
 }
@@ -306,11 +432,16 @@ func cleanPath(p string) string { return filepath.Clean(filepath.FromSlash(p)) }
 // once CheckImport passes. Unmatched paths are skipped and reported, never invented, a
 // merged line adds no entry, and an empty file yields an empty playlist. The playlist
 // and its entries are one write, so a failure leaves no playlist behind.
-func (s *Service) ImportM3U8(ctx context.Context, name string, ownerPID model.PID, vis model.PlaylistVisibility, r io.Reader) (*ImportResult, error) {
-	if err := s.CheckImport(ctx, name, ownerPID, vis); err != nil {
+func (s *Service) ImportM3U8(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility, r io.Reader) (*ImportResult, error) {
+	return s.ImportM3U8With(ctx, name, description, ownerPID, vis, r, ResolveOptions{})
+}
+
+// ImportM3U8With is ImportM3U8 with the document resolved as ResolveM3U8With scopes it.
+func (s *Service) ImportM3U8With(ctx context.Context, name, description string, ownerPID model.PID, vis model.PlaylistVisibility, r io.Reader, opts ResolveOptions) (*ImportResult, error) {
+	if err := s.CheckImport(ctx, name, description, ownerPID, vis); err != nil {
 		return nil, err
 	}
-	matches, err := s.resolveM3U8(ctx, "playlist.ImportM3U8", r)
+	matches, err := s.resolveM3U8(ctx, "playlist.ImportM3U8", r, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +458,7 @@ func (s *Service) ImportM3U8(ctx context.Context, name string, ownerPID model.PI
 			matched = append(matched, m.Item.PID)
 		}
 	}
-	pid, err := s.store.CreatePlaylistWithItems(ctx, name, ownerPID, vis, matched)
+	pid, err := s.store.CreatePlaylistWithItems(ctx, name, description, ownerPID, vis, matched)
 	if err != nil {
 		return nil, err
 	}
@@ -346,12 +477,13 @@ type m3uEntry struct {
 // pick chooses among the items an entry's path names: the only one, else the one its
 // label names as ExportM3U8 writes it ("artist - title") or by its title alone, the
 // stated length breaking a tie between two of one name. It picks nothing when that
-// leaves none or several.
-func (e m3uEntry) pick(items []*model.ItemView) *model.ItemView {
-	if len(items) == 1 {
+// leaves none or several. When the path named several before a scope left one (several),
+// a label still has to name it; a line with no label takes it.
+func (e m3uEntry) pick(items []*model.ItemView, several bool) *model.ItemView {
+	key := identity.MatchKey(e.label)
+	if len(items) == 1 && (!several || key == "") {
 		return items[0]
 	}
-	key := identity.MatchKey(e.label)
 	if key == "" {
 		return nil
 	}

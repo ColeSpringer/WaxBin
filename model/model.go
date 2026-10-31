@@ -527,6 +527,24 @@ type ItemView struct {
 	CreatedAt int64
 }
 
+// ItemFilter admits the items a caller may hold, scoping a resolution to them; a nil one
+// admits every item.
+type ItemFilter func(*ItemView) bool
+
+// Admit keeps the items f admits, every item when f is nil.
+func (f ItemFilter) Admit(items []*ItemView) []*ItemView {
+	if f == nil {
+		return items
+	}
+	var out []*ItemView
+	for _, v := range items {
+		if f(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // AdvisoryFlagged reports whether the item carries an explicit advisory flag from
 // either source: its own, or its show's. The two are independent, since a feed may
 // mark itself explicit at the channel level and leave every episode unmarked, so a

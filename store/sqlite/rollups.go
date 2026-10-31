@@ -292,11 +292,12 @@ func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, select
 func (s *Store) RefreshRollups(ctx context.Context) (*model.RefreshReport, error) {
 	rep := &model.RefreshReport{}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		// Book totals first: a genre's running time counts them.
 		var err error
-		if rep.Artists, rep.ReleaseGroups, rep.Genres, err = rebuildRollups(ctx, tx, nowNS()); err != nil {
+		if rep.BookDurations, err = refreshAllBookDurations(ctx, tx); err != nil {
 			return err
 		}
-		if rep.BookDurations, err = refreshAllBookDurations(ctx, tx); err != nil {
+		if rep.Artists, rep.ReleaseGroups, rep.Genres, err = rebuildRollups(ctx, tx, nowNS()); err != nil {
 			return err
 		}
 		if rep.ISBNKeys, err = refreshAllISBNKeysTx(ctx, tx); err != nil {
@@ -471,24 +472,19 @@ ON CONFLICT(release_group_id) DO UPDATE SET track_count = excluded.track_count,
 	total_duration_ms = excluded.total_duration_ms, updated_at = excluded.updated_at
 WHERE (track_count, total_duration_ms) <> (excluded.track_count, excluded.total_duration_ms)`
 
-// The genre duration sums ALL of an item's parts, not just the primary, so a
-// multi-file audiobook contributes its whole running time, and none of its alternates,
-// which are copies of audio the item already counts (the artist and
-// release-group rollups join through track, which books never have, so they stay
-// single-file by construction and need no such change). A virtual track has a single
-// primary edge carrying its window, which the effective-duration expression scopes to
-// that window rather than the whole shared file.
+// The genre duration counts each live member as its item view does (itemDurationExpr):
+// a multi-file audiobook for its timeline's total, every part, never an alternate, and
+// a virtual track for its primary edge's window rather than the whole shared file. A
+// book's total moves with its chapters, so a write that moves it collects its genres.
 const genreRollupSelect = `
 INSERT INTO genre_rollup(genre_id, track_count, total_duration_ms, updated_at)
 SELECT g.id,
        COUNT(DISTINCT pi.id),
-       COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
+       COALESCE(SUM(` + itemDurationExpr + `), 0),
        ?
 FROM genre g
 LEFT JOIN item_genre ig    ON ig.genre_id = g.id
-LEFT JOIN playable_item pi ON pi.id = ig.item_id AND pi.state <> 'archived'
-LEFT JOIN item_file pf     ON pf.item_id = pi.id AND pf.role IN ('primary', 'part')
-LEFT JOIN file f           ON f.id = pf.file_id
+LEFT JOIN playable_item pi ON pi.id = ig.item_id AND pi.state <> 'archived'` + itemDurationJoins + `
 WHERE g.id /*FILTER*/
 GROUP BY g.id
 ON CONFLICT(genre_id) DO UPDATE SET track_count = excluded.track_count,

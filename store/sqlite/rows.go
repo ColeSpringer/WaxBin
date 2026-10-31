@@ -89,6 +89,14 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 	`f.duration_ms - pf.start_frames * 1000 / 75)) ` +
 	`ELSE f.duration_ms END`
 
+// itemDurationJoins and itemDurationExpr read an item's (pi) duration as its view does:
+// a book's timeline total, else its primary edge's effective duration.
+const (
+	itemDurationJoins = ` LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+	LEFT JOIN file f ON f.id = pf.file_id LEFT JOIN book bk ON bk.item_id = pi.id`
+	itemDurationExpr = `COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `)`
+)
+
 // itemViewCols is the column list for an item read-view, shared by the plain
 // select and the keyset-paginated select (which prepends pi.sort_key). The shared
 // artist/album_artist/album/year/genre columns COALESCE the track values with the

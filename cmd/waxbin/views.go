@@ -273,10 +273,12 @@ func chapterViews(chs []model.Chapter) []chapterView {
 
 // bookPartView is the JSON shape for one backing file of a (possibly multi-file) book.
 type bookPartView struct {
-	FilePID    string `json:"filePid"`
-	Path       string `json:"path"`
-	Position   int    `json:"position"`
-	DurationMS int64  `json:"durationMs"`
+	FilePID     string `json:"filePid"`
+	Path        string `json:"path"`
+	Position    int    `json:"position"`
+	DurationMS  int64  `json:"durationMs"`
+	StartMS     int64  `json:"startMs"`
+	EffectiveMS int64  `json:"effectiveMs"`
 }
 
 // bookView is the JSON shape for `book`: the full audiobook detail.
@@ -317,6 +319,7 @@ func toBookView(d *model.BookDetail) bookView {
 	for _, p := range d.Files {
 		v.Parts = append(v.Parts, bookPartView{
 			FilePID: string(p.FilePID), Path: p.DisplayPath, Position: p.Position, DurationMS: p.DurationMS,
+			StartMS: p.StartMS, EffectiveMS: p.EffectiveMS,
 		})
 	}
 	return v
@@ -481,14 +484,15 @@ func toYearReviewView(yr *read.YearReview) yearReviewView {
 
 // playlistView is the JSON shape for a playlist's metadata.
 type playlistView struct {
-	PID        string `json:"pid"`
-	Name       string `json:"name"`
-	Owner      string `json:"owner"`
-	OwnerPID   string `json:"ownerPid"`
-	Kind       string `json:"kind"`
-	Visibility string `json:"visibility"`
-	ItemCount  int    `json:"itemCount"`
-	HasArt     bool   `json:"hasArt"`
+	PID         string `json:"pid"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Owner       string `json:"owner"`
+	OwnerPID    string `json:"ownerPid"`
+	Kind        string `json:"kind"`
+	Visibility  string `json:"visibility"`
+	ItemCount   int    `json:"itemCount"`
+	HasArt      bool   `json:"hasArt"`
 }
 
 // toPlaylistView takes the count rather than reading model.Playlist.ItemCount, which
@@ -497,7 +501,7 @@ type playlistView struct {
 // what keeps --json from reporting 0 where the table reports 42.
 func toPlaylistView(p *model.Playlist, count int) playlistView {
 	return playlistView{
-		PID: string(p.PID), Name: p.Name, Owner: p.OwnerName, OwnerPID: string(p.OwnerPID), Kind: string(p.Kind),
+		PID: string(p.PID), Name: p.Name, Description: p.Description, Owner: p.OwnerName, OwnerPID: string(p.OwnerPID), Kind: string(p.Kind),
 		Visibility: string(p.Visibility), ItemCount: count, HasArt: p.HasArt,
 	}
 }

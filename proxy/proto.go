@@ -32,8 +32,10 @@ import (
 // read differently. An added method, result field or error field rides on the
 // current version, since an older server refuses a method it does not know
 // (ReasonUnknownMethod) and an older peer ignores a field it does not read. On 23 an error carries its reason,
-// an added field, and fetch_chapters is an added method.
-const ProtocolVersion = 23
+// an added field, and fetch_chapters is an added method. On 24 playlist_create and
+// playlist_import_m3u8 carry a description an older server would drop, and
+// playlist_set_description is an added method.
+const ProtocolVersion = 24
 
 // ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
 // client meets a server built before the method was added.
@@ -102,8 +104,9 @@ const (
 	MethodSetLibraryReadOnly       = "set_library_read_only"
 	MethodSetLibraryFolderFallback = "set_library_folder_fallback"
 
-	MethodPlaylistRemoveMany = "playlist_remove_many"
-	MethodPlaylistSetOwner   = "playlist_set_owner"
+	MethodPlaylistRemoveMany     = "playlist_remove_many"
+	MethodPlaylistSetOwner       = "playlist_set_owner"
+	MethodPlaylistSetDescription = "playlist_set_description"
 
 	// Server-run long jobs. The server starts the job in its own process (staying
 	// available) and returns the job PID; the client tails the read-only job row.
@@ -764,10 +767,11 @@ type PlaylistAddParams struct {
 // marshaled query rule document (the versioned envelope) like
 // PlaylistSetRuleParams.Rule, parsed and validated on the server side.
 type PlaylistCreateParams struct {
-	Name       string          `json:"name"`
-	OwnerPID   string          `json:"ownerPid,omitempty"`
-	Visibility string          `json:"visibility,omitempty"`
-	Rule       json.RawMessage `json:"rule,omitempty"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	OwnerPID    string          `json:"ownerPid,omitempty"`
+	Visibility  string          `json:"visibility,omitempty"`
+	Rule        json.RawMessage `json:"rule,omitempty"`
 }
 
 // PlaylistCreateResult carries the new playlist's pid, which is the whole point
@@ -787,15 +791,23 @@ type PlaylistRenameParams struct {
 	Name        string `json:"name"`
 }
 
+// PlaylistSetDescriptionParams is the playlist_set_description request payload; an
+// empty description clears it.
+type PlaylistSetDescriptionParams struct {
+	PlaylistPID string `json:"playlistPid"`
+	Description string `json:"description"`
+}
+
 // PlaylistImportParams is the playlist_import_m3u8 request payload. The document
 // travels whole rather than as a path, since the file is the client's and the
 // server may not be able to read it; path matching against the catalog happens on
 // the server, which is the half that needs the catalog.
 type PlaylistImportParams struct {
-	Name       string `json:"name"`
-	OwnerPID   string `json:"ownerPid,omitempty"`
-	Visibility string `json:"visibility,omitempty"`
-	Document   []byte `json:"document"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	OwnerPID    string `json:"ownerPid,omitempty"`
+	Visibility  string `json:"visibility,omitempty"`
+	Document    []byte `json:"document"`
 }
 
 // PlaylistImportResult is the playlist_import_m3u8 response: the new playlist and

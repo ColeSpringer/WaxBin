@@ -111,10 +111,16 @@ type BookDetail struct {
 	TotalDurationMS int64
 }
 
-// BookPart is one backing file of a multi-file book, in reading order.
+// BookPart is one backing file of a multi-file book, in reading order. DurationMS is the
+// file's measured length; StartMS is where the part starts on the book's timeline and
+// EffectiveMS how far it advances it: the measured length, or how far the part's chapters
+// run when they pass it (a file whose chapters overrun its audio), so each part starts
+// where the one before it ends and the lengths sum to the book's total.
 type BookPart struct {
 	FilePID     PID
 	DisplayPath string
 	Position    int
 	DurationMS  int64
+	StartMS     int64
+	EffectiveMS int64
 }

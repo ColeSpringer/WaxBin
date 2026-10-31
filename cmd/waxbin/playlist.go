@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/colespringer/waxbin"
@@ -26,6 +27,7 @@ func newPlaylistCmd(g *globals) *cobra.Command {
 		newPlaylistRemoveCmd(g),
 		newPlaylistDeleteCmd(g),
 		newPlaylistRenameCmd(g),
+		newPlaylistSetDescriptionCmd(g),
 		newPlaylistSetOwnerCmd(g),
 		newPlaylistExportCmd(g),
 		newPlaylistImportCmd(g),
@@ -34,7 +36,7 @@ func newPlaylistCmd(g *globals) *cobra.Command {
 }
 
 func newPlaylistCreateCmd(g *globals) *cobra.Command {
-	var user, visibility string
+	var user, visibility, description string
 	cmd := &cobra.Command{
 		Use:   "create NAME",
 		Short: "Create an empty static playlist",
@@ -45,7 +47,7 @@ func newPlaylistCreateCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			pid, err := m.PlaylistCreate(ctx(cmd), args[0], model.PID(user), model.PlaylistVisibility(visibility), nil)
+			pid, err := m.PlaylistCreate(ctx(cmd), args[0], description, model.PID(user), model.PlaylistVisibility(visibility), nil)
 			if err != nil {
 				return err
 			}
@@ -54,7 +56,14 @@ func newPlaylistCreateCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&user, "user", "", "owner user pid (empty = default user)")
 	cmd.Flags().StringVar(&visibility, "visibility", "private", "visibility: private|shared")
+	addDescriptionFlag(cmd, &description)
 	return cmd
+}
+
+// addDescriptionFlag registers the --description flag the creating commands share.
+func addDescriptionFlag(cmd *cobra.Command, description *string) {
+	cmd.Flags().StringVar(description, "description", "",
+		fmt.Sprintf("the playlist's description (at most %d bytes; line breaks kept, tabs and other controls refused)", model.MaxPlaylistDescriptionBytes))
 }
 
 func newPlaylistListCmd(g *globals) *cobra.Command {
@@ -143,6 +152,9 @@ func newPlaylistShowCmd(g *globals) *cobra.Command {
 					"playlist": toPlaylistView(pl, len(items)), "items": itemViews(items)})
 			}
 			fmt.Fprintf(out(cmd), "%s (%s, %s) - %d items\n", pl.Name, pl.Kind, pl.Visibility, len(items))
+			if pl.Description != "" {
+				fmt.Fprintln(out(cmd), pl.Description)
+			}
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "INDEX\tPID\tTITLE\tARTIST\tALBUM")
 			for i, v := range items {
@@ -273,6 +285,31 @@ func newPlaylistRenameCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+func newPlaylistSetDescriptionCmd(g *globals) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "set-description PID TEXT",
+		Short: "Replace a playlist's description (an empty TEXT clears it)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			if err := m.PlaylistSetDescription(ctx(cmd), model.PID(args[0]), args[1]); err != nil {
+				return err
+			}
+			// The store accepted it, so the check gives the text it stored.
+			stored, _ := model.CheckPlaylistDescription(args[1])
+			return reply(cmd, g, struct {
+				PlaylistPID model.PID `json:"playlistPid"`
+				Description string    `json:"description"`
+			}{model.PID(args[0]), stored}, "description set\n")
+		},
+	}
+	return cmd
+}
+
 func newPlaylistSetOwnerCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set-owner PID USERPID",
@@ -314,22 +351,31 @@ func newPlaylistExportCmd(g *globals) *cobra.Command {
 			pl := model.PID(args[0])
 			if outPath == "" {
 				if !g.jsonOut {
-					return lib.Playlists().ExportM3U8(ctx(cmd), pl, out(cmd), model.PID(user))
+					res, err := lib.Playlists().ExportM3U8(ctx(cmd), pl, out(cmd), model.PID(user))
+					if err != nil {
+						return err
+					}
+					noteSkipped(cmd, res)
+					return nil
 				}
 				var doc bytes.Buffer
-				if err := lib.Playlists().ExportM3U8(ctx(cmd), pl, &doc, model.PID(user)); err != nil {
+				res, err := lib.Playlists().ExportM3U8(ctx(cmd), pl, &doc, model.PID(user))
+				if err != nil {
 					return err
 				}
 				return printJSON(cmd, struct {
-					PlaylistPID model.PID `json:"playlistPid"`
-					M3U8        string    `json:"m3u8"`
-				}{pl, doc.String()})
+					PlaylistPID model.PID   `json:"playlistPid"`
+					M3U8        string      `json:"m3u8"`
+					Written     int         `json:"written"`
+					Skipped     []model.PID `json:"skipped"`
+				}{pl, doc.String(), res.Written, append([]model.PID{}, res.Skipped...)})
 			}
 			f, err := os.Create(outPath)
 			if err != nil {
 				return waxerr.Wrapf(waxerr.CodeIO, "playlist export", err, "creating %s", outPath)
 			}
-			if err := lib.Playlists().ExportM3U8(ctx(cmd), pl, f, model.PID(user)); err != nil {
+			res, err := lib.Playlists().ExportM3U8(ctx(cmd), pl, f, model.PID(user))
+			if err != nil {
 				_ = f.Close()
 				return err
 			}
@@ -337,10 +383,15 @@ func newPlaylistExportCmd(g *globals) *cobra.Command {
 			if err := f.Close(); err != nil {
 				return waxerr.Wrapf(waxerr.CodeIO, "playlist export", err, "closing %s", outPath)
 			}
+			if !g.jsonOut {
+				noteSkipped(cmd, res)
+			}
 			return reply(cmd, g, struct {
-				PlaylistPID model.PID `json:"playlistPid"`
-				Out         string    `json:"out"`
-			}{pl, outPath}, "")
+				PlaylistPID model.PID   `json:"playlistPid"`
+				Out         string      `json:"out"`
+				Written     int         `json:"written"`
+				Skipped     []model.PID `json:"skipped"`
+			}{pl, outPath, res.Written, append([]model.PID{}, res.Skipped...)}, "")
 		},
 	}
 	cmd.Flags().StringVar(&outPath, "out", "", "write the M3U8 to this file instead of stdout")
@@ -348,20 +399,29 @@ func newPlaylistExportCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// noteSkipped tells stderr which entries an export left out, since the document on
+// stdout cannot say.
+func noteSkipped(cmd *cobra.Command, res playlist.M3U8Export) {
+	if len(res.Skipped) > 0 {
+		fmt.Fprintf(errOut(cmd), "left out %d entries with no file: %v\n", len(res.Skipped), res.Skipped)
+	}
+}
+
 func newPlaylistImportCmd(g *globals) *cobra.Command {
-	var file, user, visibility string
+	var file, user, visibility, description string
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "import NAME",
 		Short: "Import an M3U8 file as a new static playlist",
 		Long: "Imports an M3U8 file as a new static playlist. Each path names the item " +
 			"behind its file, by exact path or a relative-path suffix, through any of its " +
-			"files (a copy names its item, a book's part the book). A path naming several " +
-			"items, such as a cue rip's file, is settled by its #EXTINF label (artist - " +
-			"title, or the title, the length breaking a tie) and otherwise left unmatched. " +
-			"Consecutive lines naming one item through different files, a book listed by " +
-			"its parts, become one entry. --dry-run prints what each line matches and " +
-			"creates nothing.",
+			"files (a copy names its item, a book's part the book). A relative suffix " +
+			"matches ASCII letters in either case. A path naming several items, such as a " +
+			"cue rip's file, is settled by its #EXTINF label (artist - title, or the " +
+			"title, the length breaking a tie) and otherwise left unmatched, as is a relative " +
+			"path naming more than 100. Consecutive lines naming one item through different " +
+			"files, a book listed by its parts, become one entry. --dry-run prints what " +
+			"each line matches and creates nothing.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r := cmd.InOrStdin()
@@ -378,21 +438,21 @@ func newPlaylistImportCmd(g *globals) *cobra.Command {
 				return waxerr.Wrap(waxerr.CodeIO, "playlist import", err)
 			}
 			if dryRun {
-				return previewImport(cmd, g, args[0], model.PID(user), model.PlaylistVisibility(visibility), doc)
+				return previewImport(cmd, g, args[0], description, model.PID(user), model.PlaylistVisibility(visibility), doc)
 			}
 			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
 			defer m.Close()
-			res, err := m.PlaylistImportM3U8(ctx(cmd), args[0], model.PID(user), model.PlaylistVisibility(visibility), doc)
+			res, err := m.PlaylistImportM3U8(ctx(cmd), args[0], description, model.PID(user), model.PlaylistVisibility(visibility), doc)
 			if err != nil {
 				return err
 			}
 			if g.jsonOut {
 				return printJSON(cmd, map[string]any{
 					"playlistPid": string(res.PlaylistPID), "matched": res.Matched, "merged": res.Merged,
-					"unmatched": res.Unmatched, "unmatchedPaths": res.UnmatchedPaths,
+					"unmatched": res.Unmatched, "unmatchedPaths": append([]string{}, res.UnmatchedPaths...),
 				})
 			}
 			fmt.Fprintf(out(cmd), "%s: matched %d, merged %d, unmatched %d\n", res.PlaylistPID, res.Matched, res.Merged, res.Unmatched)
@@ -403,19 +463,20 @@ func newPlaylistImportCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&user, "user", "", "owner user pid (empty = default user)")
 	cmd.Flags().StringVar(&visibility, "visibility", "private", "visibility: private|shared")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what each entry matches and create nothing")
+	addDescriptionFlag(cmd, &description)
 	return cmd
 }
 
 // previewImport prints the match for every line of an M3U8 document, read from a
 // read-only open so it runs beside a server holding the catalog, after the checks the
 // import makes, so it fails where the import would.
-func previewImport(cmd *cobra.Command, g *globals, name string, owner model.PID, vis model.PlaylistVisibility, doc []byte) error {
+func previewImport(cmd *cobra.Command, g *globals, name, description string, owner model.PID, vis model.PlaylistVisibility, doc []byte) error {
 	lib, _, err := g.openRead(cmd)
 	if err != nil {
 		return err
 	}
 	defer lib.Close()
-	if err := lib.Playlists().CheckImport(ctx(cmd), name, owner, vis); err != nil {
+	if err := lib.Playlists().CheckImport(ctx(cmd), name, description, owner, vis); err != nil {
 		return err
 	}
 	matches, err := lib.Playlists().ResolveM3U8(ctx(cmd), bytes.NewReader(doc))
@@ -472,18 +533,17 @@ func newSmartPlaylistCmd(g *globals) *cobra.Command {
 
 // loadRule reads a smart-playlist rule from a JSON rule document or a Navidrome
 // .nsp file; exactly one of the two paths must be given. Shared by create and
-// set-rule so both accept the same rule sources. The report is what the .nsp
+// set-rule so both accept the same rule sources. The import's report is what the .nsp
 // mapping could not carry: empty for a --rule document, and empty for a failure
 // that happened before the mapping ran. A refusal costs a second walk, since the
-// strict import returns one sentence and the caller wants the list; a success
-// does not, since the partial import hands its report back.
-func loadRule(op, rulePath, nspPath string, partial bool) (query.Query, playlist.NSPReport, error) {
-	var none playlist.NSPReport
+// strict import returns one sentence and the caller wants the list.
+func loadRule(op, rulePath, nspPath string, partial bool) (playlist.NSPImport, error) {
+	var none playlist.NSPImport
 	if (rulePath == "") == (nspPath == "") {
-		return query.Query{}, none, waxerr.New(waxerr.CodeInvalid, op, "exactly one of --rule or --nsp is required")
+		return none, waxerr.New(waxerr.CodeInvalid, op, "exactly one of --rule or --nsp is required")
 	}
 	if partial && nspPath == "" {
-		return query.Query{}, none, waxerr.New(waxerr.CodeInvalid, op, "--partial applies to --nsp only")
+		return none, waxerr.New(waxerr.CodeInvalid, op, "--partial applies to --nsp only")
 	}
 	path := rulePath
 	if nspPath != "" {
@@ -491,24 +551,30 @@ func loadRule(op, rulePath, nspPath string, partial bool) (query.Query, playlist
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return query.Query{}, none, waxerr.Wrapf(waxerr.CodeIO, op, err, "reading %s", path)
+		return none, waxerr.Wrapf(waxerr.CodeIO, op, err, "reading %s", path)
 	}
 	if nspPath == "" {
 		q, err := query.ParseRule(data)
-		return q, none, err
+		return playlist.NSPImport{Rule: q}, err
 	}
+	read := playlist.ImportNSP
 	if partial {
-		imp, err := playlist.ImportNSPPartial(data)
-		if err != nil {
-			return query.Query{}, nspRefusalReport(data), err
-		}
-		return imp.Rule, imp.Report, nil
+		read = playlist.ImportNSPPartial
 	}
-	q, err := playlist.ImportNSP(data)
+	imp, err := read(data)
 	if err != nil {
-		return query.Query{}, nspRefusalReport(data), err
+		return playlist.NSPImport{Report: nspRefusalReport(data)}, err
 	}
-	return q, playlist.NSPReport{Direction: playlist.NSPDirImport}, nil
+	return *imp, nil
+}
+
+// withoutCommentNote drops the note on a comment no description could hold, for a
+// command that does not take the comment.
+func withoutCommentNote(rep playlist.NSPReport) playlist.NSPReport {
+	rep.Notes = slices.DeleteFunc(slices.Clone(rep.Notes), func(g playlist.NSPGap) bool {
+		return g.Code == playlist.NSPReasonBadComment
+	})
+	return rep
 }
 
 // nspRefusalReport re-reads a refused document for the whole gap list. Its own
@@ -520,16 +586,23 @@ func nspRefusalReport(data []byte) playlist.NSPReport {
 }
 
 func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
-	var rulePath, nspPath, user, visibility string
+	var rulePath, nspPath, user, visibility, description string
 	var partial bool
 	cmd := &cobra.Command{
 		Use:   "create NAME (--rule FILE | --nsp FILE)",
 		Short: "Create a smart playlist from a JSON query rule or a Navidrome .nsp file",
-		Args:  cobra.ExactArgs(1),
+		Long: "Creates a smart playlist from a JSON query rule or a Navidrome .nsp file. An " +
+			".nsp document's comment becomes the description unless --description is given.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rule, rep, err := loadRule("smartplaylist create", rulePath, nspPath, partial)
+			imp, err := loadRule("smartplaylist create", rulePath, nspPath, partial)
+			if cmd.Flags().Changed("description") {
+				imp.Report = withoutCommentNote(imp.Report)
+			} else {
+				description = imp.Description
+			}
 			if err != nil {
-				writeNSPReport(errOut(cmd), rep, false)
+				writeNSPReport(errOut(cmd), imp.Report, false)
 				return err
 			}
 			m, _, err := g.openMutator(cmd)
@@ -537,7 +610,7 @@ func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			pid, err := m.PlaylistCreate(ctx(cmd), args[0], model.PID(user), model.PlaylistVisibility(visibility), &rule)
+			pid, err := m.PlaylistCreate(ctx(cmd), args[0], description, model.PID(user), model.PlaylistVisibility(visibility), &imp.Rule)
 			if err != nil {
 				return err
 			}
@@ -545,7 +618,7 @@ func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
 			// exists to prevent, so the drop list prints on success too. After the
 			// write, not before: nothing was dropped from a playlist that was never
 			// created.
-			writeNSPReport(errOut(cmd), rep, partial)
+			writeNSPReport(errOut(cmd), imp.Report, partial)
 			return reportPID(cmd, g, "smartplaylist", pid)
 		},
 	}
@@ -555,6 +628,7 @@ func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
 		"with --nsp, import what maps and drop the parts with no WaxBin form instead of refusing")
 	cmd.Flags().StringVar(&user, "user", "", "owner user pid (empty = default user)")
 	cmd.Flags().StringVar(&visibility, "visibility", "private", "visibility: private|shared")
+	addDescriptionFlag(cmd, &description)
 	return cmd
 }
 
@@ -566,9 +640,10 @@ func newSmartPlaylistSetRuleCmd(g *globals) *cobra.Command {
 		Short: "Replace a smart playlist's rule in place (the pid is unchanged)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rule, rep, err := loadRule("smartplaylist set-rule", rulePath, nspPath, partial)
+			imp, err := loadRule("smartplaylist set-rule", rulePath, nspPath, partial)
+			imp.Report = withoutCommentNote(imp.Report)
 			if err != nil {
-				writeNSPReport(errOut(cmd), rep, false)
+				writeNSPReport(errOut(cmd), imp.Report, false)
 				return err
 			}
 			m, _, err := g.openMutator(cmd)
@@ -576,10 +651,10 @@ func newSmartPlaylistSetRuleCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			if err := m.PlaylistSetRule(ctx(cmd), model.PID(args[0]), rule); err != nil {
+			if err := m.PlaylistSetRule(ctx(cmd), model.PID(args[0]), imp.Rule); err != nil {
 				return err
 			}
-			writeNSPReport(errOut(cmd), rep, partial)
+			writeNSPReport(errOut(cmd), imp.Report, partial)
 			return reply(cmd, g, struct {
 				PlaylistPID string `json:"playlistPid"`
 				RuleUpdated bool   `json:"ruleUpdated"`
@@ -598,7 +673,7 @@ func newSmartPlaylistExportNSPCmd(g *globals) *cobra.Command {
 	var partial bool
 	cmd := &cobra.Command{
 		Use:   "export-nsp PID",
-		Short: "Export a smart playlist's rule as a Navidrome .nsp document",
+		Short: "Export a smart playlist's rule, name and description as a Navidrome .nsp document",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.openRead(cmd)
@@ -629,6 +704,9 @@ func newSmartPlaylistExportNSPCmd(g *globals) *cobra.Command {
 				if data, err = playlist.ExportNSP(*pl.Rule); err != nil {
 					return refuseNSP(cmd, g, rep, partial, err)
 				}
+			}
+			if data, err = playlist.NSPWithPlaylist(data, pl.Name, pl.Description); err != nil {
+				return err
 			}
 			if outPath != "" {
 				if err := os.WriteFile(outPath, data, 0o644); err != nil {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ import (
 // playlist to another catalog.
 func exportRefs(t *testing.T, ctx context.Context, lib *waxbin.Library, pids ...model.PID) []model.PortableRef {
 	t.Helper()
-	pl, err := lib.Playlists().CreateStatic(ctx, "share", "", "")
+	pl, err := lib.Playlists().CreateStatic(ctx, "share", "", "", "")
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -511,8 +512,9 @@ func TestResolveRefWithAcceptsAFingerprintTie(t *testing.T) {
 		low = flac
 	}
 	m, err := libB.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{AcceptSameRecording: true})
-	if err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchFingerprint || m.Candidates != 2 {
-		t.Fatalf("ResolveRefWith(fingerprint tie) = %+v (err %v), want %s by fingerprint of 2", m, err, low)
+	if err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchFingerprint || m.Candidates != 2 ||
+		len(m.Tied) != 2 || m.Tied[0].PID != low || m.Tied[1].PID == low {
+		t.Fatalf("ResolveRefWith(fingerprint tie) = %+v (err %v), want %s by fingerprint of 2, the tie in pid order", m, err, low)
 	}
 }
 
@@ -669,7 +671,7 @@ func TestDuplicatesSurviveRemovalByIndexIntoTheExport(t *testing.T) {
 	scanLib(t, ctx, lib)
 	a, b, c := itemPIDByTitle(t, ctx, lib, "Song A"), itemPIDByTitle(t, ctx, lib, "Song B"), itemPIDByTitle(t, ctx, lib, "Song C")
 	pls := lib.Playlists()
-	pl, err := pls.CreateStatic(ctx, "Dups", "", "")
+	pl, err := pls.CreateStatic(ctx, "Dups", "", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -841,7 +843,7 @@ func TestResolveRefReadOnly(t *testing.T) {
 	rw := openManaged(t, ctx, db, root)
 	scanLib(t, ctx, rw)
 	pid := itemPIDByTitle(t, ctx, rw, "RO Song")
-	pl, err := rw.Playlists().CreateStatic(ctx, "ro", "", "")
+	pl, err := rw.Playlists().CreateStatic(ctx, "ro", "", "", "")
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -874,5 +876,335 @@ func TestResolveRefReadOnly(t *testing.T) {
 	// Resolve a batch.
 	if res, err := ro.ResolvePlaylistRefs(ctx, roRefs); err != nil || len(res) != 1 || res[0].PID != pid {
 		t.Fatalf("read-only batch resolve = %+v err %v, want the song", res, err)
+	}
+}
+
+// copiesFixture scans two rips of one song (a descriptive tie) that also share a
+// recording MBID (a strong-id tie), and returns their pids, lower first.
+func copiesFixture(t *testing.T, ctx context.Context) (*waxbin.Library, model.PID, model.PID) {
+	t.Helper()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "c.db")
+	writeFile(t, filepath.Join(root, "rip one", "song.mp3"),
+		testaudio.BuildMP3WithAudio("Copied Song", "Copy Artist", "Copy Album", 3, testaudio.AudioWithSeed(61)))
+	writeFile(t, filepath.Join(root, "rip two", "song.mp3"),
+		testaudio.BuildMP3WithAudio("Copied Song", "Copy Artist", "Copy Album", 3, testaudio.AudioWithSeed(62)))
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "Copied Song").Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("copies = %d (err %v), want 2 items", len(items), err)
+	}
+	first, second := items[0].PID, items[1].PID
+	if second < first {
+		first, second = second, first
+	}
+	rawExec(t, db, "UPDATE track SET mbid = ? WHERE item_id IN (SELECT id FROM playable_item WHERE pid IN (?, ?))",
+		"rec-copied", string(first), string(second))
+	return lib, first, second
+}
+
+// only admits the one item pid names.
+func only(pid model.PID) func(*model.ItemView) bool {
+	return func(v *model.ItemView) bool { return v.PID == pid }
+}
+
+// TestResolveRefWithAcceptSettlesATieOnTheVisibleCopy: a tie between two copies, one of
+// which the caller may not hold, resolves to the other on the rung that tied, with no
+// AcceptSameRecording, on the strong-id rung as on the descriptive one.
+func TestResolveRefWithAcceptSettlesATieOnTheVisibleCopy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, first, second := copiesFixture(t, ctx)
+	byName := model.PortableRef{Kind: model.KindTrack, Artist: "Copy Artist", Title: "Copied Song"}
+	byID := model.PortableRef{Kind: model.KindTrack, MBID: "rec-copied", Essence: "sha256:nomatch"}
+	for _, c := range []struct {
+		name string
+		ref  model.PortableRef
+		rung model.MatchRung
+	}{{"descriptive", byName, model.MatchDescriptive}, {"strong id", byID, model.MatchStrongID}} {
+		if m, err := lib.ResolveRefWith(ctx, c.ref, waxbin.ResolveOptions{}); err != nil || m.Item != nil || m.Candidates != 2 {
+			t.Fatalf("%s unscoped = %+v (err %v), want the tie declined", c.name, m, err)
+		}
+		for _, visible := range []model.PID{first, second} {
+			m, err := lib.ResolveRefWith(ctx, c.ref, waxbin.ResolveOptions{Accept: only(visible)})
+			if err != nil || m.Item == nil || m.Item.PID != visible || m.Rung != c.rung || m.Candidates != 1 {
+				t.Errorf("%s scoped to %s = %+v (err %v), want it by %s of 1", c.name, visible, m, err, c.rung)
+			}
+		}
+	}
+}
+
+// TestResolveRefWithAcceptHidesAUniqueHitTheCallerMayNotHold: an item the caller may not
+// hold is never the answer, even as the only hit on every rung that finds it.
+func TestResolveRefWithAcceptHidesAUniqueHitTheCallerMayNotHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"),
+		testaudio.BuildMP3WithAudio("Lone Song", "Lone Artist", "Lone Album", 1, testaudio.AudioWithSeed(63)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Lone Song")
+	ref := exportRefs(t, ctx, lib, pid)[0]
+	if m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{Accept: only(pid)}); err != nil || m.Item == nil ||
+		m.Item.PID != pid || m.Rung != model.MatchEssence {
+		t.Fatalf("admitted = %+v (err %v), want the essence match", m, err)
+	}
+	m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{Accept: only("someone else")})
+	if err != nil || m.Item != nil || m.Rung != model.MatchNone || m.Candidates != 0 || len(m.Tied) != 0 {
+		t.Errorf("hidden = %+v (err %v), want a clean miss", m, err)
+	}
+}
+
+// TestResolveRefWithAcceptRunsBeforeTheDurationPick: of two windows a cue sheet cuts from
+// one file, the nearest in length to the ref is the one the caller may not hold, so the
+// pick runs among what it may and lands on the other, which is within the tolerance.
+func TestResolveRefWithAcceptRunsBeforeTheDurationPick(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	const rate = 22050
+	dir := filepath.Join(root, "rip")
+	writeFile(t, filepath.Join(dir, "album.wav"), testaudio.EncodeWAV16(rate, testaudio.RichSignal(rate, 20, testaudio.AltPartials, 11)))
+	writeFile(t, filepath.Join(dir, "album.cue"), []byte("PERFORMER \"Rip Artist\"\nTITLE \"Rip Album\"\nFILE \"album.wav\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"Short Window\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Long Window\"\n    INDEX 01 00:09:50\n"))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	short, long := itemPIDByTitle(t, ctx, lib, "Short Window"), itemPIDByTitle(t, ctx, lib, "Long Window")
+	exported := exportRefs(t, ctx, lib, short)[0]
+	ref := model.PortableRef{Essence: exported.Essence, DurationMS: exported.DurationMS}
+	if m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{}); err != nil || m.Item == nil || m.Item.PID != short {
+		t.Fatalf("unscoped = %+v (err %v), want the nearer window %s", m, err, short)
+	}
+	m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{Accept: only(long)})
+	if err != nil || m.Item == nil || m.Item.PID != long || m.Rung != model.MatchEssence || m.Candidates != 1 {
+		t.Errorf("scoped to the other window = %+v (err %v), want %s by essence of 1", m, err, long)
+	}
+}
+
+// TestRefMatchListsTheTiedItemsSorted: a match or a miss names the items that tied,
+// sorted by pid: the declined tie on a miss, the taken tie on a match, the item alone on
+// a unique match, none when nothing matched, and a batch carries the same as pids.
+func TestRefMatchListsTheTiedItemsSorted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, first, second := copiesFixture(t, ctx)
+	pidsOf := func(items []*model.ItemView) []model.PID {
+		var out []model.PID
+		for _, v := range items {
+			out = append(out, v.PID)
+		}
+		return out
+	}
+	byName := model.PortableRef{Kind: model.KindTrack, Artist: "Copy Artist", Title: "Copied Song"}
+	both := []model.PID{first, second}
+	m, err := lib.ResolveRefWith(ctx, byName, waxbin.ResolveOptions{})
+	if err != nil || m.Item != nil || !slices.Equal(pidsOf(m.Tied), both) {
+		t.Errorf("declined = %+v (err %v), want the tie %v", m, err, both)
+	}
+	m, err = lib.ResolveRefWith(ctx, byName, waxbin.ResolveOptions{AcceptSameRecording: true})
+	if err != nil || m.Item == nil || m.Item.PID != first || !slices.Equal(pidsOf(m.Tied), both) {
+		t.Errorf("taken = %+v (err %v), want %s from the tie %v", m, err, first, both)
+	}
+	m, err = lib.ResolveRefWith(ctx, byName, waxbin.ResolveOptions{Accept: only(second)})
+	if err != nil || m.Item == nil || !slices.Equal(pidsOf(m.Tied), []model.PID{second}) {
+		t.Errorf("unique = %+v (err %v), want the item alone", m, err)
+	}
+	ghost := model.PortableRef{Essence: "sha256:ghost"}
+	if m, err := lib.ResolveRefWith(ctx, ghost, waxbin.ResolveOptions{}); err != nil || m.Tied != nil {
+		t.Errorf("nothing = %+v (err %v), want no tie", m, err)
+	}
+	batch, err := lib.ResolvePlaylistRefsWith(ctx, []model.PortableRef{byName, ghost}, waxbin.ResolveOptions{})
+	if err != nil || len(batch) != 2 || !slices.Equal(batch[0].Tied, both) || batch[1].Tied != nil {
+		t.Errorf("batch = %+v (err %v), want the tie %v and then none", batch, err, both)
+	}
+}
+
+// TestResolvePlaylistRefsResolvesARepeatedRefOnce: a batch naming one ref several times
+// resolves it once and answers each entry alike.
+func TestResolvePlaylistRefsResolvesARepeatedRefOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.mp3"),
+		testaudio.BuildMP3WithAudio("Song A", "Artist", "Album", 1, testaudio.AudioWithSeed(64)))
+	writeFile(t, filepath.Join(root, "b.mp3"),
+		testaudio.BuildMP3WithAudio("Song B", "Artist", "Album", 2, testaudio.AudioWithSeed(65)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	a, b := itemPIDByTitle(t, ctx, lib, "Song A"), itemPIDByTitle(t, ctx, lib, "Song B")
+	refs := exportRefs(t, ctx, lib, a, b)
+	asked := 0
+	counting := waxbin.ResolveOptions{Accept: func(*model.ItemView) bool { asked++; return true }}
+	if _, err := lib.ResolvePlaylistRefsWith(ctx, refs[:1], counting); err != nil {
+		t.Fatal(err)
+	}
+	once := asked
+	asked = 0
+	batch, err := lib.ResolvePlaylistRefsWith(ctx, []model.PortableRef{refs[0], refs[1], refs[0], refs[0]}, counting)
+	if err != nil || len(batch) != 4 {
+		t.Fatalf("batch = %+v (err %v)", batch, err)
+	}
+	for i, want := range []model.PID{a, b, a, a} {
+		if batch[i].PID != want || batch[i].Rung != model.MatchEssence {
+			t.Errorf("entry %d = %+v, want %s by essence", i, batch[i], want)
+		}
+	}
+	if asked != 2*once {
+		t.Errorf("the batch asked about %d candidates, want %d (each distinct ref once)", asked, 2*once)
+	}
+	// Each entry owns its answer: changing one leaves its repeats as they were.
+	batch[0].Tied[0] = "changed"
+	if batch[2].Tied[0] != a || batch[3].Tied[0] != a {
+		t.Errorf("a repeat's tie = %v and %v after the first entry's changed, want %s", batch[2].Tied, batch[3].Tied, a)
+	}
+}
+
+// TestResolveRefWithAcceptRunsBeforeTheBestFingerprint: the best fingerprint match is
+// one the caller may not hold, so the pick runs among what it may and lands on the next
+// best, a different encoding still above the floor.
+func TestResolveRefWithAcceptRunsBeforeTheBestFingerprint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const rate = 22050
+	orig := testaudio.RichSignal(rate, 20, testaudio.MusicalPartials, 5)
+	rootA := t.TempDir()
+	writeFile(t, filepath.Join(rootA, "source.wav"), testaudio.EncodeWAV16(rate, orig))
+	libA := openManaged(t, ctx, filepath.Join(t.TempDir(), "a.db"), rootA)
+	scanLib(t, ctx, libA)
+	if _, err := libA.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+		t.Fatalf("analyze A: %v", err)
+	}
+	ref := exportRefs(t, ctx, libA, itemPIDByTitle(t, ctx, libA, "source"))[0]
+	if len(ref.Fingerprint) == 0 {
+		t.Skip("analyze produced no fingerprint (no decoder available)")
+	}
+	ref.Essence = "sha256:nomatch"
+
+	rootB := t.TempDir()
+	writeFile(t, filepath.Join(rootB, "exact.wav"), testaudio.EncodeWAV16(rate, orig))
+	writeFile(t, filepath.Join(rootB, "near.wav"), testaudio.EncodeWAV16(rate, testaudio.Reencode(orig, 0.85, 43)))
+	libB := openManaged(t, ctx, filepath.Join(t.TempDir(), "b.db"), rootB)
+	scanLib(t, ctx, libB)
+	if _, err := libB.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+		t.Fatalf("analyze B: %v", err)
+	}
+	exact, near := itemPIDByTitle(t, ctx, libB, "exact"), itemPIDByTitle(t, ctx, libB, "near")
+	if m, err := libB.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{}); err != nil || m.Item == nil || m.Item.PID != exact {
+		t.Fatalf("unscoped = %+v (err %v), want the exact encoding %s", m, err, exact)
+	}
+	m, err := libB.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{Accept: only(near)})
+	if err != nil || m.Item == nil || m.Item.PID != near || m.Rung != model.MatchFingerprint || m.Candidates != 1 {
+		t.Errorf("scoped to the other encoding = %+v (err %v), want %s by fingerprint of 1", m, err, near)
+	}
+}
+
+// TestResolveRefWithAcceptRunsBeforeTheAlbumTiebreak: of two namesakes the album would
+// pick the one the caller may not hold, so the tie-break runs among what it may and the
+// other answers.
+func TestResolveRefWithAcceptRunsBeforeTheAlbumTiebreak(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "studio.mp3"),
+		testaudio.BuildMP3WithAudio("Twice Song", "Twice Artist", "Studio Album", 1, testaudio.AudioWithSeed(66)))
+	writeFile(t, filepath.Join(root, "live.mp3"),
+		testaudio.BuildMP3WithAudio("Twice Song", "Twice Artist", "Live Album", 1, testaudio.AudioWithSeed(67)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items = %d (err %v), want 2", len(items), err)
+	}
+	var studio, live model.PID
+	for _, it := range items {
+		if it.Album == "Studio Album" {
+			studio = it.PID
+		} else {
+			live = it.PID
+		}
+	}
+	ref := model.PortableRef{Kind: model.KindTrack, Artist: "Twice Artist", Title: "Twice Song", Album: "Studio Album"}
+	if m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{}); err != nil || m.Item == nil || m.Item.PID != studio {
+		t.Fatalf("unscoped = %+v (err %v), want the studio cut %s", m, err, studio)
+	}
+	m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{Accept: only(live)})
+	if err != nil || m.Item == nil || m.Item.PID != live || m.Rung != model.MatchDescriptive || m.Candidates != 1 {
+		t.Errorf("scoped to the live cut = %+v (err %v), want %s by descriptive of 1", m, err, live)
+	}
+}
+
+// TestPortableRefsKeepDuplicatesAndNameTheMissing: refs come back in the order asked, a
+// repeated pid once for each place it holds, and a pid naming no item is named rather
+// than dropped without a word.
+func TestPortableRefsKeepDuplicatesAndNameTheMissing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.mp3"),
+		testaudio.BuildMP3WithAudio("Song A", "Artist", "Album", 1, testaudio.AudioWithSeed(68)))
+	writeFile(t, filepath.Join(root, "b.mp3"),
+		testaudio.BuildMP3WithAudio("Song B", "Artist", "Album", 2, testaudio.AudioWithSeed(69)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	a, b := itemPIDByTitle(t, ctx, lib, "Song A"), itemPIDByTitle(t, ctx, lib, "Song B")
+	refs, missing, err := lib.PortableRefs(ctx, []model.PID{b, "nope", a, b, "gone"})
+	if err != nil {
+		t.Fatalf("portable refs: %v", err)
+	}
+	var titles []string
+	for _, r := range refs {
+		titles = append(titles, r.Title)
+	}
+	if strings.Join(titles, ",") != "Song B,Song A,Song B" || refs[0].Essence != refs[2].Essence {
+		t.Errorf("refs = %v, want Song B, Song A, Song B", titles)
+	}
+	if !slices.Equal(missing, []model.PID{"nope", "gone"}) {
+		t.Errorf("missing = %v, want [nope gone]", missing)
+	}
+}
+
+// TestResolveRefWithAcceptStillChecksTheLoneScopedHit: an essence the catalog holds under
+// several items is narrowed by the ref's kind and length even when the scope leaves one,
+// so a ref for one window of a cue rip never resolves to another window the caller may
+// hold, nor a track's ref to a book sharing its bytes.
+func TestResolveRefWithAcceptStillChecksTheLoneScopedHit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	const rate = 22050
+	dir := filepath.Join(root, "rip")
+	writeFile(t, filepath.Join(dir, "album.wav"), testaudio.EncodeWAV16(rate, testaudio.RichSignal(rate, 20, testaudio.AltPartials, 12)))
+	writeFile(t, filepath.Join(dir, "album.cue"), []byte("PERFORMER \"Rip Artist\"\nTITLE \"Rip Album\"\nFILE \"album.wav\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"Five\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Seven\"\n    INDEX 01 00:05:00\n"+
+		"  TRACK 03 AUDIO\n    TITLE \"Eight\"\n    INDEX 01 00:12:00\n"))
+	writeFile(t, filepath.Join(root, "track.mp3"),
+		testaudio.BuildMP3WithAudio("Shared Bytes", "Byte Artist", "Byte Album", 1, testaudio.AudioWithSeed(70)))
+	writeFile(t, filepath.Join(root, "book.m4b"),
+		testaudio.BuildMP3WithAudio("Shared Bytes Read", "Byte Author", "", 1, testaudio.AudioWithSeed(70)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+
+	five, eight := itemPIDByTitle(t, ctx, lib, "Five"), itemPIDByTitle(t, ctx, lib, "Eight")
+	window := exportRefs(t, ctx, lib, five)[0]
+	ref := model.PortableRef{Essence: window.Essence, DurationMS: window.DurationMS}
+	if m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{}); err != nil || m.Item == nil || m.Item.PID != five {
+		t.Fatalf("unscoped = %+v (err %v), want the five-second window", m, err)
+	}
+	if m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{Accept: only(eight)}); err != nil || m.Item != nil {
+		t.Errorf("scoped to the eight-second window = %+v (err %v), want a miss", m, err)
+	}
+
+	track, book := itemPIDByTitle(t, ctx, lib, "Shared Bytes"), itemPIDByTitle(t, ctx, lib, "Shared Bytes Read")
+	trackRef := exportRefs(t, ctx, lib, track)[0]
+	byBytes := model.PortableRef{Kind: model.KindTrack, Essence: trackRef.Essence}
+	if m, err := lib.ResolveRefWith(ctx, byBytes, waxbin.ResolveOptions{Accept: only(book)}); err != nil || m.Item != nil {
+		t.Errorf("a track's ref scoped to the book = %+v (err %v), want a miss", m, err)
+	}
+	if m, err := lib.ResolveRefWith(ctx, byBytes, waxbin.ResolveOptions{Accept: only(track)}); err != nil || m.Item == nil || m.Item.PID != track {
+		t.Errorf("a track's ref scoped to the track = %+v (err %v), want the track", m, err)
 	}
 }

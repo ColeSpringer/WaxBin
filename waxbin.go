@@ -945,16 +945,17 @@ func (l *Library) Chapters(ctx context.Context, pid model.PID) ([]model.Chapter,
 	return l.store.Chapters(ctx, pid)
 }
 
-// CurrentChapter resolves the chapter a resume position falls in (the nearest
-// preceding chapter when between spans). It returns nil when the book has no
+// CurrentChapter resolves the chapter a resume position is in: the last chapter starting
+// at or before it, so a position in a gap between two chapters is in the one before it,
+// and one before the first chapter is in the first. It returns nil when the book has no
 // chapters.
 func (l *Library) CurrentChapter(ctx context.Context, pid model.PID, positionMS int64) (*model.Chapter, error) {
 	return l.store.CurrentChapter(ctx, pid, positionMS)
 }
 
 // BookResume returns a user's play state for a book together with the chapter their
-// resume position falls in, the chapter-level resume answer. An empty userPID
-// selects the default user.
+// resume position is in (CurrentChapter), the chapter-level resume answer. An empty
+// userPID selects the default user.
 func (l *Library) BookResume(ctx context.Context, userPID, bookPID model.PID) (*model.PlayState, *model.Chapter, error) {
 	st, err := l.playback.State(ctx, userPID, bookPID)
 	if err != nil {

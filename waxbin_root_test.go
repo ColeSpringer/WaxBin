@@ -486,7 +486,7 @@ func TestRemoveRootArchivesWhatItHeldAndAReaddRelinksIt(t *testing.T) {
 	if _, err := lib.Playback().SetStar(ctx, "", one, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
-	list, err := lib.Playlists().CreateStatic(ctx, "List", "", "")
+	list, err := lib.Playlists().CreateStatic(ctx, "List", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

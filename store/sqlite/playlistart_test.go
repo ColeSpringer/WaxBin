@@ -16,7 +16,7 @@ import (
 // newPlaylist creates an empty static playlist.
 func newPlaylist(t *testing.T, st *Store, name string) model.PID {
 	t.Helper()
-	pl, err := st.CreatePlaylist(context.Background(), name, "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(context.Background(), name, "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create playlist %q: %v", name, err)
 	}
@@ -181,7 +181,7 @@ func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 		t.Fatalf("delete playlist: %v", err)
 	}
 
-	second, err := st.CreatePlaylist(ctx, "Next", "", model.PlaylistStatic, "", nil)
+	second, err := st.CreatePlaylist(ctx, "Next", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create second playlist: %v", err)
 	}

@@ -15,35 +15,33 @@ import (
 
 func pathTitles(t *testing.T, st *sqlite.Store, p string) []string {
 	t.Helper()
-	items, err := st.ItemsByPlaylistPath(context.Background(), p)
+	got, err := st.ItemsByPlaylistPaths(context.Background(), []string{p}, 100)
 	if err != nil {
 		t.Fatalf("items by %s: %v", p, err)
 	}
 	var out []string
-	for _, it := range items {
+	for _, it := range got[p].Items {
 		out = append(out, it.Title)
 	}
 	slices.Sort(out)
 	return out
 }
 
-// TestItemsByPlaylistPathReadsEveryEdge: an M3U8 path names the items behind its file
-// through any edge, so a copy's path names its item, a later book part's path its book,
-// and a cue rip's file every track carved from it.
-func TestItemsByPlaylistPathReadsEveryEdge(t *testing.T) {
-	t.Parallel()
-	st, lib, root := openCopyStore(t)
+// everyEdgeFixture holds a copy pair, a three-track cue rip and a two-part book, and
+// returns the root, the copy's path, the rip's path and the parts' paths.
+func everyEdgeFixture(t *testing.T, st *sqlite.Store, lib *model.Library, root string) (copied, rip string, parts []string) {
+	t.Helper()
 	ctx := context.Background()
-	original, copied := filepath.Join(root, "A", "song.flac"), filepath.Join(root, "B", "copy.flac")
+	original := filepath.Join(root, "A", "song.flac")
+	copied = filepath.Join(root, "B", "copy.flac")
 	putCopyPair(t, st, lib, original, copied)
 
-	rip := filepath.Join(root, "Rip", "rip.flac")
+	rip = filepath.Join(root, "Rip", "rip.flac")
 	touch(t, rip)
 	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, rip, "sha256:RE", "sha256:RC", 8000,
 		[][2]int64{{0, 300}, {300, 600}, {600, 900}})); err != nil {
 		t.Fatalf("put rip: %v", err)
 	}
-	var parts []string
 	for i, name := range []string{"p1.m4b", "p2.m4b"} {
 		p := filepath.Join(root, "Book", name)
 		touch(t, p)
@@ -54,6 +52,16 @@ func TestItemsByPlaylistPathReadsEveryEdge(t *testing.T) {
 		}
 		parts = append(parts, p)
 	}
+	return copied, rip, parts
+}
+
+// TestItemsByPlaylistPathsReadEveryEdge: an M3U8 path names the items behind its file
+// through any edge, so a copy's path names its item, a later book part's path its book,
+// and a cue rip's file every track carved from it.
+func TestItemsByPlaylistPathsReadEveryEdge(t *testing.T) {
+	t.Parallel()
+	st, lib, root := openCopyStore(t)
+	copied, rip, parts := everyEdgeFixture(t, st, lib, root)
 
 	for _, c := range []struct {
 		path string
@@ -91,7 +99,7 @@ func TestM3U8RoundTripsCueTracks(t *testing.T) {
 		byTitle[it.Title] = it.PID
 	}
 	svc := playlist.New(st)
-	pl, err := svc.CreateStatic(ctx, "Rip mix", "", "")
+	pl, err := svc.CreateStatic(ctx, "Rip mix", "", "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -99,7 +107,7 @@ func TestM3U8RoundTripsCueTracks(t *testing.T) {
 		t.Fatalf("set: %v", err)
 	}
 	var doc bytes.Buffer
-	if err := svc.ExportM3U8(ctx, pl, &doc, ""); err != nil {
+	if _, err := svc.ExportM3U8(ctx, pl, &doc, ""); err != nil {
 		t.Fatalf("export: %v", err)
 	}
 
@@ -118,7 +126,7 @@ func TestM3U8RoundTripsCueTracks(t *testing.T) {
 	if want := []string{"Track 2", "Track 3", "Track 2"}; !slices.Equal(got, want) {
 		t.Fatalf("resolved %v, want %v", got, want)
 	}
-	res, err := svc.ImportM3U8(ctx, "Again", "", "", bytes.NewReader(doc.Bytes()))
+	res, err := svc.ImportM3U8(ctx, "Again", "", "", "", bytes.NewReader(doc.Bytes()))
 	if err != nil || res.Matched != 3 || res.Unmatched != 0 {
 		t.Fatalf("import = %+v (err %v), want three matched", res, err)
 	}
@@ -149,7 +157,7 @@ func TestM3U8ImportListsABookOnce(t *testing.T) {
 		parts = append(parts, p)
 	}
 	doc := strings.Join(parts, "\n") + "\n"
-	res, err := playlist.New(st).ImportM3U8(ctx, "Book", "", "", strings.NewReader(doc))
+	res, err := playlist.New(st).ImportM3U8(ctx, "Book", "", "", "", strings.NewReader(doc))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -159,5 +167,92 @@ func TestM3U8ImportListsABookOnce(t *testing.T) {
 	}
 	if res.Matched != 1 || res.Merged != 2 || res.Unmatched != 0 {
 		t.Errorf("result = %+v, want 1 matched and 2 merged", res)
+	}
+}
+
+// TestItemsByPlaylistPathsMatchesWhatTheLikeDid: on fixtures naming at most 100 items a
+// path, the name-seeded lookup answers every path as the LIKE over every file did, in a
+// document that names each path in several spellings.
+func TestItemsByPlaylistPathsMatchesWhatTheLikeDid(t *testing.T) {
+	t.Parallel()
+	st, lib, root := openCopyStore(t)
+	ctx := context.Background()
+	copied, rip, parts := everyEdgeFixture(t, st, lib, root)
+	for _, rel := range []string{"x/dup.flac", "y/dup.flac", "y/DUP.flac", "deep/x/dup.flac", "Café/é.flac"} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		touch(t, p)
+		in := input(lib.ID, p, "sha256:E"+rel, "sha256:C"+rel, "Title "+rel)
+		mustPut(t, st, in)
+	}
+	lines := []string{
+		copied, "B/copy.flac", "b/COPY.FLAC", "./B/copy.flac", "B/./copy.flac", "x/../B/copy.flac", "copy.flac",
+		rip, "Rip/rip.flac", "rip.flac", parts[1], "Book/p2.m4b", "p2.m4b", "ook/p2.m4b",
+		"dup.flac", "x/dup.flac", "X/DUP.FLAC", "deep/x/dup.flac", "Café/é.flac", "café/é.flac", "CAFÉ/é.flac",
+		filepath.Join(root, "nothing.flac"), "nothing.flac", "", ".", "..", "../dup.flac",
+	}
+	got, err := st.ItemsByPlaylistPaths(ctx, lines, 1000)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	for _, line := range lines {
+		want, err := st.ItemsByPlaylistPathLike(ctx, line)
+		if err != nil {
+			t.Fatalf("reference %q: %v", line, err)
+		}
+		if g := got[line]; g.Overflow || !slices.Equal(viewPIDs(g.Items), viewPIDs(want)) {
+			t.Errorf("%q = %v (overflow %v), the LIKE named %v", line, viewPIDs(g.Items), g.Overflow, viewPIDs(want))
+		}
+	}
+}
+
+// TestItemsByPlaylistPathsSeedsOnBothSeparators: a file name holding a backslash, which
+// the name column cuts at as it cuts at a slash, is still found by a relative path naming
+// it, since the seed is cut the same way.
+func TestItemsByPlaylistPathsSeedsOnBothSeparators(t *testing.T) {
+	t.Parallel()
+	if filepath.Separator == '\\' {
+		t.Skip("a backslash is a separator here, so no file name holds one")
+	}
+	st, lib, root := openCopyStore(t)
+	p := filepath.Join(root, "x", `a\b.flac`)
+	touch(t, p)
+	mustPut(t, st, input(lib.ID, p, "sha256:EB", "sha256:CB", "Slashed"))
+	for _, line := range []string{`x/a\b.flac`, `a\b.flac`, p} {
+		if got := pathTitles(t, st, line); !slices.Equal(got, []string{"Slashed"}) {
+			t.Errorf("%q = %v, want Slashed", line, got)
+		}
+	}
+	if got := pathTitles(t, st, "b.flac"); got != nil {
+		t.Errorf("the name past the backslash = %v, want nothing (the LIKE wants it whole)", got)
+	}
+}
+
+func viewPIDs(items []*model.ItemView) []model.PID {
+	var out []model.PID
+	for _, it := range items {
+		out = append(out, it.PID)
+	}
+	return out
+}
+
+// TestItemsByPlaylistPathsReadsAWindowsLine: a relative line written on Windows, its
+// folders split by backslashes, names the file it would there when it names nothing as
+// written, while a file whose own name holds a backslash is still found by its name.
+func TestItemsByPlaylistPathsReadsAWindowsLine(t *testing.T) {
+	t.Parallel()
+	if filepath.Separator == '\\' {
+		t.Skip("a backslash is already a separator here")
+	}
+	st, lib, root := openCopyStore(t)
+	p := filepath.Join(root, "Artist", "Album", "01.flac")
+	touch(t, p)
+	mustPut(t, st, input(lib.ID, p, "sha256:EW", "sha256:CW", "Windows Line"))
+	for _, line := range []string{`Artist\Album\01.flac`, `Album\01.flac`, `.\Album\01.flac`} {
+		if got := pathTitles(t, st, line); !slices.Equal(got, []string{"Windows Line"}) {
+			t.Errorf("%q = %v, want Windows Line", line, got)
+		}
+	}
+	if got := pathTitles(t, st, `Other\01.flac`); got != nil {
+		t.Errorf("a line naming another folder = %v, want nothing", got)
 	}
 }

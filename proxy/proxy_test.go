@@ -445,7 +445,7 @@ func TestPlaylistImportResultCarriesMerged(t *testing.T) {
 		},
 	}
 	c := dial(t, startServer(t, handlers, nil))
-	res, err := c.PlaylistImportM3U8(context.Background(), "Book", "", "", []byte("/b/p1.m4b\n"))
+	res, err := c.PlaylistImportM3U8(context.Background(), "Book", "", "", "", []byte("/b/p1.m4b\n"))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}

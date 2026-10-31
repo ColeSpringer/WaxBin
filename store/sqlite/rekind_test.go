@@ -58,7 +58,7 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 	if _, err := st.AddBookmark(ctx, "", pid, 1000, "mark"); err != nil {
 		t.Fatalf("bookmark: %v", err)
 	}
-	pl, err := st.CreatePlaylist(ctx, "List", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
+	pl, err := st.CreatePlaylist(ctx, "List", "", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
 	if err != nil {
 		t.Fatalf("playlist: %v", err)
 	}

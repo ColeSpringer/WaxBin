@@ -3,9 +3,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -886,7 +889,7 @@ func TestFilelessChapterRowsNeverReachTheBookReaders(t *testing.T) {
 			if v.spans, err = bookTimelineTx(ctx, tx, id, nil); err != nil {
 				return err
 			}
-			v.extents, err = nonUserChapterExtentsTx(ctx, tx, id)
+			v.extents, err = partExtents(ctx, tx, id)
 			return err
 		}); err != nil {
 			t.Fatalf("timeline: %v", err)
@@ -2030,5 +2033,346 @@ func TestItemFilesCarryEachFilesFacts(t *testing.T) {
 	members, err := st.EntityMemberFiles(ctx, model.MergeAlbum, entityPIDByName(t, st, "album", "title", "Al"))
 	if err != nil || len(members) != 1 || members[0].FilePID != tr.FilePID || members[0].Size != 4 || members[0].DurationMS != 500 {
 		t.Errorf("EntityMemberFiles = %+v (err %v), want the track's file with its facts", members, err)
+	}
+}
+
+// TestBookPartsCarryStartsThatSumToTheTotal: each part says where it starts on the book's
+// timeline and how far it advances it, a middle part whose chapters overrun its audio by
+// that overrun, so the starts follow from the lengths, the lengths sum to the total the
+// detail and the item view report, and every chapter sits at its part's start plus its
+// offset into the file.
+func TestBookPartsCarryStartsThatSumToTheTotal(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	spec := func(n, pos int, dur int64, chs ...model.Chapter) bookSpec {
+		return bookSpec{path: fmt.Sprintf("/lib/o/p%d.mp3", n), essence: fmt.Sprintf("ov%d", n), content: fmt.Sprintf("oc%d", n),
+			title: "Overrun", author: "Auth", asin: "BOV", position: pos, durationMS: dur, chapters: chs}
+	}
+	putBook(t, st, lib.ID, spec(1, 1, 1000, model.Chapter{Title: "A"}))
+	putBook(t, st, lib.ID, spec(2, 2, 2000, model.Chapter{Title: "B"},
+		model.Chapter{Title: "C", FileStartMS: 1800, FileEndMS: 2400}))
+	r := putBook(t, st, lib.ID, spec(3, 3, 1500, model.Chapter{Title: "D"}))
+
+	d, err := st.BookByPID(ctx, r.ItemPID)
+	if err != nil {
+		t.Fatalf("BookByPID: %v", err)
+	}
+	want := []struct{ start, effective, measured int64 }{{0, 1000, 1000}, {1000, 2400, 2000}, {3400, 1500, 1500}}
+	if len(d.Files) != len(want) {
+		t.Fatalf("parts = %+v, want three", d.Files)
+	}
+	var sum int64
+	starts := map[model.PID]int64{}
+	for i, w := range want {
+		p := d.Files[i]
+		if p.StartMS != w.start || p.EffectiveMS != w.effective || p.DurationMS != w.measured {
+			t.Errorf("part %d = start %d, effective %d, measured %d; want %+v", i, p.StartMS, p.EffectiveMS, p.DurationMS, w)
+		}
+		sum += p.EffectiveMS
+		starts[p.FilePID] = p.StartMS
+	}
+	if sum != 4900 || d.TotalDurationMS != sum || d.Item.DurationMS != sum {
+		t.Errorf("lengths sum to %d, detail total %d, item view %d; want 4900 each", sum, d.TotalDurationMS, d.Item.DurationMS)
+	}
+	for _, c := range d.Chapters {
+		if c.StartMS != starts[c.FilePID]+c.FileStartMS {
+			t.Errorf("chapter %s at %d, want its part's start %d plus %d", c.Title, c.StartMS, starts[c.FilePID], c.FileStartMS)
+		}
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestTheFourLengthDefinitionsAgree: a part whose file carries chapters from two derived
+// sources advances the book by the length the read shows, its preferred source's, and
+// the chapter list, the stored total, the timeline places are remapped against, the
+// chapter edit's split and the scan's extent all agree on it; the hidden source counts
+// for nothing.
+func TestTheFourLengthDefinitionsAgree(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/s/p1.mp3", essence: "fd1", content: "fc1", title: "Sources", author: "Auth",
+		asin: "BFD", position: 1, durationMS: 1000,
+		chapters: []model.Chapter{{Title: "A"}, {Title: "B", FileStartMS: 1200, FileEndMS: 1500}}})
+	r := putBook(t, st, lib.ID, bookSpec{path: "/lib/s/p2.mp3", essence: "fd2", content: "fc2", title: "Sources", author: "Auth",
+		asin: "BFD", position: 2, durationMS: 2000, chapters: []model.Chapter{{Title: "C"}}})
+	var bookID, p1 int64
+	if err := st.rdb().QueryRowContext(ctx, `SELECT pi.id, f.id FROM playable_item pi, file f
+		WHERE pi.pid = ? AND f.path = ?`, string(r.ItemPID), []byte("/lib/s/p1.mp3")).Scan(&bookID, &p1); err != nil {
+		t.Fatal(err)
+	}
+	// A cue sheet's chapters on the first part as well, running far past it: the
+	// embedded ones outrank them, so the read never shows them.
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms, source)
+		VALUES (?, ?, 0, 'Cue one', 0, 0, 'cue'), (?, ?, 1, 'Cue two', 3000, 0, 'cue')`, bookID, p1, bookID, p1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.writeTx(ctx, func(tx *sql.Tx) error { return refreshBookDuration(ctx, tx, bookID) }); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := st.BookByPID(ctx, r.ItemPID)
+	if err != nil {
+		t.Fatalf("BookByPID: %v", err)
+	}
+	if len(d.Chapters) != 3 || d.Chapters[2].StartMS != 1500 || d.Files[1].StartMS != 1500 {
+		t.Fatalf("chapters %+v, parts %+v: want the second part at 1500", d.Chapters, d.Files)
+	}
+	if d.TotalDurationMS != 3500 || d.Item.DurationMS != 3500 {
+		t.Errorf("total = %d, stored %d; want 3500 both", d.TotalDurationMS, d.Item.DurationMS)
+	}
+	assertVerifyClean(t, st)
+	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		spans, err := bookTimelineTx(ctx, tx, bookID, nil)
+		if err != nil {
+			return err
+		}
+		if len(spans) != 2 || spans[0].span.length != 1500 || spans[1].span.offset != 1500 {
+			t.Errorf("timeline = %+v, want the first part 1500 long", spans)
+		}
+		if ext, err := chapterExtentTx(ctx, tx, bookID, p1); err != nil || ext != 1500 {
+			t.Errorf("the scan's extent of the first part = %d (err %v), want 1500", ext, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Setting the chapters back as read stores each where the read placed it, so the
+	// split maps against the same timeline.
+	if err := st.SetItemChapters(ctx, r.ItemPID, d.Chapters, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set chapters: %v", err)
+	}
+	again, err := st.BookByPID(ctx, r.ItemPID)
+	if err != nil {
+		t.Fatalf("BookByPID: %v", err)
+	}
+	for i, c := range again.Chapters {
+		w := d.Chapters[i]
+		if c.StartMS != w.StartMS || c.FilePID != w.FilePID || c.FileStartMS != w.FileStartMS {
+			t.Errorf("chapter %d after the round trip = %+v, want %+v", i, c, w)
+		}
+	}
+	if again.TotalDurationMS != 3500 {
+		t.Errorf("total after the round trip = %d, want 3500", again.TotalDurationMS)
+	}
+}
+
+// currentChapterTitle is the title of the chapter CurrentChapter names at pos.
+func currentChapterTitle(t *testing.T, st *Store, book model.PID, pos int64) string {
+	t.Helper()
+	ch, err := st.CurrentChapter(context.Background(), book, pos)
+	if err != nil || ch == nil {
+		t.Fatalf("CurrentChapter(%d) = %v (err %v)", pos, ch, err)
+	}
+	return ch.Title
+}
+
+// TestCurrentChapterInAGapNamesThePrecedingChapter: a position between one chapter's end
+// and the next one's start is still in the chapter before it, the one a listener there
+// last heard, never the one ahead.
+func TestCurrentChapterInAGapNamesThePrecedingChapter(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/g/gap.m4b", essence: "gp1", content: "gc1", title: "Gaps", author: "Auth",
+		durationMS: 150000, chapters: []model.Chapter{{Title: "One", FileEndMS: 60000},
+			{Title: "Two", FileStartMS: 90000, FileEndMS: 120000}}}).ItemPID
+	for pos, want := range map[int64]string{0: "One", 59999: "One", 60000: "One", 75000: "One", 89999: "One", 90000: "Two", 130000: "Two"} {
+		if got := currentChapterTitle(t, st, book, pos); got != want {
+			t.Errorf("CurrentChapter(%d) = %s, want %s", pos, got, want)
+		}
+	}
+}
+
+// TestCurrentChapterBeforeTheFirstNamesTheFirst: a position before the first chapter
+// starts names the first.
+func TestCurrentChapterBeforeTheFirstNamesTheFirst(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/g/late.m4b", essence: "gp2", content: "gc2", title: "Late Start", author: "Auth",
+		durationMS: 60000, chapters: []model.Chapter{{Title: "One", FileStartMS: 10000}, {Title: "Two", FileStartMS: 30000}}}).ItemPID
+	for _, pos := range []int64{0, 5000, 9999} {
+		if got := currentChapterTitle(t, st, book, pos); got != "One" {
+			t.Errorf("CurrentChapter(%d) = %s, want One", pos, got)
+		}
+	}
+}
+
+// TestCurrentChapterPastTheEndNamesTheLast: a position at or past the end of the book
+// names the last chapter.
+func TestCurrentChapterPastTheEndNamesTheLast(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/g/end.m4b", essence: "gp3", content: "gc3", title: "Ends", author: "Auth",
+		durationMS: 60000, chapters: []model.Chapter{{Title: "One"}, {Title: "Two", FileStartMS: 30000, FileEndMS: 40000}}}).ItemPID
+	for _, pos := range []int64{40000, 60000, 90000} {
+		if got := currentChapterTitle(t, st, book, pos); got != "Two" {
+			t.Errorf("CurrentChapter(%d) = %s, want Two", pos, got)
+		}
+	}
+}
+
+// chapterRead matches a plan line that reads chapter rows.
+var chapterRead = regexp.MustCompile(`^(SEARCH|SCAN) (chapter|c|d)\b`)
+
+// TestTheExtentReadsEachChapterRowOnce: no statement that measures a part's chapters
+// nests a correlated subquery inside the subquery reading the chapter rows, which SQLite
+// would run again for every row and so in time growing with the square of a part's
+// chapter count (a 2,000-chapter book took seconds to read and to write).
+func TestTheExtentReadsEachChapterRowOnce(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	for name, c := range map[string]struct {
+		q    string
+		args []any
+	}{
+		"partExtentsQ":             {partExtentsQ, []any{1}},
+		"fileExtentQ":              {fileExtentQ, []any{1, 1}},
+		"derivedExtentQ":           {derivedExtentQ, []any{1, 1}},
+		"refreshBookDurationQ":     {refreshBookDurationQ, []any{1}},
+		"refreshAllBookDurationsQ": {refreshAllBookDurationsQ, nil},
+		"bookDurationDriftQ":       {bookDurationDriftQ, nil},
+	} {
+		nodes := explainPlanTree(t, st, c.q, c.args...)
+		readsChapters := map[int]bool{}
+		for _, n := range nodes {
+			if chapterRead.MatchString(n.detail) {
+				readsChapters[n.parent] = true
+			}
+		}
+		for _, n := range nodes {
+			if strings.HasPrefix(n.detail, "CORRELATED SCALAR SUBQUERY") && readsChapters[n.parent] {
+				var plan []string
+				for _, x := range nodes {
+					plan = append(plan, fmt.Sprintf("%d %d %s", x.id, x.parent, x.detail))
+				}
+				t.Errorf("%s runs %s for every chapter row it reads:\n%s", name, n.detail, strings.Join(plan, "\n"))
+			}
+		}
+	}
+}
+
+// genreDuration is the stored duration of the genre named name.
+func genreDuration(t *testing.T, st *Store, name string) int64 {
+	t.Helper()
+	return int64(scalarInt(t, st, `SELECT gr.total_duration_ms FROM genre_rollup gr JOIN genre g ON g.id = gr.genre_id
+		WHERE g.name = ?`, name))
+}
+
+// TestGenreAndLibraryTotalsCountABookAsItsTimeline: a genre's running time and the
+// library's count a book for the length its item view reports, its timeline's total,
+// which a middle part's overrunning chapters lengthen, and follow it when a chapter-only
+// rescan or a chapter edit moves it.
+func TestGenreAndLibraryTotalsCountABookAsItsTimeline(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	part := func(n int, dur int64, chs ...model.Chapter) bookSpec {
+		return bookSpec{path: fmt.Sprintf("/lib/gt/p%d.mp3", n), essence: fmt.Sprintf("gt%d", n), content: fmt.Sprintf("gtc%d", n),
+			title: "Timeline", author: "Auth", asin: "BGT", position: n, durationMS: dur, genres: []string{"Fantasy"}, chapters: chs}
+	}
+	putBook(t, st, lib.ID, part(1, 1000, model.Chapter{Title: "A"}, model.Chapter{Title: "B", FileStartMS: 800, FileEndMS: 1500}))
+	book := putBook(t, st, lib.ID, part(2, 2000, model.Chapter{Title: "C"})).ItemPID
+	agree := func(want int64) {
+		t.Helper()
+		v, err := st.ItemByPID(ctx, book)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stats, err := st.Stats(ctx, "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g := genreDuration(t, st, "Fantasy"); v.DurationMS != want || g != want || stats.TotalDuration != want {
+			t.Errorf("item %d, genre %d, library %d; want %d each", v.DurationMS, g, stats.TotalDuration, want)
+		}
+		assertVerifyClean(t, st)
+	}
+	agree(3500)
+
+	// The same bytes read again with the first part's chapters inside its audio.
+	putBook(t, st, lib.ID, part(1, 1000, model.Chapter{Title: "A"}, model.Chapter{Title: "B", FileStartMS: 800}))
+	agree(3000)
+
+	d, err := st.BookByPID(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chs := slices.Clone(d.Chapters)
+	chs[len(chs)-1].EndMS = 4500
+	if err := st.SetItemChapters(ctx, book, chs, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set chapters: %v", err)
+	}
+	agree(4500)
+
+	// A repair run rebuilds a drifted total before the genre that counts it.
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE book SET total_duration_ms = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE genre_rollup SET total_duration_ms = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RefreshRollups(ctx); err != nil {
+		t.Fatal(err)
+	}
+	agree(4500)
+}
+
+// TestTheExtentRuleReadsTheSameInGoAndSQL: the read takes a part's chapter extent in Go
+// from the rows it shows (chapterExtent) while the writers take it in SQL
+// (partExtentExpr), and the two agree on every mix of sources: a hidden cue sheet past the
+// embedded chapters, user rows past both, two sources of one rank (the name decides), a
+// synthetic chapter alone.
+func TestTheExtentRuleReadsTheSameInGoAndSQL(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	var book model.PID
+	for n := 1; n <= 4; n++ {
+		book = putBook(t, st, lib.ID, bookSpec{path: fmt.Sprintf("/lib/gs/p%d.mp3", n), essence: fmt.Sprintf("gs%d", n),
+			content: fmt.Sprintf("gsc%d", n), title: "Rules", author: "Auth", position: n, durationMS: 1000,
+			chapters: []model.Chapter{{Title: "E", FileStartMS: 100 * int64(n), FileEndMS: 1500}}}).ItemPID
+	}
+	bookID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(book)))
+	fileOf := func(n int) int64 {
+		return int64(scalarInt(t, st, "SELECT id FROM file WHERE path = ?", []byte(fmt.Sprintf("/lib/gs/p%d.mp3", n))))
+	}
+	for _, r := range []struct {
+		part         int
+		source       string
+		start, end   int64
+		replaceParts bool
+	}{
+		{part: 2, source: "cue", start: 3000},
+		{part: 3, source: "user", start: 5000},
+		{part: 3, source: "cue", start: 9000},
+		{part: 4, source: "zeta", start: 700, replaceParts: true},
+		{part: 4, source: "alpha", start: 400},
+		{part: 1, source: "synthetic", start: 2500, replaceParts: true},
+	} {
+		if r.replaceParts {
+			if _, err := st.wdb().ExecContext(ctx, "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", bookID, fileOf(r.part)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.wdb().ExecContext(ctx, `INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms, source)
+			VALUES (?, ?, 9, 'x', ?, ?, ?)`, bookID, fileOf(r.part), r.start, r.end, r.source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bySource, err := st.chaptersBySource(ctx, bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSQL, err := partExtents(ctx, st.rdb(), bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]int64{1: 2500, 2: 1500, 3: 5000, 4: 400}
+	for n, w := range want {
+		fid := fileOf(n)
+		if got, sql := chapterExtent(bySource[fid]), fromSQL[fid]; got != w || sql != w {
+			t.Errorf("part %d: Go %d, SQL %d, want %d", n, got, sql, w)
+		}
 	}
 }

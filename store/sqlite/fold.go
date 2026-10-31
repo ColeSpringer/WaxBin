@@ -112,11 +112,9 @@ func unfinishForArrivalTx(ctx context.Context, tx *sql.Tx, bookID int64, from []
 	return err
 }
 
-// partSpan is a part's place on its book's timeline: where it starts, how long it runs (a
-// part counting for the larger of its file's duration and its furthest chapter, as the
-// book's own timeline does, bookEffectiveDurationSum), and whether it is the last part. A
-// span holds its start and not its end, as playback does: a place where a part starts is
-// that part's.
+// partSpan is a part's place on its book's timeline: where it starts, how long it runs
+// (partEffectiveLength), and whether it is the last part. A span holds its start and not
+// its end, as playback does: a place where a part starts is that part's.
 type partSpan struct {
 	offset, length int64
 	last           bool
@@ -243,28 +241,14 @@ func bookTimelineTx(ctx context.Context, tx *sql.Tx, bookID int64, was map[int64
 		}
 		sortBookParts(parts)
 	}
-	extents := map[int64]int64{}
-	rows, err := tx.QueryContext(ctx, `SELECT file_id, MAX(MAX(start_ms, end_ms)) FROM chapter
-		WHERE book_item_id = ? AND file_id IS NOT NULL GROUP BY file_id`, bookID)
+	extents, err := partExtents(ctx, tx, bookID)
 	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var id, ext int64
-		if err := rows.Scan(&id, &ext); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		extents[id] = ext
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	out := make([]timelinePart, len(parts))
 	var off int64
 	for i, p := range parts {
-		length := max(p.DurationMS, extents[p.fileID])
+		length := partEffectiveLength(p.DurationMS, extents[p.fileID])
 		if w, ok := was[p.fileID]; ok {
 			length = w.length
 		}
@@ -274,22 +258,20 @@ func bookTimelineTx(ctx context.Context, tx *sql.Tx, bookID int64, was map[int64
 	return out, nil
 }
 
-// chapterExtentTx is how far a part's chapters run on a book: its furthest chapter
-// start or end, which a part's length on the timeline takes when it passes the file's
-// duration (bookTimelineTx).
-func chapterExtentTx(ctx context.Context, tx *sql.Tx, bookID int64, file sql.NullInt64) (int64, error) {
+// chapterExtentTx is how far a part's chapters run on a book (partExtentExpr), which a
+// part's length on the timeline takes when it passes the file's duration.
+func chapterExtentTx(ctx context.Context, tx *sql.Tx, bookID, fileID int64) (int64, error) {
 	var ext int64
-	q, args := chapterRowsOf(chapterExtentSelect, bookID, file)
-	err := tx.QueryRowContext(ctx, q, args...).Scan(&ext)
+	err := tx.QueryRowContext(ctx, fileExtentQ, bookID, fileID).Scan(&ext)
 	return ext, err
 }
 
 // remapPlacesTx keeps a book's resume positions and bookmarks with their audio when a put
-// reorders or resizes its parts: each place keeps its offset into the part that held it,
-// at that part's start on the timeline after, inside its new length. It does nothing
-// unless the same parts stand either side and one of them moved or changed length, since a
-// part joining or leaving moves its places itself (shiftPositionsTx,
-// moveDepartedPositionsTx).
+// or a chapter edit reorders or resizes its parts: each place keeps its offset into the
+// part that held it, at that part's start on the timeline after, inside its new length.
+// It does nothing unless the same parts stand either side and one of them moved or
+// changed length, since a part joining or leaving moves its places itself
+// (shiftPositionsTx, moveDepartedPositionsTx).
 func remapPlacesTx(ctx context.Context, tx *sql.Tx, bookID int64, before, after []timelinePart) error {
 	now := make(map[int64]partSpan, len(after))
 	for _, p := range after {
@@ -318,18 +300,77 @@ func remapPlacesTx(ctx context.Context, tx *sql.Tx, bookID int64, before, after 
 	if err != nil {
 		return err
 	}
+	statesMoved := false
 	for _, p := range states {
-		if _, err := tx.ExecContext(ctx, "UPDATE play_state SET position_ms = ? WHERE user_id = ? AND item_id = ?",
-			remap(p.pos), p.key, bookID); err != nil {
+		if pos := remap(p.pos); pos != p.pos {
+			if _, err := tx.ExecContext(ctx, "UPDATE play_state SET position_ms = ? WHERE user_id = ? AND item_id = ?",
+				pos, p.key, bookID); err != nil {
+				return err
+			}
+			statesMoved = true
+		}
+	}
+	if statesMoved {
+		if err := playStateMovedTx(ctx, tx, bookID); err != nil {
 			return err
 		}
 	}
 	for _, m := range marks {
-		if _, err := tx.ExecContext(ctx, "UPDATE bookmark SET position_ms = ? WHERE id = ?", remap(m.pos), m.key); err != nil {
+		if pos := remap(m.pos); pos != m.pos {
+			if err := bookmarksMovedTx(ctx, tx, "UPDATE bookmark SET position_ms = ? WHERE id = ? RETURNING pid", pos, m.key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// playStateMovedTx announces play state a write moved on an item without its listener
+// setting it (a remap, a part joining or leaving, a fold): a "play_state" delta, as
+// SetProgress emits, so a consumer tailing the change feed reads it again.
+func playStateMovedTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
+	pid, err := pidByIDTx(ctx, tx, "playable_item", itemID)
+	if err != nil {
+		return err
+	}
+	return appendChange(ctx, tx, "play_state", pid, model.OpUpdate)
+}
+
+// bookmarksMovedTx runs q, a bookmark update returning the pid of each bookmark it moved,
+// and announces each as updated.
+func bookmarksMovedTx(ctx context.Context, tx *sql.Tx, q string, args ...any) error {
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	var moved []model.PID
+	for rows.Next() {
+		var pid model.PID
+		if err := rows.Scan(&pid); err != nil {
+			rows.Close()
+			return err
+		}
+		moved = append(moved, pid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, pid := range moved {
+		if err := appendChange(ctx, tx, "bookmark", pid, model.OpUpdate); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// playStateMovedIfTx announces play state on an item when r, the write that moved it,
+// changed a row.
+func playStateMovedIfTx(ctx context.Context, tx *sql.Tx, itemID int64, r sql.Result) error {
+	if n, err := r.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	return playStateMovedTx(ctx, tx, itemID)
 }
 
 // shiftPositionsTx moves the resume positions and bookmarks on an item at or past from by
@@ -338,13 +379,16 @@ func shiftPositionsTx(ctx context.Context, tx *sql.Tx, itemID, from, delta int64
 	if delta == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE play_state SET position_ms = position_ms + ?
-		WHERE item_id = ? AND last_progress_at IS NOT NULL AND position_ms >= ?`, delta, itemID, from); err != nil {
+	r, err := tx.ExecContext(ctx, `UPDATE play_state SET position_ms = position_ms + ?
+		WHERE item_id = ? AND last_progress_at IS NOT NULL AND position_ms >= ?`, delta, itemID, from)
+	if err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, "UPDATE bookmark SET position_ms = position_ms + ? WHERE item_id = ? AND position_ms >= ?",
+	if err := playStateMovedIfTx(ctx, tx, itemID, r); err != nil {
+		return err
+	}
+	return bookmarksMovedTx(ctx, tx, "UPDATE bookmark SET position_ms = position_ms + ? WHERE item_id = ? AND position_ms >= ? RETURNING pid",
 		delta, itemID, from)
-	return err
 }
 
 // moveDepartedPositionsTx keeps a book's resume positions and bookmarks with their audio
@@ -374,32 +418,43 @@ func moveDepartedPositionsTx(ctx context.Context, tx *sql.Tx, bookID, into, file
 	}
 	if ok {
 		delta := base - span.offset
-		if _, err := tx.ExecContext(ctx, `INSERT INTO play_state(user_id, item_id, position_ms, last_progress_at, updated_at)
+		r, err := tx.ExecContext(ctx, `INSERT INTO play_state(user_id, item_id, position_ms, last_progress_at, updated_at)
 			SELECT user_id, ?, position_ms + ?, last_progress_at, updated_at FROM play_state
 			WHERE item_id = ? AND last_progress_at IS NOT NULL AND position_ms >= ? AND position_ms < ?
 			ON CONFLICT(user_id, item_id) DO UPDATE SET position_ms = excluded.position_ms,
 				last_progress_at = excluded.last_progress_at
 			WHERE play_state.last_progress_at IS NULL OR play_state.last_progress_at < excluded.last_progress_at`,
-			into, delta, bookID, span.offset, end); err != nil {
+			into, delta, bookID, span.offset, end)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE play_state SET position_ms = 0, last_progress_at = NULL
+		if err := playStateMovedIfTx(ctx, tx, into, r); err != nil {
+			return err
+		}
+		if r, err = tx.ExecContext(ctx, `UPDATE play_state SET position_ms = 0, last_progress_at = NULL
 			WHERE item_id = ? AND last_progress_at IS NOT NULL AND position_ms >= ? AND position_ms < ?`,
 			bookID, span.offset, end); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE bookmark SET item_id = ?, position_ms = position_ms + ?
-			WHERE item_id = ? AND position_ms >= ? AND position_ms < ?`, into, delta, bookID, span.offset, end); err != nil {
+		if err := playStateMovedIfTx(ctx, tx, bookID, r); err != nil {
+			return err
+		}
+		if err := bookmarksMovedTx(ctx, tx, `UPDATE bookmark SET item_id = ?, position_ms = position_ms + ?
+			WHERE item_id = ? AND position_ms >= ? AND position_ms < ? RETURNING pid`, into, delta, bookID, span.offset, end); err != nil {
 			return err
 		}
 	} else {
-		if _, err := tx.ExecContext(ctx, `UPDATE play_state SET position_ms = ?
+		r, err := tx.ExecContext(ctx, `UPDATE play_state SET position_ms = ?
 			WHERE item_id = ? AND last_progress_at IS NOT NULL AND position_ms > ? AND position_ms < ?`,
-			span.offset, bookID, span.offset, end); err != nil {
+			span.offset, bookID, span.offset, end)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE bookmark SET position_ms = ?
-			WHERE item_id = ? AND position_ms > ? AND position_ms < ?`, span.offset, bookID, span.offset, end); err != nil {
+		if err := playStateMovedIfTx(ctx, tx, bookID, r); err != nil {
+			return err
+		}
+		if err := bookmarksMovedTx(ctx, tx, `UPDATE bookmark SET position_ms = ?
+			WHERE item_id = ? AND position_ms > ? AND position_ms < ? RETURNING pid`, span.offset, bookID, span.offset, end); err != nil {
 			return err
 		}
 	}
@@ -466,13 +521,15 @@ func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int
 	if err := batch.addTx(ctx, tx, "item_id = ?", loser); err != nil {
 		return err
 	}
+	// partSpan.inside, set-based.
+	if err := bookmarksMovedTx(ctx, tx, `UPDATE bookmark SET item_id = ?, position_ms = ? + CASE WHEN ? > 0 THEN MIN(position_ms, ? - 1) ELSE position_ms END
+		WHERE item_id = ? RETURNING pid`, survivor, offset, span.length, span.length, loser); err != nil {
+		return err
+	}
 	stmts := []struct {
 		q    string
 		args []any
 	}{
-		// partSpan.inside, set-based.
-		{`UPDATE bookmark SET item_id = ?, position_ms = ? + CASE WHEN ? > 0 THEN MIN(position_ms, ? - 1) ELSE position_ms END
-			WHERE item_id = ?`, []any{survivor, offset, span.length, span.length, loser}},
 		{"UPDATE play_session SET item_id = ? WHERE item_id = ?", []any{survivor, loser}},
 		{`DELETE FROM play_queue WHERE item_id = ? AND EXISTS (SELECT 1 FROM play_queue s
 			WHERE s.user_id = play_queue.user_id AND s.item_id = ?)`, []any{loser, survivor}},
@@ -656,7 +713,10 @@ func foldPlayStateTx(ctx context.Context, tx *sql.Tx, loser, survivor int64, spa
 			return err
 		}
 	}
-	return nil
+	if len(los) == 0 {
+		return nil
+	}
+	return playStateMovedTx(ctx, tx, survivor)
 }
 
 // finishedByTx returns the users who finished every one of items, each with the latest

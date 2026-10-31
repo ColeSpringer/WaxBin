@@ -609,7 +609,7 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 	// A rule matching nothing, replaced over the socket by one matching the
 	// scanned track.
 	empty := query.New(query.EntityItems).Where("title", query.OpContains, "Nothing").Build()
-	pid, err := lib.Playlists().CreateSmart(ctx, "Mix", "", "", empty)
+	pid, err := lib.Playlists().CreateSmart(ctx, "Mix", "", "", "", empty)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -640,6 +640,74 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 	}
 }
 
+// TestServeProxiedPlaylistDescription: a description travels on a proxied create of
+// either kind and on an import, playlist_set_description replaces and clears it, and a
+// description the store refuses keeps its class across the wire with nothing written.
+func TestServeProxiedPlaylistDescription(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	song := filepath.Join(root, "song.mp3")
+	writeFile(t, song, testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+	c := dialWhenReady(t, sock)
+	describedAs := func(pid model.PID, want string) {
+		t.Helper()
+		if pl, err := lib.Playlists().Get(ctx, pid); err != nil || pl.Description != want {
+			t.Errorf("playlist %s = %+v (err %v), want description %q", pid, pl, err, want)
+		}
+	}
+
+	static, err := c.PlaylistCreate(ctx, "Mix", "For the drive", "", "", nil)
+	if err != nil {
+		t.Fatalf("proxied create: %v", err)
+	}
+	describedAs(static, "For the drive")
+	doc, err := query.MarshalRule(query.New(query.EntityItems).Where("title", query.OpContains, "Origin").Build())
+	if err != nil {
+		t.Fatalf("marshal rule: %v", err)
+	}
+	smart, err := c.PlaylistCreate(ctx, "Smart", "Rules\nall the way", "", "", doc)
+	if err != nil {
+		t.Fatalf("proxied smart create: %v", err)
+	}
+	describedAs(smart, "Rules\nall the way")
+	res, err := c.PlaylistImportM3U8(ctx, "Imported", "From a file", "", "", []byte(song+"\n"))
+	if err != nil {
+		t.Fatalf("proxied import: %v", err)
+	}
+	describedAs(model.PID(res.PlaylistPID), "From a file")
+
+	if err := c.PlaylistSetDescription(ctx, static, "Rewritten"); err != nil {
+		t.Fatalf("proxied set description: %v", err)
+	}
+	describedAs(static, "Rewritten")
+	if err := c.PlaylistSetDescription(ctx, static, ""); err != nil {
+		t.Fatalf("proxied clear: %v", err)
+	}
+	describedAs(static, "")
+
+	if err := c.PlaylistSetDescription(ctx, smart, "a\tb"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("proxied set of a tab: err = %v, want CodeInvalid", err)
+	}
+	describedAs(smart, "Rules\nall the way")
+	if _, err := c.PlaylistCreate(ctx, "Bad", "a\u202eb", "", "", nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("proxied create with an override: err = %v, want CodeInvalid", err)
+	}
+	if _, err := c.PlaylistImportM3U8(ctx, "Bad", "a\x00b", "", "", []byte(song+"\n")); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("proxied import with a NUL: err = %v, want CodeInvalid", err)
+	}
+	if pls, err := lib.Playlists().List(ctx, ""); err != nil || len(pls) != 3 {
+		t.Errorf("playlists = %d (err %v), want the three described ones", len(pls), err)
+	}
+	if err := c.PlaylistSetDescription(ctx, "nope", "x"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("proxied set on an unknown playlist: err = %v, want CodeNotFound", err)
+	}
+}
+
 // TestServeProxiedPlaylistArt drives set_entity_art for a playlist over the socket:
 // the entity type rides the existing wire field (no new method, no version bump), the
 // cover resolves at the playlist's own level through the served library, and the
@@ -653,7 +721,7 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 
 	// A playlist cover needs no catalog behind it, so this one skips the scan.
 	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
-	pid, err := lib.Playlists().CreateStatic(ctx, "Mix", "", "")
+	pid, err := lib.Playlists().CreateStatic(ctx, "Mix", "", "", "")
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -696,7 +764,7 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 	sock := testsock.Path(t)
 
 	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
-	pid, err := lib.Playlists().CreateStatic(ctx, "Mosaic", "", "")
+	pid, err := lib.Playlists().CreateStatic(ctx, "Mosaic", "", "", "")
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -781,7 +849,7 @@ func TestServeArtLockRefusesExplicitFrontRole(t *testing.T) {
 	sock := testsock.Path(t)
 
 	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
-	pid, err := lib.Playlists().CreateStatic(ctx, "Pinned", "", "")
+	pid, err := lib.Playlists().CreateStatic(ctx, "Pinned", "", "", "")
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -868,7 +936,7 @@ func TestServeProxiedArtFormatAndGeneratedSource(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	pid, err := lib.Playlists().CreateStatic(ctx, "Composed", "", "")
+	pid, err := lib.Playlists().CreateStatic(ctx, "Composed", "", "", "")
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -1778,7 +1846,7 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 
 	// Static create: the pid comes back over the wire, and the server that holds
 	// the lock is the one that wrote the row.
-	pid, err := c.PlaylistCreate(ctx, "Mix", "", "", nil)
+	pid, err := c.PlaylistCreate(ctx, "Mix", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("proxied create: %v", err)
 	}
@@ -1801,7 +1869,7 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal rule: %v", err)
 	}
-	smart, err := c.PlaylistCreate(ctx, "Smart", "", "", doc)
+	smart, err := c.PlaylistCreate(ctx, "Smart", "", "", "", doc)
 	if err != nil {
 		t.Fatalf("proxied smart create: %v", err)
 	}
@@ -1816,7 +1884,7 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal bad rule: %v", err)
 	}
-	if _, err := c.PlaylistCreate(ctx, "Bad", "", "", bad); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := c.PlaylistCreate(ctx, "Bad", "", "", "", bad); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("proxied bad rule err = %v, want CodeInvalid", err)
 	}
 
@@ -1824,7 +1892,7 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 	// server, which is the side that has the catalog. The unmatched entry is
 	// reported rather than invented.
 	m3u := "#EXTM3U\n" + song + "\n" + filepath.Join(root, "missing.mp3") + "\n"
-	res, err := c.PlaylistImportM3U8(ctx, "Imported", "", "", []byte(m3u))
+	res, err := c.PlaylistImportM3U8(ctx, "Imported", "", "", "", []byte(m3u))
 	if err != nil {
 		t.Fatalf("proxied import: %v", err)
 	}
@@ -1860,7 +1928,7 @@ func TestServeProxiedPlaylistRemoveByIndex(t *testing.T) {
 	c := dialWhenReady(t, sock)
 	pid := func(title string) model.PID { return itemPIDByTitle(t, ctx, lib, title) }
 	one, two, three := pid("One"), pid("Two"), pid("Three")
-	pl, err := c.PlaylistCreate(ctx, "Mix", "", "", nil)
+	pl, err := c.PlaylistCreate(ctx, "Mix", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1921,7 +1989,7 @@ func TestServeProxiedPlaylistSetOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	pl, err := c.PlaylistCreate(ctx, "Mix", "", "", nil)
+	pl, err := c.PlaylistCreate(ctx, "Mix", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

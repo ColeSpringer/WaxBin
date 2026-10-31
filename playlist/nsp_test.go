@@ -1,6 +1,7 @@
 package playlist
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -13,7 +14,7 @@ import (
 
 func TestImportNSPBasic(t *testing.T) {
 	data := []byte(`{"all":[{"is":{"artist":"Radiohead"}},{"contains":{"title":"karma"}}],"sort":"title","order":"desc","limit":50}`)
-	q, err := ImportNSP(data)
+	q, err := importRule(data)
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -34,7 +35,7 @@ func TestImportNSPBasic(t *testing.T) {
 
 func TestImportNSPAnyAndNested(t *testing.T) {
 	data := []byte(`{"any":[{"is":{"genre":"Jazz"}},{"all":[{"gt":{"year":2000}},{"notContains":{"album":"live"}}]}]}`)
-	q, err := ImportNSP(data)
+	q, err := importRule(data)
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -60,27 +61,28 @@ func TestImportNSPRejectsUnsupported(t *testing.T) {
 		"bad sort":    `{"all":[{"is":{"title":"x"}}],"sort":"comment"}`,
 	}
 	for name, doc := range cases {
-		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		if _, err := importRule([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 			t.Errorf("%s: want CodeUnsupported, got %v", name, err)
 		}
 	}
 }
 
-func TestImportNSPIgnoresNameAndComment(t *testing.T) {
-	// Navidrome writes playlist metadata (name/comment) at the top level; these do not
-	// affect membership, so importing must succeed and ignore them rather than reject an
-	// otherwise-representable document.
+func TestImportNSPIgnoresTheName(t *testing.T) {
+	t.Parallel()
+	// Navidrome writes the playlist's name at the top level. It does not affect
+	// membership and WaxBin takes the name separately, so importing must succeed and
+	// ignore it rather than reject an otherwise-representable document.
 	data := []byte(`{"name":"My Mix","comment":"road trip","all":[{"is":{"artist":"Radiohead"}}]}`)
-	q, err := ImportNSP(data)
+	q, err := importRule(data)
 	if err != nil {
-		t.Fatalf("import with name/comment: %v", err)
+		t.Fatalf("import with a name: %v", err)
 	}
 	and, ok := q.Where.(query.And)
 	if !ok || len(and.Nodes) != 1 {
-		t.Fatalf("where = %T, want And of 1 (name/comment ignored, rule preserved)", q.Where)
+		t.Fatalf("where = %T, want And of 1 (name ignored, rule preserved)", q.Where)
 	}
 	// A genuinely semantics-affecting key WaxBin cannot represent is still rejected.
-	if _, err := ImportNSP([]byte(`{"limitPercent":50,"all":[{"is":{"artist":"X"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+	if _, err := importRule([]byte(`{"limitPercent":50,"all":[{"is":{"artist":"X"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("limitPercent: want CodeUnsupported, got %v", err)
 	}
 }
@@ -95,12 +97,12 @@ func TestImportNSPStrictLimitOffsetOrder(t *testing.T) {
 		"bad order":  `{"all":[{"is":{"title":"x"}}],"sort":"title","order":123}`,
 	}
 	for name, doc := range cases {
-		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		if _, err := importRule([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 			t.Errorf("%s: want CodeUnsupported, got %v", name, err)
 		}
 	}
 	// Well-formed limit/offset/order still import cleanly.
-	q, err := ImportNSP([]byte(`{"all":[{"is":{"title":"x"}}],"sort":"title","order":"desc","limit":10,"offset":5}`))
+	q, err := importRule([]byte(`{"all":[{"is":{"title":"x"}}],"sort":"title","order":"desc","limit":10,"offset":5}`))
 	if err != nil {
 		t.Fatalf("well-formed import: %v", err)
 	}
@@ -111,7 +113,7 @@ func TestImportNSPStrictLimitOffsetOrder(t *testing.T) {
 
 func TestNSPRoundTrip(t *testing.T) {
 	orig := []byte(`{"any":[{"isNot":{"artist":"X"}},{"inTheRange":{"year":[1990,1999]}},{"startsWith":{"album":"The"}}],"sort":"year","order":"asc","limit":25}`)
-	q1, err := ImportNSP(orig)
+	q1, err := importRule(orig)
 	if err != nil {
 		t.Fatalf("import1: %v", err)
 	}
@@ -119,7 +121,7 @@ func TestNSPRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	q2, err := ImportNSP(out)
+	q2, err := importRule(out)
 	if err != nil {
 		t.Fatalf("import2: %v", err)
 	}
@@ -142,7 +144,7 @@ func TestNSPUserStateFields(t *testing.T) {
 	// user-state query fields, so a rating/loved/playcount rule imports and
 	// round-trips. The user is bound at read time, never in the rule doc.
 	data := []byte(`{"all":[{"gt":{"rating":3}},{"is":{"loved":true}},{"gt":{"playcount":0}}]}`)
-	q, err := ImportNSP(data)
+	q, err := importRule(data)
 	if err != nil {
 		t.Fatalf("import user-state nsp: %v", err)
 	}
@@ -178,7 +180,7 @@ func TestNSPUserStateFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	q2, err := ImportNSP(out)
+	q2, err := importRule(out)
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
@@ -213,7 +215,7 @@ func TestNSPRatingScaleAndLastPlayed(t *testing.T) {
 	// lastPlayed maps only through the RELATIVE operators; an absolute date rule
 	// holds a date string WaxBin's nanosecond column cannot compare against, so it
 	// stays (deliberately) unsupported, not silently mis-mapped.
-	if _, err := ImportNSP([]byte(`{"all":[{"before":{"lastPlayed":"2023-01-01"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+	if _, err := importRule([]byte(`{"all":[{"before":{"lastPlayed":"2023-01-01"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("lastPlayed import: want CodeUnsupported, got %v", err)
 	}
 
@@ -240,7 +242,7 @@ func TestNSPRelativeDates(t *testing.T) {
 	// inTheLast/notInTheLast on the date fields map to WaxBin's relative-time
 	// operators with the day count converted to a nanosecond window.
 	data := []byte(`{"all":[{"inTheLast":{"lastPlayed":30}},{"notInTheLast":{"dateAdded":7}}]}`)
-	q, err := ImportNSP(data)
+	q, err := importRule(data)
 	if err != nil {
 		t.Fatalf("import relative dates: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestNSPRelativeDates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	q2, err := ImportNSP(out)
+	q2, err := importRule(out)
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
@@ -290,7 +292,7 @@ func TestNSPRelativeDates(t *testing.T) {
 		"absurd days":            `{"all":[{"inTheLast":{"lastPlayed":1e30}}]}`,
 	}
 	for name, doc := range rejected {
-		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		if _, err := importRule([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 			t.Errorf("%s: want CodeUnsupported, got %v", name, err)
 		}
 	}
@@ -298,7 +300,7 @@ func TestNSPRelativeDates(t *testing.T) {
 	// The largest representable whole-day window (MaxInt64/nspDayNS days) still
 	// imports: the overflow bound is exclusive, not a shrunken range.
 	maxDays := int64(9223372036854775807) / nspDayNS
-	big, err := ImportNSP([]byte(fmt.Sprintf(`{"all":[{"inTheLast":{"lastPlayed":%d}}]}`, maxDays)))
+	big, err := importRule([]byte(fmt.Sprintf(`{"all":[{"inTheLast":{"lastPlayed":%d}}]}`, maxDays)))
 	if err != nil {
 		t.Fatalf("import max-day window (%d days): %v", maxDays, err)
 	}
@@ -320,7 +322,7 @@ func TestNSPRelativeDates(t *testing.T) {
 
 func TestNSPRandomSortAndLimitModes(t *testing.T) {
 	// sort "random" (with a limit) maps to the random limit mode, not a Sort.
-	q, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`))
+	q, err := importRule([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`))
 	if err != nil {
 		t.Fatalf("import sort random: %v", err)
 	}
@@ -333,7 +335,7 @@ func TestNSPRandomSortAndLimitModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export random: %v", err)
 	}
-	q2, err := ImportNSP(out)
+	q2, err := importRule(out)
 	if err != nil {
 		t.Fatalf("re-import random: %v", err)
 	}
@@ -350,7 +352,7 @@ func TestNSPRandomSortAndLimitModes(t *testing.T) {
 		"zero limit":     `{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":0}`,
 		"negative limit": `{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":-5}`,
 	} {
-		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		if _, err := importRule([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 			t.Errorf("sort random with %s: want CodeUnsupported, got %v", name, err)
 		}
 	}
@@ -376,14 +378,14 @@ func TestNSPRandomSortAndLimitModes(t *testing.T) {
 func TestNSPDateSortFields(t *testing.T) {
 	// Navidrome's common "recently added" playlist (sort dateAdded desc) maps to
 	// a WaxBin sort over the added time field; lastPlayed sorts the same way.
-	q, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`))
+	q, err := importRule([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`))
 	if err != nil {
 		t.Fatalf("import sort dateAdded: %v", err)
 	}
 	if len(q.Sorts) != 1 || q.Sorts[0].Field != "added" || !q.Sorts[0].Desc {
 		t.Errorf("sorts = %+v, want added desc", q.Sorts)
 	}
-	q2, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"lastPlayed","order":"asc"}`))
+	q2, err := importRule([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"lastPlayed","order":"asc"}`))
 	if err != nil {
 		t.Fatalf("import sort lastPlayed: %v", err)
 	}
@@ -396,7 +398,7 @@ func TestNSPDateSortFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export date sort: %v", err)
 	}
-	back, err := ImportNSP(out)
+	back, err := importRule(out)
 	if err != nil {
 		t.Fatalf("re-import date sort: %v", err)
 	}
@@ -426,7 +428,7 @@ func TestExportNSPRejectsUnsupported(t *testing.T) {
 func nspExportCases(t *testing.T) map[string]query.Query {
 	t.Helper()
 	imported := func(doc string) query.Query {
-		q, err := ImportNSP([]byte(doc))
+		q, err := importRule([]byte(doc))
 		if err != nil {
 			t.Fatalf("fixture %s: %v", doc, err)
 		}
@@ -551,7 +553,7 @@ func TestNSPLovedConverts(t *testing.T) {
 		{`{"all":[{"is":{"loved":false}}]}`, 0},
 		{`{"all":[{"is":{"loved":1}}]}`, 1}, // a document that round-tripped through here
 	} {
-		q, err := ImportNSP([]byte(tc.doc))
+		q, err := importRule([]byte(tc.doc))
 		if err != nil {
 			t.Fatalf("import %s: %v", tc.doc, err)
 		}
@@ -586,7 +588,7 @@ func TestNSPLovedConverts(t *testing.T) {
 
 	// A round trip is byte-identical, which is the property the conversion has to keep.
 	const doc = `{"all":[{"is":{"loved":true}},{"isNot":{"loved":false}}]}`
-	q, err := ImportNSP([]byte(doc))
+	q, err := importRule([]byte(doc))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -650,7 +652,7 @@ func TestNSPLovedRefusesNonBoolean(t *testing.T) {
 	if len(irep.Gaps) == 0 || irep.Gaps[0].Code != NSPReasonBooleanOperator {
 		t.Errorf("importing an ordered loved rule: gaps = %+v, want boolean_operator first", irep.Gaps)
 	}
-	if _, err := ImportNSP([]byte(`{"all":[{"is":{"loved":"yes"}}]}`)); err == nil {
+	if _, err := importRule([]byte(`{"all":[{"is":{"loved":"yes"}}]}`)); err == nil {
 		t.Error("importing a non-boolean loved value was accepted")
 	}
 }
@@ -716,7 +718,7 @@ func TestExportNSPAliasSpellingsAgree(t *testing.T) {
 // imported from a Navidrome file used to store the one spelling nothing else in WaxBin
 // teaches, which is what made the export refusal reachable at all.
 func TestImportNSPStoresCanonicalAlbumArtist(t *testing.T) {
-	q, err := ImportNSP([]byte(`{"all":[{"is":{"albumartist":"X"}}]}`))
+	q, err := importRule([]byte(`{"all":[{"is":{"albumartist":"X"}}]}`))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -1031,7 +1033,7 @@ func TestNSPExportIdempotent(t *testing.T) {
 			}
 			continue
 		}
-		back, err := ImportNSP(first)
+		back, err := importRule(first)
 		if err != nil {
 			t.Errorf("%s: WaxBin exported a document it refuses to import: %v\n%s", name, err, first)
 			continue
@@ -1212,7 +1214,7 @@ func TestCheckNSPImportOwnsTheAnswer(t *testing.T) {
 				t.Errorf("%s: gap %d = %+v, want a kind, a known code and a reason", name, i, g)
 			}
 		}
-		_, err := ImportNSP([]byte(doc))
+		_, err := importRule([]byte(doc))
 		switch {
 		case err == nil && !rep.OK():
 			t.Errorf("%s: ImportNSP read it but the report holds %d gaps", name, len(rep.Gaps))
@@ -1356,7 +1358,7 @@ func TestNSPScaledSubstringOpsRejected(t *testing.T) {
 
 		for _, op := range []string{"contains", "startsWith", "endsWith", "notContains"} {
 			doc := `{"all":[{"` + op + `":{"` + f.nsp + `":3}}]}`
-			if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+			if _, err := importRule([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 				t.Errorf("import %s: want CodeUnsupported, got %v", doc, err)
 			}
 			rep, err := CheckNSPImport([]byte(doc))
@@ -1523,7 +1525,7 @@ func TestNSPNonNumericRatingIsOneCodeBothWays(t *testing.T) {
 // import drops the leaf, where the import used to fail with CodeInternal.
 func TestNSPHugeRatingIsAValueGap(t *testing.T) {
 	const doc = `{"all":[{"is":{"artist":"X"}},{"gt":{"rating":1e308}}]}`
-	if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+	if _, err := importRule([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("import: want CodeUnsupported, got %v", err)
 	}
 	rep, err := CheckNSPImport([]byte(doc))
@@ -1590,14 +1592,14 @@ func sameRule(t *testing.T, a, b query.Query) bool {
 // TestNSPDurationScales pins the unit bridge: Navidrome's duration is seconds, a REAL,
 // and WaxBin's duration_ms an integer count of milliseconds.
 func TestNSPDurationScales(t *testing.T) {
-	q, err := ImportNSP([]byte(`{"all":[{"gt":{"duration":300}}]}`))
+	q, err := importRule([]byte(`{"all":[{"gt":{"duration":300}}]}`))
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	if c := onlyCond(t, q); c.Field != "duration_ms" || c.Op != query.OpGt || c.Value != int64(300000) {
 		t.Errorf("imported %+v, want duration_ms gt int64(300000)", c)
 	}
-	q, err = ImportNSP([]byte(`{"all":[{"inTheRange":{"duration":[0.5,300.25]}}]}`))
+	q, err = importRule([]byte(`{"all":[{"inTheRange":{"duration":[0.5,300.25]}}]}`))
 	if err != nil {
 		t.Fatalf("import range: %v", err)
 	}
@@ -1615,7 +1617,7 @@ func TestNSPDurationScales(t *testing.T) {
 		}
 	}
 
-	sorted, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"duration","order":"desc"}`))
+	sorted, err := importRule([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"duration","order":"desc"}`))
 	if err != nil {
 		t.Fatalf("import sort: %v", err)
 	}
@@ -1634,7 +1636,7 @@ func TestNSPDurationScales(t *testing.T) {
 	if !strings.Contains(compact(doc), `{"lt":{"duration":0.003}}`) {
 		t.Errorf("export 3 ms = %s, want 0.003 seconds", compact(doc))
 	}
-	back, err := ImportNSP(doc)
+	back, err := importRule(doc)
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
@@ -1644,7 +1646,7 @@ func TestNSPDurationScales(t *testing.T) {
 
 	// A sub-millisecond value has no WaxBin room: strict refuses, partial drops the leaf.
 	const sub = `{"all":[{"is":{"artist":"X"}},{"gt":{"duration":300.0004}}]}`
-	if _, err := ImportNSP([]byte(sub)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+	if _, err := importRule([]byte(sub)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("import sub-millisecond: want CodeUnsupported, got %v", err)
 	}
 	imp, err := ImportNSPPartial([]byte(sub))
@@ -1723,7 +1725,7 @@ func TestNSPNewFieldPairs(t *testing.T) {
 		{`{"all":[{"is":{"mbz_release_group_id":"g1"}}]}`, "release_group_mbid", query.OpIs, "g1"},
 		{`{"all":[{"inTheLast":{"dateloved":30}}]}`, "starred_at", query.OpInTheLast, 30 * nspDayNS},
 	} {
-		q, err := ImportNSP([]byte(tc.doc))
+		q, err := importRule([]byte(tc.doc))
 		if err != nil {
 			t.Fatalf("import %s: %v", tc.doc, err)
 		}
@@ -1734,7 +1736,7 @@ func TestNSPNewFieldPairs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("export %s: %v", tc.doc, err)
 		}
-		back, err := ImportNSP(out)
+		back, err := importRule(out)
 		if err != nil {
 			t.Fatalf("re-import %s: %v", out, err)
 		}
@@ -1743,7 +1745,7 @@ func TestNSPNewFieldPairs(t *testing.T) {
 		}
 	}
 
-	q, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"dateloved","order":"desc"}`))
+	q, err := importRule([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"dateloved","order":"desc"}`))
 	if err != nil {
 		t.Fatalf("import sort dateloved: %v", err)
 	}
@@ -1771,7 +1773,7 @@ func TestNSPPresenceOperators(t *testing.T) {
 		{`{"all":[{"isPresent":{"mbz_recording_id":true}}]}`, query.OpIsPresent},
 		{`{"all":[{"isPresent":{"mbz_recording_id":false}}]}`, query.OpIsMissing},
 	} {
-		q, err := ImportNSP([]byte(tc.doc))
+		q, err := importRule([]byte(tc.doc))
 		if err != nil {
 			t.Fatalf("import %s: %v", tc.doc, err)
 		}
@@ -1785,7 +1787,7 @@ func TestNSPPresenceOperators(t *testing.T) {
 		if want := `{"all":[{"` + string(tc.want) + `":{"mbz_recording_id":true}}]}`; compact(out) != want {
 			t.Errorf("export of %s = %s, want %s", tc.doc, compact(out), want)
 		}
-		back, err := ImportNSP(out)
+		back, err := importRule(out)
 		if err != nil {
 			t.Fatalf("re-import %s: %v", out, err)
 		}
@@ -1797,7 +1799,7 @@ func TestNSPPresenceOperators(t *testing.T) {
 	// Every field Navidrome allows them on crosses, and an alias spelling exports too.
 	for name := range nspPresenceFields {
 		doc := `{"all":[{"isMissing":{"` + name + `":true}}]}`
-		q, err := ImportNSP([]byte(doc))
+		q, err := importRule([]byte(doc))
 		if err != nil {
 			t.Errorf("import %s: %v", doc, err)
 			continue
@@ -1866,7 +1868,7 @@ func TestNSPPathOperators(t *testing.T) {
 		`{"startsWith":{"filepath":"Rock/"}}`, `{"contains":{"filepath":"Live"}}`, `{"notContains":{"filepath":"Live"}}`,
 		`{"endsWith":{"filepath":".mp3"}}`, `{"gt":{"filepath":"M"}}`, `{"inTheRange":{"filepath":["A","M"]}}`} {
 		doc := `{"all":[` + leaf + `]}`
-		q, err := ImportNSP([]byte(doc))
+		q, err := importRule([]byte(doc))
 		if err != nil {
 			t.Errorf("import %s: %v", doc, err)
 			continue
@@ -1880,12 +1882,104 @@ func TestNSPPathOperators(t *testing.T) {
 			t.Errorf("round trip of %s = %s, %v", doc, compact(out), err)
 		}
 	}
-	sorted, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"filepath","limit":50}`))
+	sorted, err := importRule([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"filepath","limit":50}`))
 	if err != nil || len(sorted.Sorts) != 1 || sorted.Sorts[0].Field != "rel_path" {
 		t.Errorf("sort filepath = %+v, %v, want a sort on rel_path", sorted.Sorts, err)
 	}
 	rep := CheckNSPExport(query.New(query.EntityItems).Where("path", query.OpStartsWith, "/music/").Build())
 	if len(rep.Gaps) != 1 || rep.Gaps[0].Code != NSPReasonUnsupportedField || rep.Gaps[0].Field != "path" {
 		t.Errorf("export of the absolute path: gaps = %+v, want an unsupported_field gap", rep.Gaps)
+	}
+}
+
+// TestNSPCommentBecomesTheDescription: a document's comment is the playlist description,
+// trimmed as one is stored, in a strict and a partial import alike. A comment no
+// description can hold is left out with a note rather than refusing a rule that maps,
+// and a document with no comment, or a null one, has none and no note.
+func TestNSPCommentBecomesTheDescription(t *testing.T) {
+	t.Parallel()
+	rule := `"all":[{"is":{"artist":"Radiohead"}}]`
+	data := []byte(`{"name":"My Mix","comment":"  road trip\r\nside one ",` + rule + `}`)
+	imp, err := ImportNSP(data)
+	if err != nil || imp.Description != "road trip\nside one" || !imp.Report.OK() || len(imp.Report.Notes) != 0 {
+		t.Fatalf("strict import = %+v (err %v), want the trimmed comment and a clean report", imp, err)
+	}
+	part, err := ImportNSPPartial(data)
+	if err != nil || part.Description != imp.Description {
+		t.Fatalf("partial import = %+v (err %v), want description %q", part, err, imp.Description)
+	}
+	for name, comment := range map[string]string{
+		"a tab":          `"a\tb"`,
+		"an override":    `"a\u202eb"`,
+		"a number":       `5`,
+		"an object":      `{"text":"x"}`,
+		"past the bound": `"` + strings.Repeat("a", 4097) + `"`,
+	} {
+		doc := []byte(`{"comment":` + comment + `,` + rule + `}`)
+		for mode, read := range map[string]func([]byte) (*NSPImport, error){"strict": ImportNSP, "partial": ImportNSPPartial} {
+			imp, err := read(doc)
+			if err != nil {
+				t.Errorf("%s, %s: %v, want the rule imported", name, mode, err)
+				continue
+			}
+			notes := imp.Report.Notes
+			if imp.Description != "" || !imp.Report.OK() || len(notes) != 1 ||
+				notes[0].Code != NSPReasonBadComment || notes[0].Path != "/comment" || notes[0].Reason == "" {
+				t.Errorf("%s, %s: %+v, want no description and one bad_comment note at /comment", name, mode, imp)
+			}
+		}
+		if rep, err := CheckNSPImport(doc); err != nil || !rep.OK() || len(rep.Notes) != 1 {
+			t.Errorf("%s: check = %+v (err %v), want the note alone", name, rep, err)
+		}
+	}
+	for _, doc := range []string{`{` + rule + `}`, `{"comment":null,` + rule + `}`, `{"comment":"  ",` + rule + `}`} {
+		imp, err := ImportNSP([]byte(doc))
+		if err != nil || imp.Description != "" || len(imp.Report.Notes) != 0 {
+			t.Errorf("%s: %+v (err %v), want no description and no note", doc, imp, err)
+		}
+	}
+}
+
+// importRule is ImportNSP's rule, for the tests about the mapping alone.
+func importRule(data []byte) (query.Query, error) {
+	imp, err := ImportNSP(data)
+	if err != nil {
+		return query.Query{}, err
+	}
+	return imp.Rule, nil
+}
+
+// TestNSPWithPlaylistCarriesTheNameAndDescription: an exported document takes the
+// playlist's name and description as name and comment, the keys Navidrome reads, so an
+// import gives the description back with the same rule; an empty one is left out, and
+// the rest of the document is as the export wrote it.
+func TestNSPWithPlaylistCarriesTheNameAndDescription(t *testing.T) {
+	t.Parallel()
+	rule := query.New(query.EntityItems).Where("artist", query.OpIs, "Radiohead").Build()
+	data, err := ExportNSP(rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := NSPWithPlaylist(data, "Road Mix", "For the drive\nSide one")
+	if err != nil {
+		t.Fatalf("with playlist: %v", err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(doc, &top); err != nil || top["name"] != "Road Mix" || top["comment"] != "For the drive\nSide one" {
+		t.Fatalf("document = %s (err %v), want the name and the comment", doc, err)
+	}
+	imp, err := ImportNSP(doc)
+	if err != nil || imp.Description != "For the drive\nSide one" {
+		t.Fatalf("import of it = %+v (err %v), want the description back", imp, err)
+	}
+	if again, err := ExportNSP(imp.Rule); err != nil || !bytes.Equal(again, data) {
+		t.Errorf("the imported rule exports as %s (err %v), want the rule as first exported:\n%s", again, err, data)
+	}
+	bare, err := NSPWithPlaylist(data, "", "")
+	if err != nil || !bytes.Equal(bare, data) {
+		t.Errorf("with nothing to add = %s (err %v), want the export as written:\n%s", bare, err, data)
+	}
+	if _, err := NSPWithPlaylist([]byte("not json"), "x", ""); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("a document that is not JSON: err = %v, want CodeInvalid", err)
 	}
 }

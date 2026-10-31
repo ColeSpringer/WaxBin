@@ -124,7 +124,11 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 		if len(parts) == 0 {
 			return waxerr.New(waxerr.CodeNotFound, op, "item has no backing file")
 		}
-		perPart, err := splitBookChapters(ctx, tx, itemID, parts, chapters, op)
+		before, err := bookTimelineTx(ctx, tx, itemID, nil)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		perPart, err := splitBookChapters(ctx, tx, itemID, parts, before, chapters, op)
 		if err != nil {
 			return err
 		}
@@ -136,9 +140,28 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// User chapters can extend the effective duration past the parts' own length.
+		// User chapters can extend the last part past its audio, and dropping curated
+		// rows that held a part past its audio shortens it, which moves the places on
+		// the parts after it.
 		if err := refreshBookDuration(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		after, err := bookTimelineTx(ctx, tx, itemID, nil)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := remapPlacesTx(ctx, tx, itemID, before, after); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// A book's total moves exactly when its last part's span does.
+		if before[len(before)-1].span != after[len(after)-1].span {
+			affected := newAffectedRollups()
+			if err := affected.collectGenres(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		if err := setCurationLockTx(ctx, tx, itemID, "chapters", model.Attribution{Source: model.SourceUser}, lock); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -153,26 +176,27 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 // falls in; a start at or past the total attaches to the last part (the
 // single-file precedent; refreshBookDuration absorbs the extension).
 //
-// Part boundaries are the cumulative effective durations over the derived
-// state: max(file duration, the preferred derived source's furthest chapter
-// extent) per part, the same per-part advance bookChapters used for the
-// timeline the user read before curating, and keeps using after (the
-// derivedFloor there). Using the derived extent also keeps the mapping
-// independent of the user rows being replaced. (A file whose embedded chapter
-// extents overrun its real duration shifts this timeline; that corrupt-metadata
-// edge is accepted, not solved.)
+// Part boundaries are the timeline the read showed: each part's effective length
+// (partEffectiveLength), the user rows being replaced included, so a list read and
+// set back stores each chapter where it was. A new chapter never runs a part past
+// that window (its start falls inside it and its end is clamped to it), except in
+// the last part, so an edit can only shorten a part, by dropping curated rows that
+// held it past its audio; SetItemChapters remaps the places that moves. A file whose
+// chapters overrun its audio stays that long, as everywhere.
 //
 // End handling per chapter: a zero end stays open. An end equal to the next
-// chapter's start (or, for the last chapter, the book total) is contiguous and
-// is stored open too, so the read reconstructs it exactly even when it crosses a
-// part boundary; a last-chapter end equal to the total therefore means "runs to
-// the end of the book" and follows the total if a rescan changes it. An
-// explicit non-contiguous end stores file-relative when it stays inside the
-// starting part, and clamps to that part's end when it would cross into the
-// next one (a continuation row there would render as a phantom duplicate
-// chapter). The last part never clamps, so an end past the book total extends
-// the book like the single-file path always has.
-func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bookPart, chapters []model.Chapter, op string) ([][]model.Chapter, error) {
+// chapter's start (or, for the last chapter, where the book ends without its last
+// part's curated rows: its audio, or its derived chapters past it) is contiguous
+// and is stored open too, so the read reconstructs it exactly even when it crosses
+// a part boundary; a last-chapter end there means "runs to the end of the book"
+// and follows the book's length if a rescan changes it. An end past it is kept, so
+// setting the list as read keeps a book a curated end lengthened. An explicit
+// non-contiguous end stores file-relative when it stays inside the starting part,
+// and clamps to that part's end when it would cross into the next one (a
+// continuation row there would render as a phantom duplicate chapter). The last
+// part never clamps, so an end past the book total extends the book like the
+// single-file path always has.
+func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bookPart, timeline []timelinePart, chapters []model.Chapter, op string) ([][]model.Chapter, error) {
 	chs := make([]model.Chapter, len(chapters))
 	copy(chs, chapters)
 
@@ -214,22 +238,21 @@ func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bo
 		prev = c.StartMS
 	}
 
-	extents, err := nonUserChapterExtentsTx(ctx, tx, itemID)
-	if err != nil {
+	// starts[i] is part i's book-timeline offset and total the timeline's length, from the
+	// timeline the caller read (bookTimelineTx, index-aligned with parts).
+	starts := make([]int64, len(parts))
+	for i := range parts {
+		starts[i] = timeline[i].span.offset
+	}
+	last := len(parts) - 1
+	total := timeline[last].span.offset + timeline[last].span.length
+	// tailEnd is where the book ends without the curated rows on its last part, the end
+	// a last chapter "runs to the end of the book" names.
+	var derived int64
+	if err := tx.QueryRowContext(ctx, derivedExtentQ, itemID, parts[last].fileID).Scan(&derived); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-
-	// starts[i] is part i's book-timeline offset; total is the timeline length.
-	starts := make([]int64, len(parts))
-	var total int64
-	for i := range parts {
-		starts[i] = total
-		eff := parts[i].DurationMS
-		if ext := extents[parts[i].fileID]; ext > eff {
-			eff = ext
-		}
-		total += eff
-	}
+	tailEnd := starts[last] + partEffectiveLength(parts[last].DurationMS, derived)
 
 	perPart := make([][]model.Chapter, len(parts))
 	for i := range chs {
@@ -250,7 +273,7 @@ func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bo
 		fileStart := c.StartMS - starts[p]
 		var fileEnd int64
 		contiguous := (i+1 < len(chs) && c.EndMS == chs[i+1].StartMS) ||
-			(i+1 == len(chs) && c.EndMS == total)
+			(i+1 == len(chs) && c.EndMS == tailEnd)
 		switch {
 		case c.EndMS == 0 || contiguous:
 			fileEnd = 0
@@ -267,38 +290,6 @@ func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bo
 		})
 	}
 	return perPart, nil
-}
-
-// nonUserChapterExtentsTx returns, per backing file, the furthest chapter offset
-// of the file's preferred derived (non-user) source. It mirrors bookChapters'
-// single-source-per-file choice, not a max across sources: the split must map
-// against the exact timeline the read displayed, and when a file briefly carries
-// two derived sources only the preferred one's chapters advanced that timeline.
-// The cursor closes on return, freeing the tx connection for the caller's writes.
-func nonUserChapterExtentsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[int64]int64, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT file_id, source, MAX(MAX(start_ms, end_ms)) FROM chapter
-		 WHERE book_item_id = ? AND file_id IS NOT NULL AND source <> 'user' GROUP BY file_id, source`, itemID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	extents := map[int64]int64{}
-	bestRank := map[int64]int{}
-	for rows.Next() {
-		var fid, ext int64
-		var source string
-		if err := rows.Scan(&fid, &source, &ext); err != nil {
-			return nil, err
-		}
-		rank := chapterSourceRank(source)
-		if cur, ok := bestRank[fid]; ok && rank >= cur {
-			continue
-		}
-		bestRank[fid] = rank
-		extents[fid] = ext
-	}
-	return extents, rows.Err()
 }
 
 // SetItemArt sets (or, with empty bytes, clears) one artwork role on a track/book

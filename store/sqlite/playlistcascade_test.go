@@ -12,7 +12,7 @@ import (
 func cascadePlaylist(t *testing.T, st *sqlite.Store, name string, members ...model.PID) model.PID {
 	t.Helper()
 	ctx := context.Background()
-	pl, err := st.CreatePlaylist(ctx, name, "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, name, "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}

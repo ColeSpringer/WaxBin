@@ -146,7 +146,7 @@ func TestAudiobookRootFoldsItsTracks(t *testing.T) {
 	if err := st.MarkPlayed(ctx, "", three, false, nil); err != nil {
 		t.Fatalf("played: %v", err)
 	}
-	pl, err := st.CreatePlaylist(ctx, "List", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
+	pl, err := st.CreatePlaylist(ctx, "List", "", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
 	if err != nil {
 		t.Fatalf("playlist: %v", err)
 	}

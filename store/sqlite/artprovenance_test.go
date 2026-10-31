@@ -871,7 +871,7 @@ func TestGeneratedCoverReportsItself(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	db := roConn(t, dbPath)
-	pl, err := st.CreatePlaylist(ctx, "Mosaic", "", model.PlaylistStatic, "", nil)
+	pl, err := st.CreatePlaylist(ctx, "Mosaic", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}

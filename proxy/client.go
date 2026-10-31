@@ -679,10 +679,10 @@ func (c *Client) Provenance(ctx context.Context, itemPID model.PID) ([]model.Fie
 // PlaylistCreate proxies creating a playlist, returning its pid. A nil rule
 // creates a static playlist; a marshaled rule document (query.MarshalRule) creates
 // a smart one, which the server parses and validates.
-func (c *Client) PlaylistCreate(ctx context.Context, name string, ownerPID model.PID, visibility string, rule []byte) (model.PID, error) {
+func (c *Client) PlaylistCreate(ctx context.Context, name, description string, ownerPID model.PID, visibility string, rule []byte) (model.PID, error) {
 	var res PlaylistCreateResult
 	err := c.call(ctx, MethodPlaylistCreate, PlaylistCreateParams{
-		Name: name, OwnerPID: string(ownerPID), Visibility: visibility, Rule: rule,
+		Name: name, Description: description, OwnerPID: string(ownerPID), Visibility: visibility, Rule: rule,
 	}, &res)
 	if err != nil {
 		return "", err
@@ -700,12 +700,19 @@ func (c *Client) PlaylistRename(ctx context.Context, playlistPID model.PID, name
 	return c.call(ctx, MethodPlaylistRename, PlaylistRenameParams{PlaylistPID: string(playlistPID), Name: name}, nil)
 }
 
+// PlaylistSetDescription proxies replacing a playlist's description.
+func (c *Client) PlaylistSetDescription(ctx context.Context, playlistPID model.PID, description string) error {
+	return c.call(ctx, MethodPlaylistSetDescription, PlaylistSetDescriptionParams{
+		PlaylistPID: string(playlistPID), Description: description,
+	}, nil)
+}
+
 // PlaylistImportM3U8 proxies creating a static playlist from an M3U8 document,
 // returning the new playlist and the entries that matched nothing.
-func (c *Client) PlaylistImportM3U8(ctx context.Context, name string, ownerPID model.PID, visibility string, document []byte) (*PlaylistImportResult, error) {
+func (c *Client) PlaylistImportM3U8(ctx context.Context, name, description string, ownerPID model.PID, visibility string, document []byte) (*PlaylistImportResult, error) {
 	var res PlaylistImportResult
 	err := c.call(ctx, MethodPlaylistImport, PlaylistImportParams{
-		Name: name, OwnerPID: string(ownerPID), Visibility: visibility, Document: document,
+		Name: name, Description: description, OwnerPID: string(ownerPID), Visibility: visibility, Document: document,
 	}, &res)
 	if err != nil {
 		return nil, err

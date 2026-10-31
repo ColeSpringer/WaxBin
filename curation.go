@@ -27,7 +27,10 @@ func (l *Library) SetLyrics(ctx context.Context, itemPID model.PID, ly *model.Ly
 // SetChapters replaces a book's user-curated chapters (which win on read over the
 // scanned ones). An empty list clears them. The input is a flat book-timeline list
 // (StartMS/EndMS, what Chapters returns); for a multi-file book the store splits it
-// across the parts. lock is the instruction for the "chapters" field's lock, and its
+// across the parts, and a list read and set back stays where it was. An edit that
+// changes how long a part runs (one dropping curated chapters that held it past its
+// audio, or a last chapter ending past the book) moves resume positions and bookmarks
+// with their audio. lock is the instruction for the "chapters" field's lock, and its
 // zero value leaves whatever is stored alone.
 func (l *Library) SetChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock model.LockChange, force bool) error {
 	return l.store.SetItemChapters(ctx, itemPID, chapters, lock, force)

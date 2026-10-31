@@ -130,7 +130,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	if err != nil || len(all) == 0 {
 		t.Fatalf("items = %d (err %v)", len(all), err)
 	}
-	mine, err := st.CreatePlaylist(ctx, "Mine", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
+	mine, err := st.CreatePlaylist(ctx, "Mine", "", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
 	if err != nil {
 		t.Fatalf("create playlist: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	hidden, err := st.CreatePlaylist(ctx, "BobPrivate", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
+	hidden, err := st.CreatePlaylist(ctx, "BobPrivate", "", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
 	if err != nil {
 		t.Fatalf("create bob's playlist: %v", err)
 	}
@@ -777,7 +777,7 @@ func TestPlaylistPIDSetSemantics(t *testing.T) {
 	c := putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "X", album: "Al"}).ItemPID
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/d.flac", essence: "ed", content: "cd", title: "D", artist: "X", album: "Al"})
 
-	mine, err := st.CreatePlaylist(ctx, "Mine", "", model.PlaylistStatic, "", nil)
+	mine, err := st.CreatePlaylist(ctx, "Mine", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create static: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestPlaylistPIDSetSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	hidden, err := st.CreatePlaylist(ctx, "BobPrivate", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
+	hidden, err := st.CreatePlaylist(ctx, "BobPrivate", "", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
 	if err != nil {
 		t.Fatalf("create bob's playlist: %v", err)
 	}
@@ -796,7 +796,7 @@ func TestPlaylistPIDSetSemantics(t *testing.T) {
 		t.Fatalf("add to bob's playlist: %v", err)
 	}
 	rule := query.New(query.EntityItems).Where("artist", query.OpIs, "X").Build()
-	smart, err := st.CreatePlaylist(ctx, "Smart", "", model.PlaylistSmart, "", &rule)
+	smart, err := st.CreatePlaylist(ctx, "Smart", "", "", model.PlaylistSmart, "", &rule)
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
@@ -1145,7 +1145,7 @@ func TestSmartRuleRoundTripsNewFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse rule: %v", err)
 	}
-	pl, err := st.CreatePlaylist(ctx, "Covered here", "", model.PlaylistSmart, "", &parsed)
+	pl, err := st.CreatePlaylist(ctx, "Covered here", "", "", model.PlaylistSmart, "", &parsed)
 	if err != nil {
 		t.Fatalf("create smart playlist: %v", err)
 	}
@@ -1170,7 +1170,7 @@ func TestSmartRuleRoundTripsPlaylistPID(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2",
 		title: "Loose", artist: "X", album: "Al"})
 
-	archive, err := st.CreatePlaylist(ctx, "Archive", "", model.PlaylistStatic, "", nil)
+	archive, err := st.CreatePlaylist(ctx, "Archive", "", "", model.PlaylistStatic, "", nil)
 	if err != nil {
 		t.Fatalf("create archive: %v", err)
 	}
@@ -1189,7 +1189,7 @@ func TestSmartRuleRoundTripsPlaylistPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse rule: %v", err)
 	}
-	pl, err := st.CreatePlaylist(ctx, "Unfiled", "", model.PlaylistSmart, "", &parsed)
+	pl, err := st.CreatePlaylist(ctx, "Unfiled", "", "", model.PlaylistSmart, "", &parsed)
 	if err != nil {
 		t.Fatalf("create smart playlist: %v", err)
 	}

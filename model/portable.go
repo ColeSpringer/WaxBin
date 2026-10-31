@@ -47,12 +47,13 @@ const (
 // RefResolution pairs a PortableRef with the local item it resolved to, and the rung
 // that matched. PID is empty exactly when Rung == MatchNone. It is the per-entry result
 // of resolving a batch (a playlist), preserving the input order so the host can rebuild
-// a local playlist and report which entries were missing. Candidates is how many local
-// items tied for the entry: 1 for a unique match, more for a tie taken or declined, 0
-// when nothing matched at all.
+// a local playlist and report which entries were missing. Tied names the local items
+// that tied for the entry, sorted: the item alone for a unique match, the tie taken or
+// declined, none when nothing matched at all. Candidates is their number.
 type RefResolution struct {
 	Ref        PortableRef
 	PID        PID // empty when Rung == MatchNone
 	Rung       MatchRung
 	Candidates int
+	Tied       []PID
 }

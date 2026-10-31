@@ -698,7 +698,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			owner, vis := model.PID(p.OwnerPID), model.PlaylistVisibility(p.Visibility)
 			if len(p.Rule) == 0 {
-				pid, err := l.playlists.CreateStatic(ctx, p.Name, owner, vis)
+				pid, err := l.playlists.CreateStatic(ctx, p.Name, p.Description, owner, vis)
 				if err != nil {
 					return nil, err
 				}
@@ -708,7 +708,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			pid, err := l.playlists.CreateSmart(ctx, p.Name, owner, vis, q)
+			pid, err := l.playlists.CreateSmart(ctx, p.Name, p.Description, owner, vis, q)
 			if err != nil {
 				return nil, err
 			}
@@ -728,12 +728,19 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.playlists.Rename(ctx, model.PID(p.PlaylistPID), p.Name)
 		},
+		proxy.MethodPlaylistSetDescription: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistSetDescriptionParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.playlists.SetDescription(ctx, model.PID(p.PlaylistPID), p.Description)
+		},
 		proxy.MethodPlaylistImport: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PlaylistImportParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			res, err := l.playlists.ImportM3U8(ctx, p.Name, model.PID(p.OwnerPID),
+			res, err := l.playlists.ImportM3U8(ctx, p.Name, p.Description, model.PID(p.OwnerPID),
 				model.PlaylistVisibility(p.Visibility), bytes.NewReader(p.Document))
 			if err != nil {
 				return nil, err

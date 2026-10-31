@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -157,6 +158,9 @@ func TestFeedChaptersOutrankEmbeddedAfterADownload(t *testing.T) {
 	wantChapters(t, "with the feed's", got, file, 600000)
 }
 
+// scansChapters finds a plan line that walks a chapter table rather than seeking it.
+var scansChapters = regexp.MustCompile(`SCAN (chapter|c|d)\b`)
+
 // TestItemKeptChapterRowsSeekTheirItem: the statements that read, replace and measure an
 // item's own chapter rows, or its rows of one file, seek exactly those rows rather than
 // walking every item-kept row in the catalog.
@@ -167,8 +171,8 @@ func TestItemKeptChapterRowsSeekTheirItem(t *testing.T) {
 		q    string
 		args []any
 	}
-	stmts := []stmt{{itemChaptersQ, []any{1, "podcast_url"}}}
-	for _, prefix := range []string{chapterRowsSelect, chapterRowsDelete, chapterExtentSelect} {
+	stmts := []stmt{{itemChaptersQ, []any{1, "podcast_url"}}, {fileExtentQ, []any{1, 1}}}
+	for _, prefix := range []string{chapterRowsSelect, chapterRowsDelete} {
 		for _, file := range []sql.NullInt64{{}, fileKey(1)} {
 			q, args := chapterRowsOf(prefix, 1, file)
 			stmts = append(stmts, stmt{q, args})
@@ -176,9 +180,14 @@ func TestItemKeptChapterRowsSeekTheirItem(t *testing.T) {
 	}
 	for _, s := range stmts {
 		plan := queryPlan(t, st, s.q, s.args...)
-		if !strings.Contains(plan, "chapter_book_file (book_item_id=? AND file_id=?)") {
+		if !strings.Contains(plan, "chapter_book_file (book_item_id=? AND file_id=?)") || scansChapters.MatchString(plan) {
 			t.Errorf("%s\nplan:\n%s\nwant a seek on the item and the file together", s.q, plan)
 		}
+	}
+	// A book's extents read its own rows, each file's through the same seek.
+	if plan := queryPlan(t, st, partExtentsQ, 1); !strings.Contains(plan, "chapter_book_file (book_item_id=?") ||
+		scansChapters.MatchString(plan) {
+		t.Errorf("partExtentsQ plan:\n%s\nwant every chapter read to seek its book", plan)
 	}
 }
 

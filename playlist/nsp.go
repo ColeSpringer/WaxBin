@@ -15,7 +15,8 @@ import (
 // Navidrome (.nsp) smart-playlist interop. A .nsp file is a JSON rule tree: an
 // "all"/"any" group of leaves, each `{"<op>": {"<field>": <value>}}`, plus an
 // optional sort/order/limit. ImportNSP/ExportNSP map it to and from WaxBin's query
-// rule. Mapping is all-or-nothing: an operator or field the other side cannot
+// rule, and an import reads the document's comment as the playlist description.
+// Mapping is all-or-nothing: an operator or field the other side cannot
 // represent faithfully rejects the whole document (CodeUnsupported) rather than
 // emitting a lossy partial that would silently drift on re-import. Half a rule is
 // a different playlist.
@@ -448,8 +449,9 @@ func nspErr(msg string) error { return waxerr.New(waxerr.CodeUnsupported, "playl
 // difference, and ImportNSPPartial refuses outright on one rather than pruning
 // a construct nobody wrote on purpose.
 type nspImporter struct {
-	rep  NSPReport
-	path []string
+	rep         NSPReport
+	path        []string
+	description string
 }
 
 func (im *nspImporter) push(seg string) { im.path = append(im.path, seg) }
@@ -515,10 +517,12 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 		switch key {
 		case "all", "any", "sort", "order", "limit", "offset":
 			continue
-		case "name", "comment":
-			// Navidrome playlist metadata that does not affect membership. Ignore it;
-			// the WaxBin playlist name and visibility are supplied separately. It is
-			// not a loss, so it does not belong in the report either.
+		case "name":
+			// Navidrome playlist metadata that does not affect membership. WaxBin takes
+			// the name separately, so ignoring it is not a loss for the report.
+			continue
+		case "comment":
+			im.comment(top[key])
 			continue
 		}
 		// A semantics-affecting key WaxBin cannot represent (e.g. limitPercent). It
@@ -549,6 +553,22 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 		im.sort(top, raw, &q)
 	}
 	return q, kept
+}
+
+// comment reads the document's comment as the playlist description. One no description
+// can hold is left out with a note, since a comment does not affect membership.
+func (im *nspImporter) comment(raw json.RawMessage) {
+	var text *string
+	if json.Unmarshal(raw, &text) == nil {
+		if text == nil {
+			return
+		}
+		if d, err := model.CheckPlaylistDescription(*text); err == nil {
+			im.description = d
+			return
+		}
+	}
+	im.rep.note(NSPGap{Kind: NSPGapValue, Code: NSPReasonBadComment, Key: "comment", Path: "/comment"})
 }
 
 // sort maps the sort/order pair onto the query.
@@ -832,28 +852,34 @@ func CheckNSPImport(data []byte) (NSPReport, error) {
 	return im.rep, nil
 }
 
-// ImportNSP parses a Navidrome .nsp document into a WaxBin item query. It rejects
-// (all-or-nothing) any operator or field WaxBin cannot represent, reporting the
-// first gap; CheckNSPImport lists them all and ImportNSPPartial builds the rule
-// that is left once they are dropped.
-func ImportNSP(data []byte) (query.Query, error) {
+// ImportNSP parses a Navidrome .nsp document into a WaxBin item query and the
+// playlist description its comment carries. It rejects (all-or-nothing) any operator
+// or field WaxBin cannot represent, reporting the first gap; CheckNSPImport lists them
+// all and ImportNSPPartial builds the rule that is left once they are dropped. The
+// returned report holds no gaps, only notes.
+func ImportNSP(data []byte) (*NSPImport, error) {
 	top, err := nspTop(data)
 	if err != nil {
-		return query.Query{}, err
+		return nil, err
 	}
 	im := nspImporter{rep: NSPReport{Direction: NSPDirImport}}
 	q, _ := im.walk(top)
 	if !im.rep.OK() {
-		return query.Query{}, nspErr(im.rep.Gaps[0].Reason)
+		return nil, nspErr(im.rep.Gaps[0].Reason)
 	}
-	return q, nspRuleCheck(q)
+	if err := nspRuleCheck(q); err != nil {
+		return nil, err
+	}
+	return &NSPImport{Rule: q, Report: im.rep, Description: im.description}, nil
 }
 
-// NSPImport is a lossy read: the rule the document maps to once the parts with
-// no WaxBin form are dropped, and what those were.
+// NSPImport is what a document maps to: the rule, what had no WaxBin form (dropped
+// by a partial import, notes only from a strict one), and the playlist description
+// the document's comment carries.
 type NSPImport struct {
-	Rule   query.Query
-	Report NSPReport
+	Rule        query.Query
+	Report      NSPReport
+	Description string
 }
 
 // ImportNSPPartial builds the rule from what maps, reporting each part it
@@ -878,7 +904,7 @@ func ImportNSPPartial(data []byte) (*NSPImport, error) {
 	if err := nspRuleCheck(q); err != nil {
 		return nil, err
 	}
-	return &NSPImport{Rule: q, Report: im.rep}, nil
+	return &NSPImport{Rule: q, Report: im.rep, Description: im.description}, nil
 }
 
 // nspRuleCheck marshal-validates an imported rule so a node shape the rule codec
@@ -1282,6 +1308,36 @@ func ExportNSP(q query.Query) ([]byte, error) {
 		return nil, waxerr.Wrap(waxerr.CodeInternal, "playlist.nsp", err)
 	}
 	return data, nil
+}
+
+// NSPWithPlaylist returns an exported document (ExportNSP's, or a partial export's Data)
+// carrying a playlist's name and description as name and comment, the keys Navidrome reads
+// them from, so an import gives the description back. An empty one is left out; a
+// document that is not a JSON object is CodeInvalid.
+func NSPWithPlaylist(data []byte, name, description string) ([]byte, error) {
+	const op = "playlist.NSPWithPlaylist"
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
+	}
+	if name == "" && description == "" {
+		return data, nil
+	}
+	for key, text := range map[string]string{"name": name, "comment": description} {
+		if text == "" {
+			continue
+		}
+		v, err := json.Marshal(text)
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeInternal, op, err)
+		}
+		top[key] = v
+	}
+	out, err := json.MarshalIndent(top, "", "  ")
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, op, err)
+	}
+	return out, nil
 }
 
 // NSPExport is a lossy render: the document, the rule that document actually

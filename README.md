@@ -65,7 +65,7 @@ exit codes (`waxbin exit-codes`).
 | **Ingest / organize** | `inbox`, `import`, `organize` (incl. `organize history`, `organize undo`), `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent] [--file] [--reason]` (a file's sidecars go with it, and a folder it empties is removed), `mark-missing [--force]`, `merge`, `entity unfold`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup` (incl. `--redact-secrets`), `restore`, `export`, `manifest`, `rebuild` |
-| **Playlists / podcasts** | `playlist` (incl. `remove --index`, `set-owner`), `smartplaylist`, `podcast`, `opml` |
+| **Playlists / podcasts** | `playlist` (incl. `remove --index`, `set-owner`, `set-description`), `smartplaylist`, `podcast`, `opml` |
 | **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`/`--phase`/`--force-phase`; per-release album art; misses re-asked after `enrichment.retry_misses_after_days`; a failed lookup stays queued for the next pass; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
 | **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity] [--journal-days N]`, `db thumbs [--older-than/--max-bytes]`, `db enrich-cache [--older-than/--max-bytes]`, `db migrate`, `db reset --yes`, `user`, `state` |
 

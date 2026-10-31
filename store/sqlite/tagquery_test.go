@@ -107,7 +107,7 @@ func TestSmartPlaylistTagRule(t *testing.T) {
 	st, a, _, _ := tagFixture(t)
 	ctx := context.Background()
 	rule := query.New(query.EntityItems).Where("tag.MOOD", query.OpIs, "happy").Build()
-	plPID, err := st.CreatePlaylist(ctx, "Happy", "", model.PlaylistSmart, model.VisibilityPrivate, &rule)
+	plPID, err := st.CreatePlaylist(ctx, "Happy", "", "", model.PlaylistSmart, model.VisibilityPrivate, &rule)
 	if err != nil {
 		t.Fatalf("create smart playlist: %v", err)
 	}
