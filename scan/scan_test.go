@@ -410,3 +410,76 @@ func TestProbePropertiesInterruptedScanFails(t *testing.T) {
 		t.Fatalf("tags = %+v, want untouched zeroes when the probe reports nothing", tags)
 	}
 }
+
+// TestScanInputsCarryTheTitleSpelling: a book's title spelling is its ALBUMSORT, since
+// its title is the album tag, a track's is its TITLESORT, and a track a cue sheet carves
+// out of a rip takes none, the rip's own spelling naming the whole file.
+func TestScanInputsCarryTheTitleSpelling(t *testing.T) {
+	t.Parallel()
+	tags := model.Tags{Title: "Part 1", TitleSort: "Part One", Album: "The Hobbit", AlbumSort: "Hobbit, The",
+		AlbumArtist: "J.R.R. Tolkien", BookSignal: model.BookTagSignal}
+	in := bookInput(1, model.File{}, tags, "e", nil, place{})
+	if in.Item.TitleSort != "Hobbit, The" {
+		t.Errorf("book TitleSort = %q, want its ALBUMSORT", in.Item.TitleSort)
+	}
+	tr := trackInput(1, model.File{}, model.Tags{Title: "東京", TitleSort: "Tokyo", AlbumSort: "Album, The",
+		AlbumArtistSort: "Artist, The"}, "e")
+	if tr.Item.TitleSort != "Tokyo" || tr.Track.AlbumSort != "Album, The" || tr.Track.AlbumArtistSort != "Artist, The" {
+		t.Errorf("track spellings = %q/%q/%q, want TITLESORT, ALBUMSORT and ALBUMARTISTSORT",
+			tr.Item.TitleSort, tr.Track.AlbumSort, tr.Track.AlbumArtistSort)
+	}
+	rip := model.Tags{Title: "Whole Rip", TitleSort: "Rip, Whole", Album: "Live"}
+	sheet := &meta.CueSheet{Title: "Live"}
+	windows := []meta.CueWindow{{Track: meta.CueTrack{Number: 1, Title: "Opening"}}}
+	for _, vt := range carvedTracks("e", rip, sheet, windows) {
+		if vt.Item.TitleSort != "" {
+			t.Errorf("carved %q TitleSort = %q, want none", vt.Item.Title, vt.Item.TitleSort)
+		}
+	}
+}
+
+// TestABookTakesTheSpellingOfItsTitlesTag: a book titled by its TITLE, for want of an
+// ALBUM, is spelled by TITLESORT; an ALBUMSORT outranks it, since that is where a written
+// back spelling lands, and a book titled by its ALBUM never takes the part's TITLESORT.
+func TestABookTakesTheSpellingOfItsTitlesTag(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		tags model.Tags
+		want string
+	}{
+		{model.Tags{Title: "東京物語", TitleSort: "Tokyo Monogatari"}, "Tokyo Monogatari"},
+		{model.Tags{Title: "東京物語", TitleSort: "Tokyo Monogatari", AlbumSort: "Tokyo Story"}, "Tokyo Story"},
+		{model.Tags{Title: "Part 1", TitleSort: "Part One", Album: "The Hobbit"}, ""},
+	} {
+		c.tags.AlbumArtist, c.tags.BookSignal = "Author", model.BookTagSignal
+		if got := bookInput(1, model.File{}, c.tags, "e", nil, place{}).Item.TitleSort; got != c.want {
+			t.Errorf("book from %+v: TitleSort = %q, want %q", c.tags, got, c.want)
+		}
+	}
+}
+
+// TestCarvedTracksTakeTheRipsAlbumSpellings: a carved track takes the rip's ALBUMSORT and
+// ALBUMARTISTSORT when its album and album artist are the ones the rip's tags name, as a
+// plain rip's tracks do, and none for an album the sheet names otherwise.
+func TestCarvedTracksTakeTheRipsAlbumSpellings(t *testing.T) {
+	t.Parallel()
+	tags := model.Tags{Album: "The Wall", AlbumSort: "Wall, The", AlbumArtist: "Pink Floyd",
+		AlbumArtistSort: "Floyd, Pink", Artist: "Pink Floyd"}
+	windows := []meta.CueWindow{{Track: meta.CueTrack{Number: 1, Title: "In the Flesh?"}}}
+	for _, c := range []struct {
+		name                       string
+		sheet                      meta.CueSheet
+		wantAlbum, wantAlbumArtist string
+	}{
+		{"from the tags", meta.CueSheet{}, "Wall, The", "Floyd, Pink"},
+		{"the sheet agrees", meta.CueSheet{Title: "The Wall", Performer: "Pink Floyd"}, "Wall, The", "Floyd, Pink"},
+		{"the sheet differs", meta.CueSheet{Title: "Live", Performer: "Someone"}, "", ""},
+	} {
+		sheet := c.sheet
+		vt := carvedTracks("e", tags, &sheet, windows)[0]
+		if vt.Track.AlbumSort != c.wantAlbum || vt.Track.AlbumArtistSort != c.wantAlbumArtist {
+			t.Errorf("%s: album/album-artist spellings = %q/%q, want %q/%q", c.name,
+				vt.Track.AlbumSort, vt.Track.AlbumArtistSort, c.wantAlbum, c.wantAlbumArtist)
+		}
+	}
+}

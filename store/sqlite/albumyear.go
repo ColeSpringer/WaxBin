@@ -11,10 +11,15 @@ import (
 
 // liveMembers joins a track (t) to its item (pi) when the item is not trashed. Trash
 // archives an item and keeps its track row for a restore, so a trashed track is no part of
-// the album it was on: every reading of an album's members (its year, the duplicate, split
-// and consistency checks, the album walks and the album-year fill) goes through this one
-// join. The artist and release-group rollups still count it, as trash means them to.
-const liveMembers = `JOIN playable_item pi ON pi.id = t.item_id AND pi.state <> 'archived'`
+// the album it was on: every reading of an album's members (its year, its counts, the
+// duplicate, split and consistency checks, the album walks and the album-year fill) goes
+// through this one join, and the rollups apply the same rule. liveBooks and
+// liveGenreMembers are its twins for a book (bk) and an item_genre row (ig).
+const (
+	liveMembers      = `JOIN playable_item pi ON pi.id = t.item_id AND pi.state <> 'archived'`
+	liveBooks        = `JOIN playable_item pi ON pi.id = bk.item_id AND pi.state <> 'archived'`
+	liveGenreMembers = `JOIN playable_item pi ON pi.id = ig.item_id AND pi.state <> 'archived'`
+)
 
 // albumYearExpr is the year an album shows, model.AlbumYear's rule over the years its
 // members carry: one at least half of them share, an even split going to the earlier,

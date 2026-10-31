@@ -166,7 +166,7 @@ func owedFieldsTx(ctx context.Context, tx *sql.Tx, fileID int64) ([]string, erro
 // before the lock overlay, and what the put did with it.
 type scanSettle struct {
 	isBook              bool
-	fileTitle, title    string
+	fileTitle, title    itemTitle
 	fileTrack, track    model.Track         // a track's values before and after the overlay
 	fileBook            model.Book          // a book part's values before the overlay
 	bookRederived       bool                // upsertBook rewrote the book's unlocked fields
@@ -270,12 +270,12 @@ func settleOwedByScanTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64, s
 			if slices.Equal(fileTags[key], catalogTags[key]) {
 				here = append(here, f)
 			}
-		case f == "title":
+		case f == "title" || f == "title_sort":
 			held, err := lockedFallback(f)
 			if err != nil {
 				return err
 			}
-			if s.fileTitle == s.title && !held {
+			if scanFieldValue(f, s.fileTitle, model.Track{}) == scanFieldValue(f, s.title, model.Track{}) && !held {
 				here = append(here, f)
 			}
 		case s.isBook:

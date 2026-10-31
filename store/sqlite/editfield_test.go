@@ -815,7 +815,7 @@ func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
 	excluded := map[string]bool{
 		"title": true, "genre": true, "mbid": true,
 		"track_no": true, "disc_no": true, "track_total": true, "disc_total": true, "compilation": true,
-		"composer_sort": true, "author_sort": true, "comment": true,
+		"composer_sort": true, "author_sort": true, "title_sort": true, "album_sort": true, "comment": true,
 	}
 	cases := []struct {
 		kind  model.Kind

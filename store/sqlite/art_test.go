@@ -45,7 +45,7 @@ func putWithCover(t *testing.T, st *Store, libID int64, path, essence string, co
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T" + essence,
-			SortKey: model.SortKey("T" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track:    model.Track{Artist: "X", Album: "Al", Year: 2000},
 		CoverArt: cover,
@@ -196,7 +196,7 @@ func putArt(t *testing.T, st *Store, libID int64, path, essence, content, album 
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T" + essence,
-			SortKey: model.SortKey("T" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track:    model.Track{Artist: "X", Album: album, Year: 2000},
 		CoverArt: cover,

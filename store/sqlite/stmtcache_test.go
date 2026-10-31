@@ -185,9 +185,9 @@ func TestHotReadsWriteTheirLimit(t *testing.T) {
 	stmts["query page"] = limited{stmt, "LIMIT 11"}
 	stmts["entity page"] = limited{entityPageStmt("album", false, 10), "LIMIT 11"}
 	// A limit of 10 fetches 500 rows (searchFetchCap) and one more; 25 candidates cap that.
-	flat, _, _ := searchStmt("a", 10, 0, nil, nil)
+	flat, _, _ := searchStmt("a", 10, 0, searchScope{})
 	stmts["search"] = limited{flat, "LIMIT 501"}
-	capped, _, _ := searchStmt("a", 10, 25, nil, nil)
+	capped, _, _ := searchStmt("a", 10, 25, searchScope{})
 	stmts["search candidates"] = limited{capped, "LIMIT 26"}
 	stmts["search by sort key"] = limited{itemsBySortKeyQ("", 11), "LIMIT 11"}
 	stmts["search artists"] = limited{artistByNameQ("", 1, 10), "LIMIT 10"}

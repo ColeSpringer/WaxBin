@@ -42,10 +42,11 @@ type facetSpec struct {
 }
 
 // Kind scopes shared by the facet specs. notEpisodes is the music dimensions' scope;
-// onlyEpisodes is the podcast dimension's.
+// onlyEpisodes is the podcast dimension's and onlyBooks the series dimension's.
 const (
 	notEpisodes  = "pi.kind <> 'episode'"
 	onlyEpisodes = "pi.kind = 'episode'"
+	onlyBooks    = "pi.kind = 'book'"
 )
 
 // facetSpecFor returns the SQL recipe for one dimension. userID is the resolved
@@ -149,6 +150,12 @@ func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 			join:    " INNER JOIN podcast fpod ON fpod.id = ep.podcast_id",
 			groupBy: "ep.podcast_id", keyExpr: "fpod.pid", display: "fpod.title", sortExpr: "fpod.sort_key",
 			entity: true, kindWhere: onlyEpisodes,
+		}, true
+	case read.GroupSeries:
+		// Reads the srs alias itemJoins binds, as album reads alb.
+		return facetSpec{
+			groupBy: "bk.series_id", keyExpr: "srs.pid", display: "srs.name", sortExpr: "srs.sort_key",
+			entity: true, unknown: read.NoSeries, kindWhere: onlyBooks,
 		}, true
 	case read.GroupPlaylist:
 		// The only dimension whose bucket set varies by user: a playlist contributes

@@ -103,32 +103,37 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // expose a virtual track's offset window, and f.sample_rate rides along beside the
 // container and codec so a consumer can convert that window to samples.
 //
-// The five entity-pid columns project the artist/album-artist/album/release-group/
-// podcast entity pids, sharing their expressions with the matching query fields so a
-// projected pid and a pid filter cannot disagree. A book resolves its author for the
-// artist pair and NULL for the album pair; an episode is NULL for all but the podcast,
-// which is NULL for everything else. The release group is also NULL for a track whose
-// album has none. The library pid follows them and is not an entity: it reads through
-// the primary file, so it is NULL for a fileless item and matches the library query
-// field, which reads the same f.library_id.
+// The six entity-pid columns project the artist/album-artist/album/release-group/
+// podcast/series entity pids, sharing their expressions with the matching query fields so
+// a projected pid and a pid filter cannot disagree. A book resolves its author for the
+// artist pair, NULL for the album pair and its series for the last; an episode is NULL
+// for all but the podcast, which is NULL for everything else. The release group is also
+// NULL for a track whose album has none. The library pid follows them and is not an
+// entity: it reads through the primary file, so it is NULL for a fileless item and
+// matches the library query field, which reads the same f.library_id.
 //
 // The six external-identifier columns near the end of the list are the MusicBrainz ids
 // and the ISRC (see model.ItemView). The first four read off joined aliases; the artist
 // pair is sought per row, reusing itemArtistIDExpr so a projected MBID and a projected
-// pid cannot point at different artist rows. These COALESCE to ” rather than scanning
-// through sql.NullString, which only the pid columns need for model.PID's empty value.
-// bpm closes the list and is the one nullable scalar among them: it reads the column
-// straight, since 0 and "no tempo stated" are the same thing to every consumer.
+// pid cannot point at different artist rows. These COALESCE to an empty string rather
+// than scanning through sql.NullString, which only the pid columns need for model.PID's
+// empty value.
+// bpm is the one nullable scalar among them: it reads the column straight, since 0 and
+// "no tempo stated" are the same thing to every consumer. The primary file's size and
+// bitrate, the item's added time and the title, album and album-artist spellings close
+// the list, read off rows already joined.
 //
 // These ride on every item read. BenchmarkQueryPageAtScale puts a 50-item page around
 // 0.7 ms, unchanged by the release group (p=0.69 over 5 runs). The identifiers cost
 // 689 -> 792 us, 15% over 8 runs: the artist pair adds two per-row probes and the rg
 // join removes one, so a row does four where it did three. The library pid costs a
 // fifth probe and another 797 -> 842 us, 5.6% over 8 runs (p=0.01). A rowid seek into a
-// one-row table is not free, so measure before adding a sixth. The tax also falls on
-// readers that never want the column, since every splicer of this list pays it: the
-// playback queue, share's resolve ladders, portable's identity selects, and port's
-// export, which discards the library pid outright.
+// one-row table is not free, so measure before adding a sixth. The file's size and
+// bitrate and the added time cost no probe (606 -> 616 us over 5 interleaved runs, within
+// this machine's noise). The tax also falls on readers that never want the column,
+// since every splicer of this list pays it: the playback queue, share's resolve ladders,
+// portable's identity selects, and port's export, which discards the library pid
+// outright.
 //
 // Serving the artist pair from two more joins instead cuts it to two probes but costs
 // album_pid its track_album_id seek, which TestLoweredIdentityFieldPlans catches, so a
@@ -150,7 +155,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	f.container, f.codec, f.sample_rate, pf.start_frames, pf.end_frames,
 	(SELECT vap.pid FROM artist vap WHERE vap.id = ` + itemArtistIDExpr + `),
 	(SELECT vaap.pid FROM artist vaap WHERE vaap.id = ` + itemAlbumArtistIDExpr + `),
-	alb.pid, rg.pid, pod.pid,
+	alb.pid, rg.pid, pod.pid, srs.pid,
 	(SELECT vlib.pid FROM library vlib WHERE vlib.id = f.library_id),
 	COALESCE(NULLIF(t.mbid,''), bk.mbid, ''),
 	COALESCE(t.isrc,''),
@@ -158,7 +163,8 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(rg.mbid,''),
 	COALESCE((SELECT vapm.mbid FROM artist vapm WHERE vapm.id = ` + itemArtistIDExpr + `),''),
 	COALESCE((SELECT vaapm.mbid FROM artist vaapm WHERE vaapm.id = ` + itemAlbumArtistIDExpr + `),''),
-	t.bpm, bk.track_total`
+	t.bpm, bk.track_total, f.size, f.bitrate, pi.created_at, pi.title_sort, COALESCE(t.album_sort,''),
+	COALESCE(t.album_artist_sort,'')`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -173,6 +179,17 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 	container, codec, duration_ms, bitrate, sample_rate, channels, bit_depth,
 	scan_state, first_seen, last_seen FROM file`
 
+// fileFactCols reads a file's facts (alias f) in fileFactDests' order, for every read
+// returning an ItemFileRef.
+const fileFactCols = `f.first_seen, f.size, COALESCE(f.bitrate, 0), COALESCE(f.sample_rate, 0),
+	COALESCE(f.channels, 0), COALESCE(f.bit_depth, 0), COALESCE(f.codec, ''), COALESCE(f.container, ''),
+	COALESCE(f.duration_ms, 0)`
+
+func fileFactDests(r *model.ItemFileRef) []any {
+	return []any{&r.FirstSeen, &r.Size, &r.Bitrate, &r.SampleRate, &r.Channels, &r.BitDepth, &r.Codec, &r.Container,
+		&r.DurationMS}
+}
+
 // itemViewNulls holds the nullable columns of an item view during a scan.
 type itemViewNulls struct {
 	trackNo, discNo, year, bpm, dur     sql.NullInt64
@@ -180,12 +197,12 @@ type itemViewNulls struct {
 	compilation                         sql.NullInt64
 	season, pubDate, explicit           sql.NullInt64
 	podcastExplicit                     sql.NullInt64
-	sampleRate                          sql.NullInt64
+	sampleRate, fileSize, bitrate       sql.NullInt64
 	startFrames, endFrames              sql.NullInt64
 	fpid, fdisp, container, codec       sql.NullString
 	artistPID, albumArtistPID, albumPID sql.NullString
 	releaseGroupPID, podcastPID         sql.NullString
-	libraryPID                          sql.NullString
+	seriesPID, libraryPID               sql.NullString
 	fpath                               []byte
 }
 
@@ -201,9 +218,10 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
 		&n.startFrames, &n.endFrames,
 		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID, &n.podcastPID,
-		&n.libraryPID,
+		&n.seriesPID, &n.libraryPID,
 		&v.MBID, &v.ISRC, &v.AlbumMBID, &v.ReleaseGroupMBID, &v.ArtistMBID, &v.AlbumArtistMBID,
-		&n.bpm, &n.partTotal,
+		&n.bpm, &n.partTotal, &n.fileSize, &n.bitrate, &v.CreatedAt, &v.TitleSort, &v.AlbumSort,
+		&v.AlbumArtistSort,
 	}
 }
 
@@ -227,12 +245,15 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.Container = n.container.String
 	v.Codec = n.codec.String
 	v.SampleRate = int(n.sampleRate.Int64)
+	v.FileSize = n.fileSize.Int64
+	v.Bitrate = int(n.bitrate.Int64)
 	// Absent entity pids scan as NULL, which NullString maps to "" -> the empty PID.
 	v.ArtistPID = model.PID(n.artistPID.String)
 	v.AlbumArtistPID = model.PID(n.albumArtistPID.String)
 	v.AlbumPID = model.PID(n.albumPID.String)
 	v.ReleaseGroupPID = model.PID(n.releaseGroupPID.String)
 	v.PodcastPID = model.PID(n.podcastPID.String)
+	v.SeriesPID = model.PID(n.seriesPID.String)
 	v.LibraryPID = model.PID(n.libraryPID.String)
 	// A non-NULL start offset marks the primary edge as a virtual track's window.
 	v.Virtual = n.startFrames.Valid
@@ -558,9 +579,10 @@ func adoptBookItemByEditionTx(ctx context.Context, tx *sql.Tx, identityKey strin
 // upsertItem finds-or-creates the logical item, returning its id, pid, whether it
 // was created, and whether an existing item's state transitioned (e.g. missing ->
 // present when a file is restored) so the caller can emit a change_log delta for the
-// transition even when the audio content is unchanged. priorTitle is the title an
-// existing item held before this write replaced it, which is how a scan put tells a
-// re-derived title from an unchanged one.
+// transition even when the audio content is unchanged. prior is the title and spelling
+// an existing item held before this write replaced them, which is how a scan put tells a
+// re-derived title from an unchanged one. The item's sort key is computed here from the
+// title and its spelling (itemSortKey), never taken from the caller.
 //
 // A book whose key matches nothing gets a second look by its strong identifier, so an
 // enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one,
@@ -568,42 +590,42 @@ func adoptBookItemByEditionTx(ctx context.Context, tx *sql.Tx, identityKey strin
 // known is the put's earlier resolution of the key (resolvedItem), used in its place.
 // releaseYear is the track's or book's year, 0 for an episode, kept on the item row for
 // the newest list; it rides on the row's write rather than costing a statement of its own.
-func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, releaseYear int, adopt bookAdoptKey, now int64, preferredPID model.PID, known *resolvedItem) (id int64, pid model.PID, created, stateChanged bool, priorTitle string, err error) {
+func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, releaseYear int, adopt bookAdoptKey, now int64, preferredPID model.PID, known *resolvedItem) (id int64, pid model.PID, created, stateChanged bool, prior itemTitle, err error) {
+	key := itemSortKey(item.Title, item.TitleSort)
 	if item.IdentityKey != "" {
 		var rid int64
-		var rpid, curState, curTitle string
+		var rpid, curState string
+		var cur itemTitle
 		var qerr error
+		const cols = "SELECT id, pid, state, title, title_sort FROM playable_item"
 		switch {
 		case known != nil && known.id != 0:
-			qerr = tx.QueryRowContext(ctx, "SELECT id, pid, state, title FROM playable_item WHERE id = ?", known.id).
-				Scan(&rid, &rpid, &curState, &curTitle)
+			qerr = tx.QueryRowContext(ctx, cols+" WHERE id = ?", known.id).Scan(&rid, &rpid, &curState, &cur.title, &cur.sort)
 		case known != nil:
 			qerr = sql.ErrNoRows
 		default:
-			qerr = tx.QueryRowContext(ctx,
-				"SELECT id, pid, state, title FROM playable_item WHERE kind = ? AND identity_key = ?",
-				string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState, &curTitle)
+			qerr = tx.QueryRowContext(ctx, cols+" WHERE kind = ? AND identity_key = ?",
+				string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState, &cur.title, &cur.sort)
 		}
 		if known == nil && errors.Is(qerr, sql.ErrNoRows) && item.Kind == model.KindBook {
 			adopted, aerr := adoptBookItemByIdentTx(ctx, tx, log, item.IdentityKey, adopt)
 			if aerr != nil {
-				return 0, "", false, false, "", aerr
+				return 0, "", false, false, itemTitle{}, aerr
 			}
 			if adopted != 0 {
-				qerr = tx.QueryRowContext(ctx,
-					"SELECT id, pid, state, title FROM playable_item WHERE id = ?", adopted).Scan(&rid, &rpid, &curState, &curTitle)
+				qerr = tx.QueryRowContext(ctx, cols+" WHERE id = ?", adopted).Scan(&rid, &rpid, &curState, &cur.title, &cur.sort)
 			}
 		}
 		switch {
 		case qerr == nil:
 			if _, uerr := tx.ExecContext(ctx,
-				"UPDATE playable_item SET title=?, sort_key=?, state=?, release_year=?, updated_at=? WHERE id=?",
-				item.Title, item.SortKey, string(item.State), releaseYear, now, rid); uerr != nil {
-				return 0, "", false, false, "", uerr
+				"UPDATE playable_item SET title=?, title_sort=?, sort_key=?, title_key=?, state=?, release_year=?, updated_at=? WHERE id=?",
+				item.Title, item.TitleSort, key, model.SortKey(item.Title), string(item.State), releaseYear, now, rid); uerr != nil {
+				return 0, "", false, false, itemTitle{}, uerr
 			}
-			return rid, model.PID(rpid), false, curState != string(item.State), curTitle, nil
+			return rid, model.PID(rpid), false, curState != string(item.State), cur, nil
 		case !errors.Is(qerr, sql.ErrNoRows):
-			return 0, "", false, false, "", qerr
+			return 0, "", false, false, itemTitle{}, qerr
 		}
 	}
 	// A new item mints a fresh PID, unless a rebuild supplied a valid, unclaimed
@@ -616,43 +638,44 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 		var taken int
 		if terr := tx.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM playable_item WHERE pid = ?)", string(preferredPID)).Scan(&taken); terr != nil {
-			return 0, "", false, false, "", terr
+			return 0, "", false, false, itemTitle{}, terr
 		}
 		if taken == 0 {
 			newPID = preferredPID
 		}
 	}
 	r, ierr := tx.ExecContext(ctx, `INSERT INTO playable_item
-		(pid, kind, state, title, sort_key, identity_key, release_year, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
-		string(newPID), string(item.Kind), string(item.State), item.Title, item.SortKey,
+		(pid, kind, state, title, title_sort, sort_key, title_key, identity_key, release_year, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		string(newPID), string(item.Kind), string(item.State), item.Title, item.TitleSort, key, model.SortKey(item.Title),
 		nullStr(item.IdentityKey), releaseYear, now, now)
 	if ierr != nil {
-		return 0, "", false, false, "", ierr
+		return 0, "", false, false, itemTitle{}, ierr
 	}
 	rid, ierr := r.LastInsertId()
 	if ierr != nil {
-		return 0, "", false, false, "", ierr
+		return 0, "", false, false, itemTitle{}, ierr
 	}
-	return rid, newPID, true, false, "", nil
+	return rid, newPID, true, false, itemTitle{}, nil
 }
 
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO track
-		(item_id, artist, artist_sort, artist_sort_key, album, album_artist, composer, composer_sort,
-		 composer_sort_key, comment, track_no, track_total, disc_no, disc_total, year, bpm, genre,
-		 compilation, isrc, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		(item_id, artist, artist_sort, artist_sort_key, album, album_sort, album_artist, album_artist_sort,
+		 composer, composer_sort, composer_sort_key, comment, track_no, track_total, disc_no, disc_total,
+		 year, bpm, genre, compilation, isrc, mbid)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			artist=excluded.artist, artist_sort=excluded.artist_sort,
-			artist_sort_key=excluded.artist_sort_key, album=excluded.album,
-			album_artist=excluded.album_artist, composer=excluded.composer,
+			artist_sort_key=excluded.artist_sort_key, album=excluded.album, album_sort=excluded.album_sort,
+			album_artist=excluded.album_artist, album_artist_sort=excluded.album_artist_sort,
+			composer=excluded.composer,
 			composer_sort=excluded.composer_sort, composer_sort_key=excluded.composer_sort_key,
 			comment=excluded.comment, track_no=excluded.track_no, track_total=excluded.track_total,
 			disc_no=excluded.disc_no, disc_total=excluded.disc_total, year=excluded.year, bpm=excluded.bpm,
 			genre=excluded.genre, compilation=excluded.compilation, isrc=excluded.isrc, mbid=excluded.mbid`,
-		itemID, tr.Artist, tr.ArtistSort, artistSortKey(tr), tr.Album, tr.AlbumArtist, tr.Composer,
-		tr.ComposerSort, composerSortKey(tr), tr.Comment,
+		itemID, tr.Artist, tr.ArtistSort, artistSortKey(tr), tr.Album, tr.AlbumSort, tr.AlbumArtist,
+		tr.AlbumArtistSort, tr.Composer, tr.ComposerSort, composerSortKey(tr), tr.Comment,
 		nullInt(tr.TrackNo), nullInt(tr.TrackTotal), nullInt(tr.DiscNo), nullInt(tr.DiscTotal),
 		nullInt(tr.Year), nullInt(tr.BPM), tr.Genre, boolInt(tr.Compilation), tr.ISRC, nullStr(tr.MBID))
 	return err

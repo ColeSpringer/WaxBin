@@ -152,7 +152,7 @@ func seedAlbumTrack(t *testing.T, st *sqlite.Store, libID int64, essence string,
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Shine On",
-			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: tr,
 	}
@@ -175,7 +175,7 @@ func seedAlbumTrackWithCover(t *testing.T, st *sqlite.Store, libID int64, essenc
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Shine On",
-			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: tr,
 		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 4, Height: 4,

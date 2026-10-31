@@ -24,6 +24,9 @@ type DerivedReport struct {
 	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
 	AlbumYearDrift          int // albums whose year != their members' most common year
 	ReleaseYearDrift        int // items whose release_year != their track's or book's year
+	// Albums, release groups and artists whose derived sort spelling is not the one their
+	// live members state (sortSpellings).
+	SortSpellingDrift int
 	// Static playlists whose positions are not 0..n-1. Informational: an index resolves
 	// by rank, so such a gap changes nothing a reader sees; --fix renumbers it.
 	PlaylistPositionDrift int
@@ -61,7 +64,7 @@ func (r DerivedReport) Consistent() bool {
 	return r.SortKeyDrift == 0 && r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
 		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0 &&
-		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0 && r.ReleaseYearDrift == 0
+		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0 && r.ReleaseYearDrift == 0 && r.SortSpellingDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` would reclaim space: orphaned art
@@ -124,6 +127,15 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		if err := s.rdb().QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+	}
+	// The derived spellings settle with the rollups, so the same pending rule applies.
+	for _, sp := range entitySpellings {
+		var n int
+		if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+sp.table+" e WHERE e."+sp.col+" <> "+
+			sp.derived()+unsettled(sp.table, "e.id")).Scan(&n); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		rep.SortSpellingDrift += n
 	}
 	// Apart from the table above, since a damaged thumbnail file is the cache's fault, not
 	// the catalog's.
@@ -234,11 +246,11 @@ const artistRollupDriftQ = `
 SELECT COUNT(*) FROM artist a
 LEFT JOIN artist_rollup ar ON ar.artist_id = a.id
 WHERE (COALESCE(ar.track_count, -1) <>
-        (SELECT COUNT(DISTINCT t.item_id) FROM track t WHERE t.artist_id = a.id)
+        (SELECT COUNT(DISTINCT t.item_id) FROM track t ` + liveMembers + ` WHERE t.artist_id = a.id)
    OR COALESCE(ar.release_group_count, -1) <>
         (SELECT COUNT(*) FROM release_group rg WHERE rg.primary_artist_id = a.id)
    OR COALESCE(ar.total_duration_ms, -1) <>
-        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM track t
+        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM track t ` + liveMembers + `
            LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE t.artist_id = a.id))`
@@ -247,9 +259,9 @@ const genreRollupDriftQ = `
 SELECT COUNT(*) FROM genre g
 LEFT JOIN genre_rollup gr ON gr.genre_id = g.id
 WHERE (COALESCE(gr.track_count, -1) <>
-        (SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = g.id)
+        (SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig ` + liveGenreMembers + ` WHERE ig.genre_id = g.id)
    OR COALESCE(gr.total_duration_ms, -1) <>
-        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM item_genre ig
+        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM item_genre ig ` + liveGenreMembers + `
            LEFT JOIN item_file pf ON pf.item_id = ig.item_id AND pf.role IN ('primary', 'part')
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE ig.genre_id = g.id))`
@@ -274,10 +286,10 @@ SELECT COUNT(*) FROM release_group rg
 LEFT JOIN release_group_rollup rr ON rr.release_group_id = rg.id
 WHERE (COALESCE(rr.track_count, -1) <>
         (SELECT COUNT(DISTINCT t.item_id) FROM track t
-           JOIN album al ON al.id = t.album_id WHERE al.release_group_id = rg.id)
+           JOIN album al ON al.id = t.album_id ` + liveMembers + ` WHERE al.release_group_id = rg.id)
    OR COALESCE(rr.total_duration_ms, -1) <>
         (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM track t
-           JOIN album al ON al.id = t.album_id
+           JOIN album al ON al.id = t.album_id ` + liveMembers + `
            LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE al.release_group_id = rg.id))`

@@ -24,6 +24,8 @@ var queryFieldAliases = map[string]string{
 	"track":       "track_no",
 	"disc":        "disc_no",
 	"created_at":  "added",
+	// The key an item collates by is its title spelling's, so title_sort names it too.
+	"title_sort": "sort_key",
 }
 
 // QueryFieldAliases returns the alias-to-canonical table as a fresh map, for a caller

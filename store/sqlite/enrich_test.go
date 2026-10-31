@@ -57,7 +57,7 @@ func trackWithArtist(libID int64, path, essence, artist, mbArtistID string) mode
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
-			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{Artist: artist, AlbumArtist: artist, MBArtistIDs: []string{mbArtistID}, TrackNo: 1},
 	}
@@ -137,7 +137,7 @@ func TestEntityEnrichmentClearedOnItemDelete(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: "A Book",
-			SortKey: model.SortKey("A Book"), IdentityKey: "book:a book",
+			IdentityKey: "book:a book",
 		},
 		Book: model.Book{Authors: []string{"An Author"}},
 	}
@@ -199,7 +199,7 @@ func scopeTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence, titl
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{Artist: artist, AlbumArtist: albumArtist, Album: album, TrackNo: 1},
 	})
@@ -231,7 +231,7 @@ func albumTrack(t *testing.T, st *sqlite.Store, libID int64, essence, album, bar
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
-			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{
 			Artist: "PF", AlbumArtist: "PF", Album: album, TrackNo: 1,
@@ -459,7 +459,7 @@ func TestEnrichScopeForItem(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: "A Book",
-			SortKey: model.SortKey("A Book"), IdentityKey: "book:a book",
+			IdentityKey: "book:a book",
 		},
 		Book: model.Book{Authors: []string{"An Author"}, Narrators: []string{"A Narrator"}},
 	})
@@ -682,7 +682,7 @@ func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Song",
-			SortKey: model.SortKey("Song"), IdentityKey: "essence:ess-g",
+			IdentityKey: "essence:ess-g",
 		},
 		Track: model.Track{Artist: "Real Band", AlbumArtist: "Real Band", Album: "Ghost Album", TrackNo: 1},
 	}); err != nil {
@@ -898,7 +898,7 @@ func auxRGTrack(t *testing.T, st *sqlite.Store, libID int64, name, album, mbid s
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + name,
-			SortKey: model.SortKey("T-" + name), IdentityKey: "essence:e-" + name,
+			IdentityKey: "essence:e-" + name,
 		},
 		Track: model.Track{
 			Artist: name, AlbumArtist: name, Album: album, TrackNo: 1, MBReleaseGroupID: mbid,
@@ -1451,7 +1451,7 @@ func retagArtistMBID(t *testing.T, st *sqlite.Store, libID int64, name, mbid str
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + name,
-			SortKey: model.SortKey("T-" + name), IdentityKey: "essence:e-" + name,
+			IdentityKey: "essence:e-" + name,
 		},
 		Track: model.Track{
 			Artist: name, AlbumArtist: name, Album: name, TrackNo: 1,
@@ -1516,7 +1516,7 @@ func seedEnrichTrackInput(libID int64) model.PutScannedTrackInput {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Shine On",
-			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:ess-a",
+			IdentityKey: "essence:ess-a",
 		},
 		Track: model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "WYWH", TrackNo: 1},
 	}
@@ -1723,7 +1723,7 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 			},
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: "Track " + p,
-				SortKey: model.SortKey("Track " + p), IdentityKey: "essence:ess-" + p,
+				IdentityKey: "essence:ess-" + p,
 			},
 			Track: model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals", TrackNo: 1},
 		})
@@ -1743,7 +1743,7 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 		vts = append(vts, model.VirtualTrack{
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: title,
-				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey("rip-e", i+1, start),
+				IdentityKey: identity.VirtualTrackKey("rip-e", i+1, start),
 			},
 			Track:       model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals", TrackNo: i + 3},
 			StartFrames: start, EndFrames: end,
@@ -1911,7 +1911,7 @@ func TestEnrichmentWritebackDropsALabelTheAlbumNoLongerHolds(t *testing.T) {
 			},
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: "Track " + a.file,
-				SortKey: model.SortKey("Track " + a.file), IdentityKey: "essence:ess-" + a.file,
+				IdentityKey: "essence:ess-" + a.file,
 			},
 			Track: model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: a.album, TrackNo: 1},
 		})
@@ -2460,7 +2460,7 @@ func folderTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence stri
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
-			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: tr,
 	})

@@ -162,7 +162,7 @@ func rescanTrackWithLyrics(t *testing.T, st *Store, libID int64, essence, conten
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "One",
-			SortKey: model.SortKey("One"), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track:         model.Track{Artist: "Alpha", ArtistSort: model.SortKey("Alpha")},
 		Lyrics:        ly,
@@ -231,7 +231,7 @@ func rescanTrackWithCover(t *testing.T, st *Store, libID int64, essence, content
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "One",
-			SortKey: model.SortKey("One"), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track:         model.Track{Artist: "Alpha", ArtistSort: model.SortKey("Alpha")},
 		CoverArt:      cover,
@@ -695,7 +695,6 @@ func rescanBookChapters(t *testing.T, st *Store, libID int64, essence, content s
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: "The Book",
-			SortKey:     model.SortKey("The Book"),
 			IdentityKey: identity.BookKey("", "", "Jane Author", "The Book", ""),
 		},
 		Book:          model.Book{Author: "Jane Author", Authors: []string{"Jane Author"}},

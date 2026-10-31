@@ -23,7 +23,7 @@ func putTrackCustom(t *testing.T, st *Store, libID int64, path, essence, content
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track:         model.Track{Artist: "Artist", Album: "Album"},
 		CustomTags:    custom,
@@ -761,29 +761,5 @@ func TestVerifyReclaimsUnpayableTagOwedRows(t *testing.T) {
 	}
 	if keys, err := owedKeysOf(ctx, st, res.FilePID); err != nil || !slices.Equal(keys, []string{"tag.MOOD"}) {
 		t.Errorf("owed after gc = %v (err %v), want the live key alone", keys, err)
-	}
-}
-
-// TestForgetItemTagPaysEveryFile: ForgetItemTag follows a write-back that cleared the tag
-// from every file, so once the catalog drops it too no file owes it.
-func TestForgetItemTagPaysEveryFile(t *testing.T) {
-	t.Parallel()
-	st, lib := entityFixture(t)
-	ctx := context.Background()
-	one := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1})
-	two := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2})
-	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "TITLESORT", []string{"Curated"}, model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
-		t.Fatalf("set: %v", err)
-	}
-	if err := st.ForgetItemTag(ctx, one.ItemPID, "TITLESORT"); err != nil {
-		t.Fatalf("forget: %v", err)
-	}
-	if got := tagValues(t, st, one.ItemPID, "TITLESORT"); got != nil {
-		t.Errorf("TITLESORT = %v, want it dropped", got)
-	}
-	for _, f := range []model.PID{one.FilePID, two.FilePID} {
-		if keys, err := owedKeysOf(ctx, st, f); err != nil || keys != nil {
-			t.Errorf("owed on %s = %v (err %v), want none", f, keys, err)
-		}
 	}
 }

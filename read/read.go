@@ -53,6 +53,10 @@ const (
 	// because a playlist has no sort key and two users may both have a "Favorites";
 	// EntityPID is what tells them apart.
 	GroupPlaylist GroupBy = "playlist"
+	// GroupSeries buckets books by their series (key = series pid, display = its name).
+	// It is the mirror of the series_pid query field. Only books are counted, since a
+	// track or an episode has no series, and a book in none lands in NoSeries.
+	GroupSeries GroupBy = "series"
 )
 
 // Valid reports whether g is a known faceting dimension: one of the fixed dimensions
@@ -60,7 +64,7 @@ const (
 func (g GroupBy) Valid() bool {
 	switch g {
 	case GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
-		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist:
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -71,7 +75,7 @@ func (g GroupBy) Valid() bool {
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
 	return []GroupBy{GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
-		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist}
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries}
 }
 
 // UserScoped reports whether g's bucket set depends on the calling user. Only
@@ -91,4 +95,5 @@ const (
 	// NoReleaseGroup is deliberately not NonAlbum: a track can belong to an album and
 	// still have no release group, so folding the two would hide that state.
 	NoReleaseGroup = "[No Release Group]"
+	NoSeries       = "[No Series]"
 )

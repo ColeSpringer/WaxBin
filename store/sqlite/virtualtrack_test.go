@@ -27,7 +27,7 @@ func vtrackInput(libID int64, path, essence, content string, dur int64, windows 
 		tracks[i] = model.VirtualTrack{
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent,
-				Title: title, SortKey: model.SortKey(title),
+				Title:       title,
 				IdentityKey: identity.VirtualTrackKey(essence, n, w[0]),
 			},
 			Track:       model.Track{Artist: "Rip Artist", AlbumArtist: "Rip Artist", Album: "Rip Album", TrackNo: n},

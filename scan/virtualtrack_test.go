@@ -473,6 +473,37 @@ func TestScanKeptRipKeepsEachTracksAlbum(t *testing.T) {
 	}
 }
 
+// TestScanKeptRipKeepsEachTracksSpellings: a kept rip keeps a track's spellings with the
+// title and album it keeps, so an unread sheet re-puts the track unchanged instead of
+// splitting an edited title from its spelling.
+func TestScanKeptRipKeepsEachTracksSpellings(t *testing.T) {
+	t.Parallel()
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	cuePath := filepath.Join(root, "album.cue")
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(37)))
+	writeCue(t, cuePath, threeTrackRip("00:00:10"))
+	scanAll(t, sc, lib, false)
+	two := itemsByTrack(t, st)[1]
+	for _, e := range [][2]string{{"title", "東京"}, {"title_sort", "Tokyo"}, {"album_sort", "Album, The"}} {
+		if err := st.EditItemField(ctx, two.PID, e[0], e[1], model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+			t.Fatalf("edit %s: %v", e[0], err)
+		}
+	}
+
+	writeCue(t, cuePath, threeTrackRip("00:0x:10"))
+	future := time.Now().Add(time.Hour)
+	_ = os.Chtimes(cuePath, future, future)
+	scanAll(t, sc, lib, true)
+	for _, it := range itemsByTrack(t, st) {
+		if it.PID == two.PID && (it.Title != "東京" || it.TitleSort != "Tokyo" || it.AlbumSort != "Album, The") {
+			t.Errorf("kept track = %q/%q on %q, want 東京/Tokyo on Album, The", it.Title, it.TitleSort, it.AlbumSort)
+		}
+	}
+	assertScanConsistent(t, st)
+}
+
 // TestScanMultiFileSheetKeepsAnExistingRip: a sheet that stops describing one file
 // cannot be applied at all, and a rip keeps its tracks through that as it does through
 // an unread line.

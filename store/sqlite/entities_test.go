@@ -41,23 +41,25 @@ type trackSpec struct {
 	album, genre  string
 	composer      string
 	// artistSort and composerSort are the sort spellings the file states (ARTISTSORT,
-	// COMPOSERSORT), empty when it states none.
-	artistSort, composerSort string
-	year                     int
-	bpm                      int
-	discTotal                int
-	trackNo, discNo          int
-	durationMS               int64
-	compilation              bool
-	mbRecording              string
-	mbReleaseGroup           string
-	mbRelease                string
-	mbArtists                []string
-	mbAlbumArtists           []string
-	isrc                     string
-	barcode, label, catNo    string
-	media, country           string
-	deferRollups             bool
+	// COMPOSERSORT), empty when it states none, and so are titleSort (TITLESORT),
+	// albumSort (ALBUMSORT) and albumArtistSort (ALBUMARTISTSORT).
+	artistSort, composerSort              string
+	titleSort, albumSort, albumArtistSort string
+	year                                  int
+	bpm                                   int
+	discTotal                             int
+	trackNo, discNo                       int
+	durationMS                            int64
+	compilation                           bool
+	mbRecording                           string
+	mbReleaseGroup                        string
+	mbRelease                             string
+	mbArtists                             []string
+	mbAlbumArtists                        []string
+	isrc                                  string
+	barcode, label, catNo                 string
+	media, country                        string
+	deferRollups                          bool
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
@@ -92,11 +94,12 @@ func trackSpecInput(libID int64, s trackSpec) model.PutScannedTrackInput {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: s.title,
-			SortKey: model.SortKey(s.title), IdentityKey: idKey,
+			TitleSort: s.titleSort, IdentityKey: idKey,
 		},
 		Track: model.Track{
 			Artist: s.artist, Artists: s.artists, ArtistSort: s.artistSort, Album: s.album,
-			AlbumArtist: s.albumArt, Composer: s.composer, ComposerSort: s.composerSort,
+			AlbumSort: s.albumSort, AlbumArtist: s.albumArt, AlbumArtistSort: s.albumArtistSort,
+			Composer: s.composer, ComposerSort: s.composerSort,
 			Genre:            s.genre,
 			Genres:           identity.SplitGenres(s.genre),
 			Year:             s.year,

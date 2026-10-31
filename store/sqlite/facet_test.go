@@ -572,6 +572,11 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	// spec shapes: music, kind-agnostic, episode-scoped, and custom-tag.
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/bare.flac", essence: "ebare", content: "cbare", title: "Bare"})
 	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
+	// Two books, one in a series and one in none, so the series dimension has a bucket
+	// and an unknown bucket to misplace.
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b1.m4b", essence: "eb1", content: "cb1",
+		title: "In Saga", author: "Au", series: "Saga", seq: "1"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b2.m4b", essence: "eb2", content: "cb2", title: "Alone", author: "Au"})
 	items, err := st.QueryItems(ctx, all, "")
 	if err != nil || len(items) == 0 {
 		t.Fatalf("items = %d (err %v)", len(items), err)
@@ -590,6 +595,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	}
 
 	withUnknown := 0
+	seriesUnknown := false
 	dims := append(read.GroupBys(), read.GroupBy("tag.MOOD"))
 	for _, g := range dims {
 		base, err := st.Facet(ctx, all, g, "", 0, "")
@@ -609,6 +615,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 				continue
 			}
 			withUnknown++
+			seriesUnknown = seriesUnknown || g == read.GroupSeries
 			if i != len(base.Buckets)-1 {
 				t.Errorf("%s: unknown bucket %q is at %d of %d, want last: %+v",
 					g, b.Display, i, len(base.Buckets), base.Buckets)
@@ -617,9 +624,9 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	}
 	// Guard the guard: if the fixture stops producing unknown buckets the loop above
 	// asserts nothing and the (sortExpr IS NULL) term goes unpinned again.
-	if withUnknown < 5 {
-		t.Fatalf("fixture produced %d unknown buckets across %d dimensions, want the "+
-			"five music dimensions plus library", withUnknown, len(dims))
+	if withUnknown < 5 || !seriesUnknown {
+		t.Fatalf("fixture produced %d unknown buckets across %d dimensions (series among them: %v), "+
+			"want the five music dimensions, library and series", withUnknown, len(dims), seriesUnknown)
 	}
 }
 
@@ -806,5 +813,93 @@ func TestFacetArgumentErrorsBeatUserLookup(t *testing.T) {
 	// With every other argument sound, the user error is the one that surfaces.
 	if _, err := st.Facet(ctx, all, read.GroupPlaylist, "", 0, bogus); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("bad user alone = %v, want CodeNotFound", err)
+	}
+}
+
+// TestSeriesFacetCountsBooksOnly: the series dimension buckets books by their series and
+// leaves tracks and episodes out, a book in no series landing in [No Series]; a bucket
+// drills down through series_pid, and the item view carries the same pid.
+func TestSeriesFacetCountsBooksOnly(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct", title: "Song", artist: "X", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b1.m4b", essence: "eb1", content: "cb1",
+		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", series: "Earthsea", seq: "1"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b2.m4b", essence: "eb2", content: "cb2",
+		title: "The Tombs of Atuan", author: "Ursula K. Le Guin", series: "Earthsea", seq: "2"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b3.m4b", essence: "eb3", content: "cb3",
+		title: "Lathe", author: "Ursula K. Le Guin"})
+
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupSeries, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet series: %v", err)
+	}
+	if len(res.Buckets) != 2 {
+		t.Fatalf("series buckets = %+v, want Earthsea and the unknown bucket", res.Buckets)
+	}
+	earthsea, unknown := res.Buckets[0], res.Buckets[1]
+	if earthsea.Display != "Earthsea" || earthsea.Count != 2 || earthsea.EntityPID == "" {
+		t.Errorf("first bucket = %+v, want Earthsea with 2 books and its pid", earthsea)
+	}
+	if !unknown.IsUnknown || unknown.Display != read.NoSeries || unknown.Count != 1 {
+		t.Errorf("last bucket = %+v, want %s with the one book outside a series", unknown, read.NoSeries)
+	}
+	if n := countWhere(t, st, "series_pid", query.OpIs, string(earthsea.EntityPID)); n != 2 {
+		t.Errorf("series_pid is Earthsea = %d, want 2", n)
+	}
+	// Every item outside a series reads NULL: the track, the episode and the third book.
+	if n := countWhere(t, st, "series_pid", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("series_pid isMissing = %d, want 3", n)
+	}
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("series_pid", query.OpIs, string(earthsea.EntityPID)).Build(), "")
+	if err != nil {
+		t.Fatalf("query by series: %v", err)
+	}
+	for _, it := range items {
+		if it.SeriesPID != earthsea.EntityPID {
+			t.Errorf("%s SeriesPID = %q, want the bucket's %q", it.Title, it.SeriesPID, earthsea.EntityPID)
+		}
+	}
+	all, err := st.QueryItems(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "Lathe").Build(), "")
+	if err != nil || len(all) != 1 || all[0].SeriesPID != "" {
+		t.Errorf("a book in no series = %+v (err %v), want an empty SeriesPID", all, err)
+	}
+}
+
+// TestSeriesTextFields: series compares the series name a book's row shows and series_seq
+// the sequence as stored, both empty outside a series, while series_seq_sort orders by the
+// sequence's key, so 10 follows 2.
+func TestSeriesTextFields(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct", title: "Song", artist: "X", album: "Al"})
+	for i, seq := range []string{"10", "2", "1.5"} {
+		n := string(rune('a' + i))
+		putBook(t, st, lib.ID, bookSpec{path: "/lib/" + n + ".m4b", essence: "eb" + n, content: "cb" + n,
+			title: "Book " + seq, author: "Author", series: "Saga", seq: seq})
+	}
+	if n := countWhere(t, st, "series", query.OpIs, "Saga"); n != 3 {
+		t.Errorf("series is Saga = %d, want 3", n)
+	}
+	if n := countWhere(t, st, "series", query.OpIsMissing, nil); n != 1 {
+		t.Errorf("series isMissing = %d, want 1 (the track)", n)
+	}
+	if n := countWhere(t, st, "series", query.OpIsNot, "Saga"); n != 1 {
+		t.Errorf("series isNot Saga = %d, want 1 (the track, whose series reads '')", n)
+	}
+	if n := countWhere(t, st, "series_seq", query.OpIs, "1.5"); n != 1 {
+		t.Errorf("series_seq is 1.5 = %d, want 1", n)
+	}
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("series", query.OpIs, "Saga").OrderBy("series_seq_sort", false).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got := strings.Join(titlesOf(items), ","); got != "Book 1.5,Book 2,Book 10" {
+		t.Errorf("by series_seq_sort = %s, want Book 1.5,Book 2,Book 10", got)
 	}
 }

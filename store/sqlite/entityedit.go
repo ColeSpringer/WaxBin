@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -34,16 +35,6 @@ func entityTableFor(et model.MergeEntity) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// entityDisplayColumn is the display-name column an entity's sort key derives from:
-// the artist name, else the release-group/album title. It is what a cleared sort
-// override regenerates the sort key from.
-func entityDisplayColumn(et model.MergeEntity) string {
-	if et == model.MergeArtist {
-		return "name"
-	}
-	return "title"
 }
 
 // entityColumnForField maps an entity edit field to the column it writes. "sort" is
@@ -711,22 +702,27 @@ func entityOwedKeysTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEnt
 
 // applyEntityFieldTx writes one entity field to its column. A sort-name override drives
 // the generated, BINARY-sortable sort_key: a non-empty value seeds it, and an empty
-// value (a clear) regenerates it from the entity's display name. Every other field
+// value (a clear) falls back to the entity's derived spelling, else its display name, so
+// a cleared override leaves the key matching what db verify recomputes. Every other field
 // writes its own column, with an empty value stored as NULL.
 func applyEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, table string, entityID int64, field, value string) error {
 	if field == "sort" {
-		sortKey := model.SortKey(value)
-		if value == "" {
-			// Regenerate the sort key from the entity's display name so a cleared override
-			// leaves the sort key matching what db verify recomputes.
-			var name string
-			if err := tx.QueryRowContext(ctx,
-				"SELECT "+entityDisplayColumn(entityType)+" FROM "+table+" WHERE id = ?", entityID).Scan(&name); err != nil {
-				return err
-			}
-			sortKey = model.SortKey(name)
+		if value != "" {
+			_, err := tx.ExecContext(ctx, "UPDATE "+table+" SET sort_key = ? WHERE id = ?", model.SortKey(value), entityID)
+			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE "+table+" SET sort_key = ? WHERE id = ?", sortKey, entityID)
+		sp, ok := spellingFor(entityType)
+		if !ok {
+			return nil
+		}
+		// The curation row still holds the override here, so the fallback is read past it.
+		var name, spelling string
+		if err := tx.QueryRowContext(ctx, "SELECT e."+sp.nameCol+", "+sp.derived()+" FROM "+sp.table+" e WHERE e.id = ?",
+			entityID).Scan(&name, &spelling); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE "+table+" SET "+sp.col+" = ?, sort_key = ? WHERE id = ?",
+			spelling, model.SortKey(cmp.Or(spelling, name)), entityID)
 		return err
 	}
 	col := entityColumnForField(field)
@@ -734,24 +730,17 @@ func applyEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeE
 	return err
 }
 
-// refreshEntitySortKeyTx rewrites an entity's sort_key from its current curation and
-// display name, the same source sortKeyDrift checks. Any path that moves a sort
-// override without going through applyEntityFieldTx has to call it. A non-curatable
-// type has no override to inherit and is a no-op.
-func refreshEntitySortKeyTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, table string, entityID int64) error {
-	if _, ok := entityTableFor(entityType); !ok {
+// refreshEntitySortKeyTx rewrites an entity's derived spelling and its sort_key from its
+// current curation, members and display name, the same source sortKeyDrift checks. Any
+// path that moves a sort override, a name or members without going through
+// applyEntityFieldTx or the rollup upkeep has to call it, and emits the entity's delta
+// itself. A non-curatable type has no override to inherit and is a no-op.
+func refreshEntitySortKeyTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, entityID int64) error {
+	sp, ok := spellingFor(entityType)
+	if !ok {
 		return nil
 	}
-	var text string
-	if err := tx.QueryRowContext(ctx,
-		"SELECT COALESCE(NULLIF(TRIM(ec.value), ''), t."+entityDisplayColumn(entityType)+")"+
-			" FROM "+table+" t LEFT JOIN entity_curation ec"+
-			" ON ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort'"+
-			" WHERE t.id = ?", string(entityType), entityID).Scan(&text); err != nil {
-		return err
-	}
-	_, err := tx.ExecContext(ctx,
-		"UPDATE "+table+" SET sort_key = ? WHERE id = ?", model.SortKey(text), entityID)
+	_, _, err := refreshSpellingsTx(ctx, tx, sp, []int64{entityID})
 	return err
 }
 

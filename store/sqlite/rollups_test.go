@@ -364,7 +364,7 @@ func TestDeferredNestedPutsMarkInsteadOfRecompute(t *testing.T) {
 	for i, w := range [][2]int64{{0, 1500}, {1500, 0}} {
 		rip.Tracks = append(rip.Tracks, model.VirtualTrack{
 			Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: fmt.Sprint(i),
-				SortKey: model.SortKey(fmt.Sprint(i)), IdentityKey: identity.VirtualTrackKey("re", i+1, w[0])},
+				IdentityKey: identity.VirtualTrackKey("re", i+1, w[0])},
 			Track:       model.Track{Artist: "Rip", AlbumArtist: "Rip", Album: "Rip Album", Genre: "Jazz", Genres: []string{"Jazz"}, TrackNo: i + 1},
 			StartFrames: w[0], EndFrames: w[1]})
 	}

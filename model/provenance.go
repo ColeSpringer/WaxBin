@@ -189,9 +189,11 @@ func ParseLockChange(s string) (LockChange, bool) {
 var MetadataFields = map[string]bool{
 	// Shared and track fields.
 	"title":         true,
+	"title_sort":    true,
 	"artist":        true,
 	"album_artist":  true,
 	"album":         true,
+	"album_sort":    true,
 	"composer":      true,
 	"composer_sort": true,
 	"genre":         true,

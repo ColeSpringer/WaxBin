@@ -11,10 +11,12 @@ import (
 
 // This file is the sort-key repair path. A change to model.SortKey leaves every
 // catalog drifted, and no normal write path can heal it: resolveArtist and
-// resolveReleaseGroup return as soon as match_key finds a row, and sort_key is
-// only written by their INSERT, so a rescan leaves an existing entity's key as it
-// was. verify.go's drift check walks the same source list, so the check and the
-// repair cannot disagree about what a key should be.
+// resolveReleaseGroup return as soon as match_key finds a row, and the rollup upkeep
+// rewrites an entity's key only when its derived spelling moves, so a rescan leaves an
+// existing entity's key as it was. verify.go's drift check walks the same source list,
+// so the check and the repair cannot disagree about what a key should be. An item's key
+// folds its title spelling, else its title; a curatable entity's folds its curated sort,
+// else its derived spelling (entityspelling.go), else its name.
 
 // sortKeyBatch is how many rewritten rows one transaction carries. Wrapping the
 // catalog in one transaction would hold the write lock for the whole run and hand
@@ -32,8 +34,11 @@ type sortKeySource struct {
 	// textSQL, when set, is the expression over the row the key derives from in place
 	// of textCol: a sort spelling, else the name it sorts in place of.
 	textSQL string
-	idCol   string // primary key, the UPDATE target
-	pidExpr string // SQL for the pid a rewritten row's delta names
+	// spellCol is the derived sort spelling a curatable entity falls back to before its
+	// name (entityspelling.go).
+	spellCol string
+	idCol    string // primary key, the UPDATE target
+	pidExpr  string // SQL for the pid a rewritten row's delta names
 	// pidJoin reaches pidExpr for a table with no pid of its own. Both joins below
 	// are on non-null foreign keys, so the row set is unchanged and the drift check
 	// can share the query.
@@ -46,18 +51,18 @@ type sortKeySource struct {
 }
 
 var sortKeySources = []sortKeySource{
-	{table: "playable_item", keyCol: "sort_key", textCol: "title", idCol: "id",
+	{table: "playable_item", keyCol: "sort_key", textSQL: "COALESCE(NULLIF(t.title_sort, ''), t.title)", idCol: "id",
 		pidExpr: "t.pid", deltaType: "item"},
-	{table: "artist", keyCol: "sort_key", textCol: "name", idCol: "id",
+	{table: "artist", keyCol: "sort_key", textCol: "name", spellCol: "name_sort", idCol: "id",
 		pidExpr: "t.pid", entityType: string(model.MergeArtist), deltaType: "artist"},
 	// An alias has no pid of its own, so a rewritten one emits its artist's delta.
 	{table: "artist_alias", keyCol: "sort_key", textCol: "name", idCol: "id",
 		pidExpr: "a.pid", pidJoin: " JOIN artist a ON a.id = t.artist_id", deltaType: "artist"},
 	{table: "genre", keyCol: "sort_key", textCol: "name", idCol: "id",
 		pidExpr: "t.pid", deltaType: "genre"},
-	{table: "release_group", keyCol: "sort_key", textCol: "title", idCol: "id",
+	{table: "release_group", keyCol: "sort_key", textCol: "title", spellCol: "title_sort", idCol: "id",
 		pidExpr: "t.pid", entityType: string(model.MergeReleaseGroup), deltaType: "release_group"},
-	{table: "album", keyCol: "sort_key", textCol: "title", idCol: "id",
+	{table: "album", keyCol: "sort_key", textCol: "title", spellCol: "title_sort", idCol: "id",
 		pidExpr: "t.pid", entityType: string(model.MergeAlbum), deltaType: "album"},
 	{table: "series", keyCol: "sort_key", textCol: "name", idCol: "id",
 		pidExpr: "t.pid", deltaType: "series"},
@@ -73,12 +78,26 @@ var sortKeySources = []sortKeySource{
 		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
 	{table: "book", keyCol: "author_sort_key", textSQL: "COALESCE(NULLIF(t.author_sort, ''), t.author)",
 		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
+	// The names alone folded, which a lookup by name compares while sort_key orders.
+	{table: "playable_item", keyCol: "title_key", textCol: "title", idCol: "id", pidExpr: "t.pid", deltaType: "item"},
+	{table: "artist", keyCol: "name_key", textCol: "name", idCol: "id", pidExpr: "t.pid", deltaType: "artist"},
+	{table: "album", keyCol: "title_key", textCol: "title", idCol: "id", pidExpr: "t.pid", deltaType: "album"},
 }
 
-// artistSortKey, composerSortKey and authorSortKey are the keys a stated sort spelling
-// orders by: the spelling folded, or with none the name it sorts in place of. Every
-// writer of a spelling or of that name stores the key beside it, and sortKeySources
+// itemTitle is an item's title and its stated sort spelling as the row holds them.
+type itemTitle struct{ title, sort string }
+
+// titleOf is the title and spelling a put writes for item.
+func titleOf(item model.PlayableItem) itemTitle { return itemTitle{item.Title, item.TitleSort} }
+
+// itemSortKey, artistSortKey, composerSortKey and authorSortKey are the keys a stated sort
+// spelling orders by: the spelling folded, or with none the name it sorts in place of.
+// Every writer of a spelling or of that name stores the key beside it, and sortKeySources
 // states the same rule in SQL for the check and the repair.
+func itemSortKey(title, titleSort string) string {
+	return model.SortKey(cmp.Or(titleSort, title))
+}
+
 func artistSortKey(tr model.Track) string {
 	return model.SortKey(cmp.Or(tr.ArtistSort, tr.Artist, tr.AlbumArtist))
 }
@@ -124,7 +143,8 @@ func refreshSortSpellingKeysTx(ctx context.Context, tx *sql.Tx, itemID int64, ki
 // stores model.SortKey(override) in the column and the raw override in
 // entity_curation.value; recomputing from the display name would leave a curated
 // entity as the one thing that never folds. Clearing an override stores an empty
-// value rather than deleting the row, hence the NULLIF.
+// value rather than deleting the row, hence the NULLIF. Without one the entity's
+// derived spelling comes before its name.
 func (src sortKeySource) textExpr() string {
 	if src.textSQL != "" {
 		return src.textSQL
@@ -132,7 +152,7 @@ func (src sortKeySource) textExpr() string {
 	if src.entityType == "" {
 		return "t." + src.textCol
 	}
-	return "COALESCE(NULLIF(TRIM(ec.value), ''), t." + src.textCol + ")"
+	return "COALESCE(NULLIF(TRIM(ec.value), ''), NULLIF(t." + src.spellCol + ", ''), t." + src.textCol + ")"
 }
 
 // query builds the streaming read for one source. lead is any extra leading

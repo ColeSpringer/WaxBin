@@ -42,8 +42,9 @@ func EntityKinds() []EntityKind {
 // (track-based for the first two, so a book credits its author's LibraryPIDs
 // membership but not the artist's ItemCount; item-based for genre), and from
 // live indexed aggregates for album and series, which have no rollup rows. While a scan
-// runs, the rollup counts and an album's Year trail its writes until its next settle,
-// every few thousand files and at its end.
+// runs, the rollup counts, an album's Year and the sort spellings the albums, release
+// groups and artists derive from their members (so their SortKey) trail its writes until
+// its next settle, every few thousand files and at its end.
 type EntityInfo struct {
 	Kind    EntityKind
 	PID     model.PID
@@ -76,9 +77,10 @@ type EntityInfo struct {
 	ArtistPID       model.PID
 	ReleaseGroupPID model.PID
 
-	// ItemCount and TotalDurationMS summarize the entity's member items (see the
-	// type comment for which source answers each kind). ReleaseGroupCount is
-	// filled for an artist only.
+	// ItemCount and TotalDurationMS summarize the entity's live member items (see the
+	// type comment for which source answers each kind): a trashed member is in neither,
+	// while a missing one, whose file row stays, is in both. ReleaseGroupCount is filled
+	// for an artist only.
 	ItemCount         int
 	ReleaseGroupCount int
 	TotalDurationMS   int64

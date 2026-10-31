@@ -756,6 +756,14 @@ func (l *Library) Count(ctx context.Context, q query.Query, userPID model.PID) (
 	return l.store.CountItems(ctx, q, userPID)
 }
 
+// RuleReadsUserState reports whether q reads per-user state in its filter or its sort, so
+// that Query, Count and a smart playlist holding q answer differently from user to user;
+// a host caching their results keys them by user only then. A rule that does not compile
+// is refused with the compiler's error.
+func (l *Library) RuleReadsUserState(q query.Query) (bool, error) {
+	return l.store.QueryNeedsUser(q)
+}
+
 // Facet groups the items matching q by a dimension and counts each bucket. userPID
 // scopes any per-user filter in q, and on a dimension read.GroupBy.UserScoped reports
 // (GroupPlaylist alone) it also selects which buckets exist.
@@ -796,8 +804,8 @@ func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.
 // Search runs a grouped, BM25-ranked search across artists, albums, tracks, books,
 // and episodes (transcript-body hits rank below metadata hits). Field weighting puts
 // title hits above artist and album hits. opt.MaxCandidates bounds how many matches
-// are ranked, opt.Libraries and opt.States scope the search; see read.SearchOptions
-// for those contracts.
+// are ranked, and opt.Libraries, opt.States and opt.Podcasts scope the search; see
+// read.SearchOptions for those contracts.
 func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
 	return l.store.Search(ctx, q, opt)
 }
@@ -991,8 +999,8 @@ func (l *Library) EntityPage(ctx context.Context, kind read.EntityKind, cursor r
 }
 
 // Stats returns a library summary using the same Facet grouping as browse plus
-// per-user playback state. An empty userPID selects the default user; topN caps
-// the ranked lists.
+// per-user playback state, leaving trashed items out of every figure. An empty userPID
+// selects the default user; topN caps the ranked lists.
 func (l *Library) Stats(ctx context.Context, userPID model.PID, topN int) (*read.Stats, error) {
 	return l.store.Stats(ctx, userPID, topN)
 }
@@ -1794,7 +1802,8 @@ func (l *Library) PruneChangeLog(ctx context.Context, keep int) (int, error) {
 
 // YearInReview returns a per-user listening recap for one calendar year (UTC):
 // session/minute/track totals, catalog additions that year, and the top
-// artists/genres/tracks by play count. An empty userPID uses the default user.
+// artists/genres/tracks by play count, leaving trashed items out of every figure as
+// Stats does. An empty userPID uses the default user.
 func (l *Library) YearInReview(ctx context.Context, userPID model.PID, year, topN int) (*read.YearReview, error) {
 	return l.store.YearInReview(ctx, userPID, year, topN)
 }
@@ -2372,11 +2381,12 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	}
 	// A sort tag stays beside a name the edit left as it was: one the catalog still spells
 	// after the edit (a name set to what it was, or a spelling locked or edited with it),
-	// and one the caller kept, such as a title, which has no spelling of its own.
+	// and one the caller kept, a title set to what it was.
 	for _, f := range kept {
 		delete(sortFields, f)
 	}
-	for f, spelled := range map[string]string{"artist": item.ArtistSort, "composer": item.ComposerSort, "author": item.AuthorSort} {
+	for f, spelled := range map[string]string{"artist": item.ArtistSort, "composer": item.ComposerSort,
+		"author": item.AuthorSort, "title": item.TitleSort, "album": item.AlbumSort, "album_artist": item.AlbumArtistSort} {
 		if spelled != "" {
 			delete(sortFields, f)
 		}
@@ -2425,8 +2435,6 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 			}
 			tagEdits = bookTagEditsForFields(edits, seriesSeq)
 			settles = slices.Collect(maps.Keys(edits))
-			// A book's title is written as its ALBUM tag, so a part's TITLESORT is its own.
-			delete(sortFields, "title")
 		}
 		for _, r := range roles {
 			field, ok := bookRoleField(r.role)
@@ -2478,19 +2486,12 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	for _, reason := range refusals {
 		noteRefusalFailures(files, wbErr, reason)
 	}
-	planned := len(tagEdits)
-	tagEdits, customCleared, err := l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
+	tagEdits, cleared, err := l.appendDerivedSortClears(ctx, itemPID, item.Kind, sortFields, tagEdits)
 	if err != nil {
 		return writeBackSetupFailure(itemPID, all, err)
 	}
-	// A file the write clears a custom sort tag from no longer lags a catalog that holds
-	// none. One the catalog holds is settled when the catalog drops it below, which waits
-	// for every file to land.
-	for _, te := range tagEdits[planned:] {
-		if !model.IsReservedTagKey(te.Key) && !slices.Contains(customCleared, te.Key) {
-			settles = append(settles, model.TagLockField(te.Key))
-		}
-	}
+	// A file the write clears a stale spelling from no longer lags a catalog that holds none.
+	settles = append(settles, cleared...)
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
@@ -2500,36 +2501,7 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 		}); err != nil {
 		return err
 	}
-	// A sort tag the catalog keeps as a custom tag is gone from the file, so it goes from
-	// the catalog too, rather than waiting for a forced rescan to notice. The catalog
-	// follows the files whose tags own the item, its primary and parts: once the clear
-	// landed on all of them the tag goes, and an alternate that refused it owes the clear;
-	// while one of them holds it, the catalog keeps it and each file the clear reached owes
-	// it back.
-	if len(customCleared) > 0 {
-		failed := func(ref model.ItemFileRef) bool { return !wbErr.landed[ref.FilePID] }
-		ownersLanded := !slices.ContainsFunc(files, func(ref model.ItemFileRef) bool { return ref.Role != "alternate" && failed(ref) })
-		var owing []model.PID
-		for _, ref := range files {
-			if failed(ref) == ownersLanded {
-				owing = append(owing, ref.FilePID)
-			}
-		}
-		if ownersLanded {
-			for _, key := range customCleared {
-				if err := l.store.ForgetItemTag(ctx, itemPID, key); err != nil {
-					l.log.Warn("cleared sort tag", "item", itemPID, "key", key, "err", err)
-				}
-			}
-		}
-		keys := make([]string, len(customCleared))
-		for i, key := range customCleared {
-			keys[i] = model.TagLockField(key)
-		}
-		if err := l.store.NoteTagWriteOwed(ctx, owing, keys); err != nil {
-			l.log.Warn("noting cleared sort tags owed", "item", itemPID, "err", err)
-		}
-	}
+
 	// A book's title and author are its identity anchor, unlike a track's essence, so
 	// writing them to disk would make the next scan --force re-key the book to a new pid
 	// and drop its locks. An author credit writes the same ALBUMARTIST. Re-anchor to the
@@ -2547,57 +2519,37 @@ func hasAuthorCredit(roles []creditRoleEdit) bool {
 	return slices.ContainsFunc(roles, func(r creditRoleEdit) bool { return r.role == model.RoleAuthor })
 }
 
-// appendDerivedSortClears adds the tag clears that keep a file's derived sort names in
-// step with a display-name edit. Editing composer, artist, or a book's author
-// regenerates the stored sort key, but a stale COMPOSERSORT, ARTISTSORT, or
-// ALBUMARTISTSORT left in the file would feed the next scan's derivation and revert it.
-// Clearing the tag makes a scan derive the same key from the display name. A sort the
-// caller edited explicitly wins, and a locked sort keeps its tag. TITLESORT has no sort
-// field of its own and is kept as a custom tag, so that tag's lock keeps it; such a key the
-// catalog holds is also returned, for the catalog to drop once the clear lands.
-func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID, edits map[string]string, tagEdits []meta.TagEdit) ([]meta.TagEdit, []string, error) {
-	var custom []string
-	var held map[string]bool // the item's custom tag keys, read once when a clear needs them
-	for _, p := range meta.DerivedSortPairs() {
+// appendDerivedSortClears adds the tag clears that keep a file's sort spellings in step
+// with a display-name edit. Editing a title, an artist, an album, an album artist, a
+// composer or a book's author drops the spelling beside it in the catalog, but a stale
+// TITLESORT, ARTISTSORT, ALBUMSORT, ALBUMARTISTSORT or COMPOSERSORT left in the file
+// would feed it back on the next scan. A sort the caller edited explicitly wins, and a
+// locked sort keeps its tag. It returns the sort fields whose cleared tag pays an owed
+// row where it lands.
+func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID, kind model.Kind, edits map[string]string, tagEdits []meta.TagEdit) ([]meta.TagEdit, []string, error) {
+	var settles []string
+	for _, p := range meta.DerivedSortPairs(kind) {
 		if _, edited := edits[p.Field]; !edited {
 			continue
 		}
-		lockField := p.SortField
-		if lockField != "" {
+		if p.SortField != "" {
 			if _, explicit := edits[p.SortField]; explicit {
 				continue
 			}
-		} else if !model.IsReservedTagKey(p.TagKey) {
-			lockField = model.TagLockField(p.TagKey)
-		}
-		if lockField != "" {
-			locked, err := l.store.IsFieldLocked(ctx, itemPID, lockField)
+			locked, err := l.store.IsFieldLocked(ctx, itemPID, p.SortField)
 			if err != nil {
 				return nil, nil, err
 			}
 			if locked {
 				continue
 			}
+			if !slices.Contains(settles, p.SortField) {
+				settles = append(settles, p.SortField)
+			}
 		}
 		tagEdits = append(tagEdits, meta.TagEdit{Key: p.TagKey})
-		if model.IsReservedTagKey(p.TagKey) {
-			continue
-		}
-		if held == nil {
-			tags, err := l.store.ItemTags(ctx, itemPID)
-			if err != nil {
-				return nil, nil, err
-			}
-			held = make(map[string]bool, len(tags))
-			for _, t := range tags {
-				held[t.Key] = true
-			}
-		}
-		if held[p.TagKey] {
-			custom = append(custom, p.TagKey)
-		}
 	}
-	return tagEdits, custom, nil
+	return tagEdits, settles, nil
 }
 
 // bookIdentityEdited reports whether an edit touched a field identity.BookKey reads, so

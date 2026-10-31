@@ -24,7 +24,7 @@ func rescanTrack(t *testing.T, st *Store, libID int64, s trackSpec, preserveLock
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: s.title,
-			SortKey: model.SortKey(s.title), IdentityKey: "essence:" + s.essence,
+			IdentityKey: "essence:" + s.essence,
 		},
 		Track: model.Track{
 			Artist: s.artist, ArtistSort: model.SortKey(s.artist), Album: s.album,
@@ -263,7 +263,7 @@ func rescanBookForce(t *testing.T, st *Store, libID int64, essence, content stri
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: "The Book",
-			SortKey: model.SortKey("The Book"), IdentityKey: identity.BookKey("", "", "Jane Author", "The Book", ""),
+			IdentityKey: identity.BookKey("", "", "Jane Author", "The Book", ""),
 		},
 		Book: model.Book{
 			Author: "Jane Author", Authors: []string{"Jane Author"},

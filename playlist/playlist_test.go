@@ -25,6 +25,7 @@ type fakeStore struct {
 	failSet   error
 	shared    map[string][]*model.ItemView // paths behind several items, a cue rip's file
 	lookups   int
+	playlists map[model.PID]*model.Playlist
 }
 
 // removal records one by-index removal the service handed the store.
@@ -39,6 +40,7 @@ func newFakeStore() *fakeStore {
 		byPath: map[string]*model.ItemView{}, members: map[model.PID][]model.PID{},
 		createdAs: map[model.PID]model.PlaylistKind{}, rules: map[model.PID]query.Query{},
 		owners: map[model.PID]model.PID{}, shared: map[string][]*model.ItemView{},
+		playlists: map[model.PID]*model.Playlist{},
 	}
 }
 
@@ -107,10 +109,27 @@ func (f *fakeStore) ItemsByPlaylistPath(_ context.Context, path string) ([]*mode
 	return nil, nil
 }
 
-// Unused-by-these-tests methods.
-func (f *fakeStore) PlaylistByPID(context.Context, model.PID) (*model.Playlist, error) {
-	return nil, nil
+func (f *fakeStore) PlaylistByPID(_ context.Context, pid model.PID) (*model.Playlist, error) {
+	if pl, ok := f.playlists[pid]; ok {
+		return pl, nil
+	}
+	return nil, waxerr.New(waxerr.CodeNotFound, "fake.PlaylistByPID", "no such playlist: "+string(pid))
 }
+
+// QueryNeedsUser compiles against a two-field map, one field per-user, as the store
+// compiles against its own.
+func (f *fakeStore) QueryNeedsUser(q query.Query) (bool, error) {
+	c, err := query.Compile(q, query.FieldMap{
+		"title":  {Expr: "title"},
+		"rating": {Expr: "rating", Kind: query.KindInt, NeedsUser: true},
+	})
+	if err != nil {
+		return false, err
+	}
+	return c.NeedsUser, nil
+}
+
+// Unused-by-these-tests methods.
 func (f *fakeStore) ListPlaylists(context.Context, model.PID) ([]*model.Playlist, error) {
 	return nil, nil
 }
@@ -484,5 +503,29 @@ func TestM3U8ImportReportsUnmatched(t *testing.T) {
 	}
 	if len(res.UnmatchedPaths) != 1 || res.UnmatchedPaths[0] != "/music/missing.flac" {
 		t.Errorf("unmatched paths = %v, want [/music/missing.flac]", res.UnmatchedPaths)
+	}
+}
+
+// TestServiceReadsUserState: a smart playlist reads per-user state when its rule does, a
+// static one never does, since its members are the same for every reader, and an unknown
+// playlist is the store's error.
+func TestServiceReadsUserState(t *testing.T) {
+	t.Parallel()
+	fs := newFakeStore()
+	rated := query.New(query.EntityItems).Where("rating", query.OpGte, 80).Build()
+	titled := query.New(query.EntityItems).Where("title", query.OpContains, "a").Build()
+	fs.playlists["rated"] = &model.Playlist{PID: "rated", Kind: model.PlaylistSmart, Rule: &rated}
+	fs.playlists["titled"] = &model.Playlist{PID: "titled", Kind: model.PlaylistSmart, Rule: &titled}
+	fs.playlists["static"] = &model.Playlist{PID: "static", Kind: model.PlaylistStatic}
+	svc := New(fs)
+	ctx := context.Background()
+	for pid, want := range map[model.PID]bool{"rated": true, "titled": false, "static": false} {
+		got, err := svc.ReadsUserState(ctx, pid)
+		if err != nil || got != want {
+			t.Errorf("ReadsUserState(%s) = %v, %v; want %v", pid, got, err, want)
+		}
+	}
+	if _, err := svc.ReadsUserState(ctx, "nope"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("ReadsUserState(unknown) = %v, want CodeNotFound", err)
 	}
 }

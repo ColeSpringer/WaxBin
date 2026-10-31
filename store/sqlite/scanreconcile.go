@@ -218,14 +218,14 @@ func reconcileAlbumRekeyTx(ctx context.Context, tx *sql.Tx, priorAlbumID, newAlb
 		rgID = dest.rgID
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE album SET match_key=?, title=?, release_group_id=? WHERE id=?",
-		dest.key, dest.title, rgID, prior.id); err != nil {
+		"UPDATE album SET match_key=?, title=?, title_key=?, release_group_id=? WHERE id=?",
+		dest.key, dest.title, model.SortKey(dest.title), rgID, prior.id); err != nil {
 		return err
 	}
 	if err := dropFoldTx(ctx, tx, model.MergeAlbum, dest.key); err != nil {
 		return err
 	}
-	if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, "album", prior.id); err != nil {
+	if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, prior.id); err != nil {
 		return err
 	}
 	// No delta here: mergeEntityTx already wrote the survivor's OpUpdate, and a consumer
@@ -360,7 +360,7 @@ func foldDrainedReleaseGroupTx(ctx context.Context, tx *sql.Tx, prior, dest *rek
 	if err := dropFoldTx(ctx, tx, model.MergeReleaseGroup, destGroup.key); err != nil {
 		return err
 	}
-	return refreshEntitySortKeyTx(ctx, tx, model.MergeReleaseGroup, "release_group", priorGroup.id)
+	return refreshEntitySortKeyTx(ctx, tx, model.MergeReleaseGroup, priorGroup.id)
 }
 
 // freshReleaseGroupTx reports whether a release group reads as fresh: nothing attached

@@ -51,7 +51,7 @@ func holdTrackWith(t *testing.T, st *sqlite.Store, lib *model.Library, rel, esse
 			Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
 			ContentHash: "c-" + rel, EssenceHash: essence, ScanState: model.ScanIndexed},
 		Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence},
+			IdentityKey: "essence:" + essence},
 		Track: tr,
 	})
 	if err != nil {
@@ -77,7 +77,7 @@ func holdBookPart(t *testing.T, st *sqlite.Store, lib *model.Library, rel, essen
 			Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
 			ContentHash: "c-" + rel, EssenceHash: essence, ScanState: model.ScanIndexed},
 		Item: model.PlayableItem{Kind: model.KindBook, State: model.StatePresent, Title: "Dune",
-			SortKey: model.SortKey("Dune"), IdentityKey: "book:dune"},
+			IdentityKey: "book:dune"},
 		Book:     model.Book{Author: "Frank Herbert", Authors: []string{"Frank Herbert"}},
 		Position: position,
 	})
@@ -568,7 +568,7 @@ func holdBookOf(t *testing.T, st *sqlite.Store, lib *model.Library, key, rel, es
 			Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
 			ContentHash: "c-" + rel, EssenceHash: essence, ScanState: model.ScanIndexed},
 		Item: model.PlayableItem{Kind: model.KindBook, State: model.StatePresent, Title: "Dune",
-			SortKey: model.SortKey("Dune"), IdentityKey: key},
+			IdentityKey: key},
 		Book:     model.Book{Author: "Frank Herbert", Authors: []string{"Frank Herbert"}},
 		Position: position,
 	})

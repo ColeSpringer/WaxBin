@@ -434,7 +434,7 @@ func dropCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64) error 
 // A missing item the file belongs to is present again, its primary being on disk. The
 // item emits one update when the edge is new or it came back.
 func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, fileID int64, filePID model.PID,
-	itemID int64, primary *standingPrimary, fileTitle string, fileTrack model.Track, res *model.ScanItemResult, now int64, cover examinedArt) error {
+	itemID int64, primary *standingPrimary, fileTitle itemTitle, fileTrack model.Track, res *model.ScanItemResult, now int64, cover examinedArt) error {
 	const op = "store.PutScannedTrack"
 	var itemPID model.PID
 	if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", itemID).Scan(&itemPID); err != nil {
@@ -911,10 +911,10 @@ func (s *Store) FileOwner(ctx context.Context, filePID model.PID) (model.PID, mo
 	var item model.PID
 	ref := model.ItemFileRef{FilePID: filePID}
 	err := s.rdb().QueryRowContext(ctx, `SELECT f.path, f.display_path, COALESCE(pi.pid, ''), COALESCE(itf.role, ''),
-			COALESCE(itf.position, 0)
+			COALESCE(itf.position, 0), `+fileFactCols+`
 		FROM file f LEFT JOIN item_file itf ON itf.file_id = f.id LEFT JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE f.pid = ? ORDER BY itf.role = 'primary' DESC, itf.item_id LIMIT 1`, string(filePID)).
-		Scan(&ref.Path, &ref.DisplayPath, &item, &ref.Role, &ref.Position)
+		Scan(append([]any{&ref.Path, &ref.DisplayPath, &item, &ref.Role, &ref.Position}, fileFactDests(&ref)...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ref, waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(filePID))
 	}

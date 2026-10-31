@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,7 +16,7 @@ import (
 
 // trackEditFields are the fields editable on a track item.
 var trackEditFields = map[string]bool{
-	"title": true, "artist": true, "album_artist": true, "album": true,
+	"title": true, "title_sort": true, "artist": true, "album_artist": true, "album": true, "album_sort": true,
 	"composer": true, "composer_sort": true, "comment": true, "genre": true, "year": true,
 	"track_no": true, "track_total": true, "disc_no": true, "disc_total": true, "bpm": true,
 	"isrc": true, "mbid": true, "compilation": true,
@@ -23,7 +24,7 @@ var trackEditFields = map[string]bool{
 
 // bookEditFields are the fields editable on a book item.
 var bookEditFields = map[string]bool{
-	"title": true, "author": true, "author_sort": true, "narrator": true, "series": true,
+	"title": true, "title_sort": true, "author": true, "author_sort": true, "narrator": true, "series": true,
 	"subtitle": true, "genre": true, "year": true,
 	"asin": true, "isbn": true, "publisher": true, "edition": true,
 	"description": true, "mbid": true,
@@ -383,8 +384,8 @@ func editFieldValuesTx(ctx context.Context, tx *sql.Tx, itemID int64, kind strin
 		if err != nil {
 			return nil, err
 		}
-		var title string
-		if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
+		title, err := readItemTitleTx(ctx, tx, itemID)
+		if err != nil {
 			return nil, err
 		}
 		for _, f := range fields {
@@ -399,8 +400,10 @@ func editFieldValuesTx(ctx context.Context, tx *sql.Tx, itemID int64, kind strin
 			return nil, err
 		}
 		for _, f := range fields {
-			out[f] = title
-			if f != "title" {
+			switch f {
+			case "title", "title_sort":
+				out[f] = scanFieldValue(f, title, model.Track{})
+			default:
 				out[f] = bookFieldValue(f, b, true)
 			}
 		}
@@ -535,13 +538,14 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 	if err != nil {
 		return nil, err
 	}
-	origComposerSort := tr.ComposerSort
+	origComposerSort, origAlbumSort := tr.ComposerSort, tr.AlbumSort
 
-	var touchTitle, touchTrack, touchEntities, editedComposer, editedComposerSort, editedYear bool
+	var touchTitle, touchTrack, touchEntities, relink, editedComposer, editedComposerSort, editedYear bool
+	var editedAlbum, editedAlbumSort bool
 	newTitle := title
 	for _, f := range fields {
-		if f == "title" {
-			newTitle = edits[f]
+		if f == "title" || f == "title_sort" {
+			newTitle = applyTitleEdit(newTitle, f, edits[f])
 			touchTitle = true
 			continue
 		}
@@ -551,24 +555,40 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		touchTrack = true
 		editedComposer = editedComposer || f == "composer"
 		editedComposerSort = editedComposerSort || f == "composer_sort"
+		editedAlbum = editedAlbum || f == "album"
+		editedAlbumSort = editedAlbumSort || f == "album_sort"
 		editedYear = editedYear || f == "year"
 		if editEntityFields[f] {
 			touchEntities = true
+			// A genre moves the item between genres alone: no artist, album or release
+			// group counts it, and none takes a spelling from it.
+			relink = relink || f != "genre"
 		}
 	}
 
-	// A composer edit drops the composer_sort spelling, but a locked spelling the edit
-	// did not name is curated state it must not clobber. The lock validation above
-	// checks only the target fields, so probe the side-cleared one here and restore it.
-	// An explicitly edited composer_sort passed that validation (or was forced), so the
+	// A composer, album or title edit drops the spelling beside it, but a locked spelling
+	// the edit did not name is curated state it must not clobber. The lock validation
+	// above checks only the target fields, so probe the side-cleared one here and restore
+	// it. An explicitly edited spelling passed that validation (or was forced), so the
 	// edit wins.
-	if editedComposer && !editedComposerSort {
-		locked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
+	for _, side := range []struct {
+		edited, named bool
+		field         string
+		restore       func()
+	}{
+		{editedComposer, editedComposerSort, "composer_sort", func() { tr.ComposerSort = origComposerSort }},
+		{editedAlbum, editedAlbumSort, "album_sort", func() { tr.AlbumSort = origAlbumSort }},
+		{newTitle.title != title.title, slices.Contains(fields, "title_sort"), "title_sort", func() { newTitle.sort = title.sort }},
+	} {
+		if !side.edited || side.named {
+			continue
+		}
+		locked, err := fieldLockedTx(ctx, tx, itemID, side.field)
 		if err != nil {
 			return nil, err
 		}
 		if locked {
-			tr.ComposerSort = origComposerSort
+			side.restore()
 		}
 	}
 	cleared, err := clearStaleTotalsTx(ctx, tx, itemID, &tr, edits)
@@ -579,9 +599,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 	// Title first, so the FTS rebuild below (which reads the item's title from
 	// playable_item) picks up the new value.
 	if touchTitle {
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE playable_item SET title=?, sort_key=?, updated_at=? WHERE id=?",
-			newTitle, model.SortKey(newTitle), nowNS(), itemID); err != nil {
+		if err := writeItemTitleTx(ctx, tx, itemID, newTitle); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -593,13 +611,28 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
-	if editedYear {
-		if err := affected.collectAlbumOf(ctx, tx, itemID); err != nil {
+	// The album's year follows its members' years, and the album and its release group
+	// take their spellings from what members state.
+	if editedYear || editedAlbumSort {
+		if err := affected.collectAlbumOf(ctx, tx, itemID, editedAlbumSort); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
 
 	switch {
+	case touchEntities && !relink:
+		if err := affected.collectGenres(ctx, tx, itemID); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := syncItemGenres(ctx, tx, itemID, tr.Genres, tr.Genre); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := syncSearchFTS(ctx, tx, itemID, tr); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := affected.collectGenres(ctx, tx, itemID); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 	case touchEntities:
 		// Collect the entities the item belongs to now, re-resolve its FKs and genres
 		// from the mutated track (this also rebuilds FTS), and collect the entities it
@@ -641,8 +674,8 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 	var touchTitle, touchBook, editedAuthor, editedAuthorSort bool
 	newTitle := title
 	for _, f := range fields {
-		if f == "title" {
-			newTitle = edits[f]
+		if f == "title" || f == "title_sort" {
+			newTitle = applyTitleEdit(newTitle, f, edits[f])
 			touchTitle = true
 			continue
 		}
@@ -667,11 +700,18 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 			b.AuthorSort = origAuthorSort
 		}
 	}
+	if newTitle.title != title.title && !slices.Contains(fields, "title_sort") {
+		locked, err := fieldLockedTx(ctx, tx, itemID, "title_sort")
+		if err != nil {
+			return err
+		}
+		if locked {
+			newTitle.sort = title.sort
+		}
+	}
 
 	if touchTitle {
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE playable_item SET title=?, sort_key=?, updated_at=? WHERE id=?",
-			newTitle, model.SortKey(newTitle), nowNS(), itemID); err != nil {
+		if err := writeItemTitleTx(ctx, tx, itemID, newTitle); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -760,9 +800,19 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 		tr.Artist = value
 		tr.Artists = nil
 	case "album_artist":
+		// A new album artist drops the spelling of the one it replaced, as the artist does.
+		if value != tr.AlbumArtist {
+			tr.AlbumArtistSort = ""
+		}
 		tr.AlbumArtist = value
 	case "album":
+		// So does a new album; editTrackFieldsTx restores a locked album_sort.
+		if value != tr.Album {
+			tr.AlbumSort = ""
+		}
 		tr.Album = value
+	case "album_sort":
+		tr.AlbumSort = value
 	case "composer":
 		// A new composer drops the sort spelling of the name it replaced (like the artist
 		// case above), so the key follows the new composer. When composer_sort is locked
@@ -961,18 +1011,18 @@ func isCanonicalUUID(s string) bool { return model.IsMBID(s) }
 // column, so an edit that does not touch genre re-applies the same set it read. The
 // file path anchors the folder-keyed AlbumKey, which keeps the album identity stable
 // across re-resolution. The path is nil when the item has no primary file.
-func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Track, string, []byte, error) {
+func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Track, itemTitle, []byte, error) {
 	tr, err := readTrackColumnsTx(ctx, tx, itemID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return tr, "", nil, waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no track row")
+		return tr, itemTitle{}, nil, waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no track row")
 	}
 	if err != nil {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return tr, itemTitle{}, nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 
 	genres, err := currentItemGenresTx(ctx, tx, itemID)
 	if err != nil {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return tr, itemTitle{}, nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	tr.Genres = genres
 
@@ -980,7 +1030,7 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 	// The scan-lock overlay carries this list, so it cannot be left to a re-derive.
 	artists, err := contributorNamesForRoleTx(ctx, tx, itemID, model.RoleArtist)
 	if err != nil {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return tr, itemTitle{}, nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	tr.Artists = artists
 
@@ -1008,18 +1058,47 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 	err = tx.QueryRowContext(ctx, `SELECT f.path FROM item_file itf JOIN file f ON f.id = itf.file_id
 		WHERE itf.item_id = ? AND itf.role = 'primary'`, itemID).Scan(&path)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return tr, itemTitle{}, nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 
 	if err := adoptEntityKeyMBIDs(ctx, tx, itemID, path, &tr); err != nil {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return tr, itemTitle{}, nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 
-	var title string
-	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+	title, err := readItemTitleTx(ctx, tx, itemID)
+	if err != nil {
+		return tr, itemTitle{}, nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	return tr, title, path, nil
+}
+
+// applyTitleEdit applies a title or title_sort edit. A new title drops the spelling of the
+// one it replaced, as a new artist drops artist_sort; the sorted field order applies
+// "title" first, so a combined edit keeps an explicit spelling.
+func applyTitleEdit(t itemTitle, field, value string) itemTitle {
+	if field == "title_sort" {
+		t.sort = value
+		return t
+	}
+	if value != t.title {
+		t.sort = ""
+	}
+	t.title = value
+	return t
+}
+
+// readItemTitleTx reads an item's title and its spelling.
+func readItemTitleTx(ctx context.Context, q queryer, itemID int64) (itemTitle, error) {
+	var t itemTitle
+	err := q.QueryRowContext(ctx, "SELECT title, title_sort FROM playable_item WHERE id = ?", itemID).Scan(&t.title, &t.sort)
+	return t, err
+}
+
+// writeItemTitleTx writes an item's title and spelling with the key they fold to.
+func writeItemTitleTx(ctx context.Context, tx *sql.Tx, itemID int64, t itemTitle) error {
+	_, err := tx.ExecContext(ctx, "UPDATE playable_item SET title=?, title_sort=?, sort_key=?, title_key=?, updated_at=? WHERE id=?",
+		t.title, t.sort, itemSortKey(t.title, t.sort), model.SortKey(t.title), nowNS(), itemID)
+	return err
 }
 
 // readTrackColumnsTx reads a track row's denormalized columns, the values upsertTrack
@@ -1029,11 +1108,13 @@ func readTrackColumnsTx(ctx context.Context, q queryer, itemID int64) (model.Tra
 	var trackNo, trackTotal, discNo, discTotal, year, bpm sql.NullInt64
 	var compilation int
 	var mbid sql.NullString
-	err := q.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
-		comment, track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid
+	err := q.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_sort, album_artist, album_artist_sort,
+		composer, composer_sort, comment, track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation,
+		isrc, mbid
 		FROM track WHERE item_id = ?`, itemID).Scan(
-		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer, &tr.ComposerSort,
-		&tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &bpm, &tr.Genre, &compilation, &tr.ISRC, &mbid)
+		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumSort, &tr.AlbumArtist, &tr.AlbumArtistSort,
+		&tr.Composer, &tr.ComposerSort, &tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &bpm,
+		&tr.Genre, &compilation, &tr.ISRC, &mbid)
 	if err != nil {
 		return tr, err
 	}
@@ -1116,7 +1197,7 @@ func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, path []b
 // and re-upsert with everything else preserved. Genres and contributors come from
 // their link tables rather than being re-derived, so an edit that touches neither
 // re-applies the same sets it read.
-func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Book, string, error) {
+func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Book, itemTitle, error) {
 	b := model.Book{ItemID: itemID}
 	var seriesID, year, abridged, trackTotal sql.NullInt64
 	var mbid sql.NullString
@@ -1126,10 +1207,10 @@ func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Boo
 		&b.Subtitle, &b.Author, &b.AuthorSort, &b.Narrator, &seriesID,
 		&b.SeriesSeq, &year, &b.Publisher, &b.ASIN, &b.ISBN, &b.Edition, &abridged, &b.Description, &b.Genre, &mbid, &trackTotal)
 	if errors.Is(err, sql.ErrNoRows) {
-		return b, "", waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no book row")
+		return b, itemTitle{}, waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no book row")
 	}
 	if err != nil {
-		return b, "", waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return b, itemTitle{}, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	b.Year = int(year.Int64)
 	b.MBID = mbid.String
@@ -1140,23 +1221,23 @@ func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Boo
 	}
 	if seriesID.Valid {
 		if err := tx.QueryRowContext(ctx, "SELECT name FROM series WHERE id = ?", seriesID.Int64).Scan(&b.Series); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return b, "", waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+			return b, itemTitle{}, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 		}
 	}
 
 	if err := loadBookContributorsTx(ctx, tx, itemID, &b); err != nil {
-		return b, "", waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return b, itemTitle{}, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 
 	genres, err := currentItemGenresTx(ctx, tx, itemID)
 	if err != nil {
-		return b, "", waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+		return b, itemTitle{}, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	b.Genres = genres
 
-	var title string
-	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
-		return b, "", waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+	title, err := readItemTitleTx(ctx, tx, itemID)
+	if err != nil {
+		return b, itemTitle{}, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	return b, title, nil
 }

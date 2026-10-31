@@ -30,12 +30,12 @@ func TestAlbumGainDedupsSharedRipFile(t *testing.T) {
 		},
 		Tracks: []model.VirtualTrack{
 			{
-				Item:        model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R1", SortKey: model.SortKey("R1"), IdentityKey: identity.VirtualTrackKey("eripA", 1, 0)},
+				Item:        model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R1", IdentityKey: identity.VirtualTrackKey("eripA", 1, 0)},
 				Track:       model.Track{Artist: "Band", ArtistSort: model.SortKey("Band"), AlbumArtist: "Band", Album: "Album", TrackNo: 1},
 				StartFrames: 0, EndFrames: 8,
 			},
 			{
-				Item:        model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R2", SortKey: model.SortKey("R2"), IdentityKey: identity.VirtualTrackKey("eripA", 2, 8)},
+				Item:        model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R2", IdentityKey: identity.VirtualTrackKey("eripA", 2, 8)},
 				Track:       model.Track{Artist: "Band", ArtistSort: model.SortKey("Band"), AlbumArtist: "Band", Album: "Album", TrackNo: 2},
 				StartFrames: 8, EndFrames: 15,
 			},

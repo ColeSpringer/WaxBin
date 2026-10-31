@@ -156,7 +156,7 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	}
 	// An inherited sort override has to reach the column too, or the survivor reads
 	// as sort-key drift that `db verify` reports and --fix repairs behind the merge.
-	if err := refreshEntitySortKeyTx(ctx, tx, et, table, sid); err != nil {
+	if err := refreshEntitySortKeyTx(ctx, tx, et, sid); err != nil {
 		return nil, err
 	}
 	// Re-point the per-user entity play-state rows (also polymorphic, no FK).

@@ -69,7 +69,7 @@ func putCoveredTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence,
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track:    model.Track{Artist: "Alpha", AlbumArtist: "Alpha", Album: album, TrackNo: 1},
 		CoverArt: cover,
@@ -222,7 +222,7 @@ func TestUnstampedArtIsRefused(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "X",
-			SortKey: model.SortKey("X"), IdentityKey: "essence:ess-x",
+			IdentityKey: "essence:ess-x",
 		},
 		Track:    model.Track{Artist: "Alpha", Album: "A"},
 		CoverArt: unstamped,

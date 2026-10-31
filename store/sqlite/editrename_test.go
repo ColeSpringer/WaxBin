@@ -485,7 +485,7 @@ func TestEditVirtualCueRipRenames(t *testing.T) {
 		tracks[i] = model.VirtualTrack{
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent,
-				Title: title, SortKey: model.SortKey(title),
+				Title:       title,
 				IdentityKey: identity.VirtualTrackKey("ve", n, w[0]),
 			},
 			Track:       model.Track{Artist: "Rip Artist", AlbumArtist: "Rip Artist", Album: "Rip Album", TrackNo: n},

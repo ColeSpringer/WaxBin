@@ -81,7 +81,7 @@ func TestRekindKeepsAnEncodingAlternate(t *testing.T) {
 				Kind: model.FileAudio, Size: 5, MTimeNS: 1, ContentHash: "sha256:C" + essence, EssenceHash: essence,
 				ScanState: model.ScanIndexed, Codec: codec, DurationMS: 1000},
 			Item: model.PlayableItem{Kind: model.KindBook, State: model.StatePresent, Title: "Tome",
-				SortKey: model.SortKey("Tome"), IdentityKey: "book:author\x1ftome\x1f"},
+				IdentityKey: "book:author\x1ftome\x1f"},
 			Book:     model.Book{Author: "Author"},
 			Position: 1,
 			Chapters: []model.Chapter{{Title: "Chapter"}}, ChapterSource: "synthetic",

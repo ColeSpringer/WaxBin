@@ -100,7 +100,7 @@ type File struct {
 	Container  string
 	Codec      string
 	DurationMS int64
-	Bitrate    int
+	Bitrate    int // kilobits per second
 	SampleRate int
 	Channels   int
 	BitDepth   int
@@ -118,9 +118,11 @@ type PlayableItem struct {
 	Kind  Kind
 	State ItemState
 	Title string
-	// SortKey is WaxBin-generated (Unicode-fold + "The"-strip + numeric-pad) so
-	// a BINARY sort is collation-correct and portable.
-	SortKey string
+	// TitleSort is the title's stated sort spelling (a track's TITLESORT, a book's
+	// ALBUMSORT, since a book's title is its album tag, or its TITLESORT when it has no
+	// album), "" when none. The store keys the item by it, folded through SortKey, or by
+	// the title when there is none.
+	TitleSort string
 	// IdentityKey is the entity-identity key (see package identity) used to
 	// dedup and re-link the item across re-scans. Unique per (Kind, IdentityKey).
 	IdentityKey string
@@ -138,19 +140,25 @@ type Track struct {
 	// COMPOSERSORT) or an edit states, "" when none. The store keeps the key a sorted
 	// list compares beside each: the spelling folded through SortKey, or with none the
 	// artist (else the album artist) or the composer.
-	ArtistSort   string
-	Album        string
-	AlbumArtist  string
-	Composer     string
-	ComposerSort string
-	Comment      string
-	TrackNo      int
-	TrackTotal   int
-	DiscNo       int
-	DiscTotal    int
-	Year         int
-	Genre        string   // joined display of Genres (the denormalized column)
-	Genres       []string // individual genres, resolved into item_genre links
+	ArtistSort string
+	Album      string
+	// AlbumSort and AlbumArtistSort are the album's and the album artist's stated sort
+	// spellings (ALBUMSORT, ALBUMARTISTSORT), "" when none. They order no track: the
+	// album, its release group and the album artist derive their own spellings from
+	// them.
+	AlbumSort       string
+	AlbumArtist     string
+	AlbumArtistSort string
+	Composer        string
+	ComposerSort    string
+	Comment         string
+	TrackNo         int
+	TrackTotal      int
+	DiscNo          int
+	DiscTotal       int
+	Year            int
+	Genre           string   // joined display of Genres (the denormalized column)
+	Genres          []string // individual genres, resolved into item_genre links
 	// Artists is the credit list someone stated: a repeated ARTIST frame, or a curated
 	// credit. Empty means Artist is the whole credit and the store splits it. A stated
 	// list is taken verbatim; only a split one can be overruled by a tagged artist id.
@@ -236,14 +244,14 @@ type Tags struct {
 	Media         string
 	Country       string
 
-	// Sort names from tags, used to seed collation sort keys when present.
+	// Sort spellings from tags. Each orders what it spells (see PlayableItem.TitleSort
+	// and Track.AlbumSort), and fills an empty display field when the file states the
+	// spelling alone (meta.DisplayFallbacks).
 	ArtistSort      string
 	AlbumSort       string
 	AlbumArtistSort string
 	ComposerSort    string
-	// TitleSort is read only to fill an empty title; the tag itself stays a custom tag,
-	// since nothing collates by it.
-	TitleSort string
+	TitleSort       string
 
 	// External identifiers (MBID-first identity + enrichment fast-path).
 	MBID             string // MusicBrainz recording id
@@ -380,21 +388,23 @@ type ItemView struct {
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)
 
-	// Entity handles: the effective artist, album-artist, album, release-group, and
-	// podcast entity pids, projected so a consumer can group an item view by real
+	// Entity handles: the effective artist, album-artist, album, release-group, podcast
+	// and series entity pids, projected so a consumer can group an item view by real
 	// identity instead of display text. ArtistPID and AlbumArtistPID resolve a track's
 	// artist/album-artist or, for a book, its author; AlbumPID and ReleaseGroupPID are
 	// track-only and empty for a book or episode, which are not album members;
-	// PodcastPID is the reverse, set only for an episode. Each is empty when the entity
-	// is absent, and ReleaseGroupPID is additionally empty for a track whose album has
-	// no release group, which is its own state rather than a missing album. Genre is
-	// intentionally omitted: an item can carry several, so a single genre pid would be
-	// lossy; enumerate genres through the genre facet instead.
+	// PodcastPID is the reverse, set only for an episode, and SeriesPID only for a book
+	// in a series. Each is empty when the entity is absent, and ReleaseGroupPID is
+	// additionally empty for a track whose album has no release group, which is its own
+	// state rather than a missing album. Genre is intentionally omitted: an item can
+	// carry several, so a single genre pid would be lossy; enumerate genres through the
+	// genre facet instead.
 	ArtistPID       PID
 	AlbumArtistPID  PID
 	AlbumPID        PID
 	ReleaseGroupPID PID
 	PodcastPID      PID
+	SeriesPID       PID
 
 	// LibraryPID is the registered root the item's primary file sits under. It resolves
 	// through the file rather than a subtype row, so it is empty only for a fileless
@@ -424,6 +434,16 @@ type ItemView struct {
 
 	// ArtistSort is the artist's sort spelling as stated, "" when none, for track items.
 	ArtistSort string
+	// TitleSort is the title's sort spelling as stated (PlayableItem.TitleSort says where a
+	// book's comes from), and AlbumSort and AlbumArtistSort a track's album and album-artist
+	// spellings, "" when none; the item collates by TitleSort, else its title, and its
+	// album and album artist by the spellings their members state (see Track.AlbumSort).
+	// The title_sort and album_sort query fields read the keys the item and its album
+	// collate by, not these spellings, as composer_sort does, so they hold a key wherever
+	// there is a title or an album to fold.
+	TitleSort       string
+	AlbumSort       string
+	AlbumArtistSort string
 	// Composer and its sort spelling as stated ("" when none; the composer_sort query
 	// field orders by the key folded from it), populated for track items (empty for
 	// books/episodes; a book with no NARRATOR takes its composer as the narrator when
@@ -497,6 +517,14 @@ type ItemView struct {
 	DisplayPath string
 	Container   string
 	Codec       string
+	// FileSize (bytes) and Bitrate (kilobits per second) are the primary file's, like the
+	// rest of this group: every track of a cue rip reads the shared file's, and a book its
+	// primary part's (ItemFiles lists each file's). Both are 0 for a fileless item.
+	FileSize int64
+	Bitrate  int
+
+	// CreatedAt is when the item entered the catalog, unix nanoseconds: the added field.
+	CreatedAt int64
 }
 
 // AdvisoryFlagged reports whether the item carries an explicit advisory flag from

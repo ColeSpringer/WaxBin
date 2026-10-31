@@ -121,7 +121,7 @@ func coveredCatalog(t *testing.T, ctx context.Context, db string) *sqlite.Store 
 		File: model.File{Path: []byte("/music/c.mp3"), DisplayPath: "/music/c.mp3", RelPath: []byte("c.mp3"),
 			Kind: model.FileAudio, Size: 1, MTimeNS: 1, ContentHash: "cc", EssenceHash: "ec", ScanState: model.ScanIndexed},
 		Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "C",
-			SortKey: model.SortKey("C"), IdentityKey: "essence:ec"},
+			IdentityKey: "essence:ec"},
 		Track:    model.Track{Artist: "Artist", Album: "Album", TrackNo: 1},
 		CoverArt: &model.ArtImage{Data: buf.Bytes(), Attribution: model.Attribution{Source: model.SourceTag}},
 	})

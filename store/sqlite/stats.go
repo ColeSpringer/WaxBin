@@ -22,28 +22,30 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 	}
 	out := &read.Stats{}
 
-	// Entity counts and total duration. Count only entities that still back a
-	// track, keeping these totals consistent with Facet-derived top lists. Retags
-	// can leave orphaned entity rows behind until a later cleanup pass.
+	// Entity counts and total duration. Count only entities that still back a live
+	// track (a trashed one is archived and kept for a restore, see liveMembers), keeping
+	// these totals consistent with the Facet-derived top lists below, which leave the
+	// trash out too. Retags can leave orphaned entity rows behind until a later cleanup
+	// pass.
 	counts := []struct {
 		dst *int
 		q   string
 	}{
-		{&out.Items, "SELECT COUNT(*) FROM playable_item WHERE kind = 'track'"},
-		{&out.Books, "SELECT COUNT(*) FROM playable_item WHERE kind = 'book'"},
+		{&out.Items, "SELECT COUNT(*) FROM playable_item WHERE kind = 'track' AND state <> 'archived'"},
+		{&out.Books, "SELECT COUNT(*) FROM playable_item WHERE kind = 'book' AND state <> 'archived'"},
 		// An artist counts if it backs a track OR is a book's author. This mirrors the
 		// GroupArtist facet exactly (COALESCE(t.artist_id, bk.author_id)), so the
 		// headline count matches the facet's bucket set. A narrator/translator/editor
 		// that is never also an author or track artist is intentionally not counted,
 		// because the facet does not surface them.
 		{&out.Artists, `SELECT COUNT(*) FROM artist a WHERE
-			EXISTS (SELECT 1 FROM track t WHERE t.artist_id = a.id OR t.album_artist_id = a.id)
-			OR EXISTS (SELECT 1 FROM book b WHERE b.author_id = a.id)`},
+			EXISTS (SELECT 1 FROM track t ` + liveMembers + ` WHERE t.artist_id = a.id OR t.album_artist_id = a.id)
+			OR EXISTS (SELECT 1 FROM book bk ` + liveBooks + ` WHERE bk.author_id = a.id)`},
 		{&out.ReleaseGroups, `SELECT COUNT(*) FROM release_group rg WHERE EXISTS
-			(SELECT 1 FROM album al JOIN track t ON t.album_id = al.id WHERE al.release_group_id = rg.id)`},
-		{&out.Albums, "SELECT COUNT(*) FROM album al WHERE EXISTS (SELECT 1 FROM track t WHERE t.album_id = al.id)"},
+			(SELECT 1 FROM album al JOIN track t ON t.album_id = al.id ` + liveMembers + ` WHERE al.release_group_id = rg.id)`},
+		{&out.Albums, "SELECT COUNT(*) FROM album al WHERE EXISTS (SELECT 1 FROM track t " + liveMembers + " WHERE t.album_id = al.id)"},
 		{&out.Genres, `SELECT COUNT(*) FROM genre g WHERE g.facet = 'genre' AND EXISTS
-			(SELECT 1 FROM item_genre ig WHERE ig.genre_id = g.id)`},
+			(SELECT 1 FROM item_genre ig ` + liveGenreMembers + ` WHERE ig.genre_id = g.id)`},
 	}
 	for _, c := range counts {
 		if err := s.rdb().QueryRowContext(ctx, c.q).Scan(c.dst); err != nil {
@@ -66,7 +68,7 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 	// Distributions via the canonical Facet primitive, so stats and browse agree.
 	// These are catalog-wide, deliberately user-agnostic (the query references no
 	// per-user field), so the empty user is a no-op.
-	all := query.New(query.EntityItems).Build()
+	all := query.New(query.EntityItems).Where("state", query.OpIsNot, string(model.StateArchived)).Build()
 	genreFacet, err := s.Facet(ctx, all, read.GroupGenre, "", 0, "")
 	if err != nil {
 		return nil, err
@@ -92,7 +94,7 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 }
 
 // playStats reads the per-user, play-derived figures from play_state (indexed
-// queries, never the rollups).
+// queries, never the rollups), over the items not in the trash.
 func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (read.PlayStats, error) {
 	const op = "store.Stats"
 	var ps read.PlayStats
@@ -107,10 +109,11 @@ func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (rea
 	ps.User = name
 
 	if err := s.rdb().QueryRowContext(ctx, `SELECT
-		COALESCE(SUM(play_count), 0),
-		COALESCE(SUM(CASE WHEN finished = 1 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN starred_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-		FROM play_state WHERE user_id = ?`, userID).Scan(&ps.TotalPlays, &ps.Finished, &ps.Starred); err != nil {
+		COALESCE(SUM(p.play_count), 0),
+		COALESCE(SUM(CASE WHEN p.finished = 1 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN p.starred_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+		FROM play_state p JOIN playable_item pi ON pi.id = p.item_id AND pi.state <> 'archived'
+		WHERE p.user_id = ?`, userID).Scan(&ps.TotalPlays, &ps.Finished, &ps.Starred); err != nil {
 		return ps, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
@@ -119,7 +122,7 @@ func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (rea
 	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.pid, pi.title,
 		COALESCE(NULLIF(t.artist,''), bk.author, ''), p.play_count
 		FROM play_state p
-		JOIN playable_item pi ON pi.id = p.item_id
+		JOIN playable_item pi ON pi.id = p.item_id AND pi.state <> 'archived'
 		LEFT JOIN track t ON t.item_id = pi.id
 		LEFT JOIN book bk ON bk.item_id = pi.id
 		WHERE p.user_id = ? AND p.play_count > 0
@@ -164,21 +167,22 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 	hi := time.Date(year+1, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
 	yr := &read.YearReview{Year: year, User: name}
 
-	// The recap covers the music/audiobook library, excluding podcast episodes, so
-	// every figure (totals AND the top lists, which key on the artist/genre entities
-	// episodes lack) is consistent with the catalog Stats, which also excludes episodes.
+	// The recap covers the music/audiobook library, excluding podcast episodes and the
+	// trash, so every figure (totals AND the top lists, which key on the artist/genre
+	// entities episodes lack) is consistent with the catalog Stats, which excludes both.
 	var msPlayed int64
 	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(ps.ms_played),0), COUNT(DISTINCT ps.item_id)
 		 FROM play_session ps JOIN playable_item pi ON pi.id = ps.item_id
-		 WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')`,
+		 WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')
+		   AND pi.state <> 'archived'`,
 		userID, lo, hi).Scan(&yr.Sessions, &msPlayed, &yr.TracksPlayed); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	yr.MinutesPlayed = msPlayed / 60000
 
 	if err := s.rdb().QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM playable_item WHERE kind IN ('track','book')
+		`SELECT COUNT(*) FROM playable_item WHERE kind IN ('track','book') AND state <> 'archived'
 		 AND created_at >= ? AND created_at < ?`, lo, hi).Scan(&yr.NewInLibrary); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -190,6 +194,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 		LEFT JOIN book bk ON bk.item_id = pi.id
 		JOIN artist a ON a.id = COALESCE(t.artist_id, bk.author_id)
 		WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')
+		  AND pi.state <> 'archived'
 		GROUP BY a.id ORDER BY COUNT(*) DESC, a.sort_key LIMIT ?`, userID, lo, hi, topN)
 	if err != nil {
 		return nil, err
@@ -200,7 +205,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 		JOIN item_genre ig ON ig.item_id = ps.item_id
 		JOIN genre g ON g.id = ig.genre_id
 		WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ?
-		  AND pi.kind IN ('track','book') AND g.facet = 'genre'
+		  AND pi.kind IN ('track','book') AND pi.state <> 'archived' AND g.facet = 'genre'
 		GROUP BY g.id ORDER BY COUNT(*) DESC, g.sort_key LIMIT ?`, userID, lo, hi, topN)
 	if err != nil {
 		return nil, err
@@ -213,6 +218,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 		LEFT JOIN track t ON t.item_id = pi.id
 		LEFT JOIN book bk ON bk.item_id = pi.id
 		WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')
+		  AND pi.state <> 'archived'
 		GROUP BY pi.id ORDER BY COUNT(*) DESC, pi.sort_key LIMIT ?`, userID, lo, hi, topN)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

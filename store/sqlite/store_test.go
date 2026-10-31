@@ -46,7 +46,7 @@ func input(libID int64, path, essence, content, title string) model.PutScannedTr
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{Artist: "Artist", Album: "Album", TrackNo: 1},
 	}

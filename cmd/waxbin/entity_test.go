@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
@@ -170,7 +172,7 @@ func TestEntityPlayStateViewJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"kind":"album","entityPid":"al1","rating":80,"starred":true,` +
-		`"starredAt":"100","ratingChangedAt":"200","starredChangedAt":"100"}`
+		`"starredAt":"100","ratingChangedAt":"200","starredChangedAt":"100","updatedAt":"300"}`
 	if string(b) != want {
 		t.Errorf("json = %s\nwant %s", b, want)
 	}
@@ -183,5 +185,28 @@ func TestEntityPlayStateViewJSON(t *testing.T) {
 	want = `{"kind":"artist","entityPid":"ar1","starred":false}`
 	if string(b) != want {
 		t.Errorf("json = %s\nwant %s", b, want)
+	}
+}
+
+// TestEntityStateListText: entity stars and entity ratings print each entity's rating,
+// whether it is starred and when its state last changed, a dash for what it lacks.
+func TestEntityStateListText(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	printEntityStates(&buf, []model.EntityPlayState{
+		{Kind: model.MergeAlbum, EntityPID: "al1", Rating: 80, HasRating: true, Starred: true, UpdatedAt: 300},
+		{Kind: model.MergeAlbum, EntityPID: "al2", Rating: 0, HasRating: true},
+	})
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("printed %q, want two lines", buf.String())
+	}
+	for i, want := range [][]string{
+		{"album", "al1", "80/100", "starred", time.Unix(0, 300).Format(time.RFC3339)},
+		{"album", "al2", "0/100", "-", "-"},
+	} {
+		if got := strings.Fields(lines[i]); strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("line %d = %q, want the fields %v", i, lines[i], want)
+		}
 	}
 }

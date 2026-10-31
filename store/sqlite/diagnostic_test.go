@@ -206,7 +206,6 @@ func diagnosticQueryFixture(t *testing.T) diagFixture {
 			},
 			Item: model.PlayableItem{
 				Kind: model.KindBook, State: model.StatePresent, Title: "Split Book",
-				SortKey:     model.SortKey("Split Book"),
 				IdentityKey: identity.BookKey("", "", "Book Author", "Split Book", ""),
 			},
 			Book: model.Book{

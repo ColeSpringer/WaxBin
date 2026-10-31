@@ -44,6 +44,27 @@ func TestBookTagEditsClearDescriptionClearsTheLongForm(t *testing.T) {
 	}
 }
 
+// TestBookTagEditsClearTitleSortClearsTitleSort: a book titled by its TITLE reads its
+// spelling from TITLESORT when ALBUMSORT is empty, so a clear has to empty both; a set
+// writes ALBUMSORT alone, which the reader takes first.
+func TestBookTagEditsClearTitleSortClearsTitleSort(t *testing.T) {
+	t.Parallel()
+	cleared := map[string]bool{}
+	for _, e := range bookTagEditsForFields(map[string]string{"title_sort": ""}, "") {
+		if len(e.Values) != 0 {
+			t.Errorf("clear wrote %s=%v, want an empty edit", e.Key, e.Values)
+		}
+		cleared[e.Key] = true
+	}
+	if !cleared["ALBUMSORT"] || !cleared["TITLESORT"] || len(cleared) != 2 {
+		t.Errorf("a title_sort clear touched %v, want ALBUMSORT and TITLESORT", cleared)
+	}
+	set := bookTagEditsForFields(map[string]string{"title_sort": "Tokyo Story"}, "")
+	if len(set) != 1 || set[0].Key != "ALBUMSORT" || len(set[0].Values) != 1 || set[0].Values[0] != "Tokyo Story" {
+		t.Errorf("a title_sort set produced %+v, want ALBUMSORT alone", set)
+	}
+}
+
 func TestReplayGainEdits(t *testing.T) {
 	t.Parallel()
 	// A standalone track (no album) writes track keys and CLEARS the album keys, so

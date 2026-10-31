@@ -153,17 +153,21 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		}); err != nil {
 		return err
 	}
-	// A track whose file took the artist's ARTISTSORT spells its artist that way now, as
-	// the next scan of the file would read it.
-	if v, ok := edits["sort"]; ok && entityType == model.MergeArtist {
+	// A track whose file took the artist's ARTISTSORT or the album's ALBUMSORT spells its
+	// artist or album that way now, as the next scan of the file would read it.
+	if v, ok := edits["sort"]; ok && (entityType == model.MergeArtist || entityType == model.MergeAlbum) {
 		var landed []model.PID
 		for _, ref := range files {
 			if wbErr.landed[ref.FilePID] {
 				landed = append(landed, ref.FilePID)
 			}
 		}
-		if err := l.store.FollowArtistSortWrite(ctx, target, landed, strings.TrimSpace(v)); err != nil {
-			l.log.Warn("artist sort spelling after write-back", "artist", target, "err", err)
+		follow := l.store.FollowArtistSortWrite
+		if entityType == model.MergeAlbum {
+			follow = l.store.FollowAlbumSortWrite
+		}
+		if err := follow(ctx, target, landed, strings.TrimSpace(v)); err != nil {
+			l.log.Warn("sort spelling after write-back", "entity", string(entityType), "pid", target, "err", err)
 		}
 	}
 	return wbErr.result()

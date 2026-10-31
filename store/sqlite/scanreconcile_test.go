@@ -414,8 +414,8 @@ func TestScanAlbumArtistRetagIntoEstablishedAlbumKeepsGroupPID(t *testing.T) {
 	// Re-point the old group's primary artist onto a row no frame references, then
 	// repair the rollups so the retag starts from a clean slate.
 	if _, err := st.wdb().ExecContext(ctx,
-		"INSERT INTO artist(pid, name, sort_key, match_key) VALUES (?,?,?,?)",
-		string(model.NewPID()), "Gamma", model.SortKey("Gamma"), identity.MatchKey("Gamma")); err != nil {
+		"INSERT INTO artist(pid, name, sort_key, name_key, match_key) VALUES (?,?,?,?,?)",
+		string(model.NewPID()), "Gamma", model.SortKey("Gamma"), model.SortKey("Gamma"), identity.MatchKey("Gamma")); err != nil {
 		t.Fatalf("seed canonical artist: %v", err)
 	}
 	gammaID := scalarInt(t, st, "SELECT id FROM artist WHERE name='Gamma'")

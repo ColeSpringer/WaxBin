@@ -385,7 +385,7 @@ func TestQueryLimitMegabytesSharedCUEFile(t *testing.T) {
 		tracks[i] = model.VirtualTrack{
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent,
-				Title: title, SortKey: model.SortKey(title),
+				Title:       title,
 				IdentityKey: identity.VirtualTrackKey("rip-e", no, start),
 			},
 			Track:       model.Track{Artist: "Rip Artist", Album: "Rip Album", TrackNo: no},

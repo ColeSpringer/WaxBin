@@ -1,7 +1,8 @@
 package model
 
 // RollupSettle counts the entities a SettleRollups call recomputed, by kind: an album
-// settles its year, the others their rollups.
+// settles its year, the others their rollups, and an album, a release group and an artist
+// their derived sort spellings.
 type RollupSettle struct {
 	Artists       int
 	ReleaseGroups int
@@ -23,4 +24,9 @@ type RefreshReport struct {
 	AlbumYears         int
 	ReleaseYears       int
 	PlaylistsCompacted int
+	// SortSpellings counts the albums, release groups and artists whose derived sort
+	// spelling it rewrote, and SortSpellingKeys the ones whose sort key it moved, which
+	// leaves out a spelling under a curated sort, since that sort holds the key.
+	SortSpellings    int
+	SortSpellingKeys int
 }

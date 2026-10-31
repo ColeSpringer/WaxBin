@@ -877,3 +877,58 @@ func TestCatalogOnlyCreditOwesATagWrite(t *testing.T) {
 		t.Fatalf("book owed = %v, want nothing for a role no tag carries", got)
 	}
 }
+
+// TestEditTitleSortOrdersAndWritesBack: a title_sort edit keys the item by the spelling and
+// writes it where a scan reads it back, a track's TITLESORT and a book's ALBUMSORT, so a
+// forced rescan keeps both.
+func TestEditTitleSortOrdersAndWritesBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "tokyo.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "東京", Artist: "Band", Album: "Album", Track: 1, Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, filepath.Join(root, "berlin.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Berlin", Artist: "Band", Album: "Album", Track: 2, Audio: testaudio.AudioWithSeed(2)}))
+	writeFile(t, filepath.Join(root, "hobbit.m4b"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Chapter 1", Artist: "Tolkien", AlbumArtist: "Tolkien", Album: "Hobbit", Track: 1,
+		Audio: testaudio.AudioWithSeed(3)}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	tokyo := itemPIDByTitle(t, ctx, lib, "東京")
+	book := itemPIDByTitle(t, ctx, lib, "Hobbit")
+	for pid, spelling := range map[model.PID]string{tokyo: "Zz Tokyo", book: "Hobbit, The"} {
+		if err := lib.EditField(ctx, pid, "title_sort", spelling, waxbin.EditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+			t.Fatalf("edit title_sort %s: %v", pid, err)
+		}
+	}
+	for _, c := range []struct{ file, key, want string }{
+		{"tokyo.mp3", "TITLESORT", "Zz Tokyo"}, {"hobbit.m4b", "ALBUMSORT", "Hobbit, The"},
+	} {
+		fm, err := meta.NewReader().Read(ctx, filepath.Join(root, c.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := fm.Tags.TitleSort
+		if c.key == "ALBUMSORT" {
+			got = fm.Tags.AlbumSort
+		}
+		if got != c.want {
+			t.Errorf("%s %s = %q, want %q", c.file, c.key, got, c.want)
+		}
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	tracks, err := lib.Query(ctx, query.New(query.EntityTracks).Build(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(titlesOf(tracks), ","); got != "Berlin,東京" {
+		t.Errorf("track order = %s, want Berlin then 東京 under its spelling", got)
+	}
+	if v, err := lib.Get(ctx, book); err != nil || v.TitleSort != "Hobbit, The" {
+		t.Errorf("book after the rescan = %+v (err %v), want its spelling read back", v, err)
+	}
+}

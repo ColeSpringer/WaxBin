@@ -183,6 +183,17 @@ func partitionStoredRows(rows map[string]storedRow, preserveLocks bool) (locked 
 	return locked, fills
 }
 
+// keepLockedTitle carries the stored title and spelling over a scanned item where they are
+// locked: a locked title keeps its spelling beside it, as a locked composer does.
+func keepLockedTitle(item *model.PlayableItem, cur itemTitle, locked map[string]bool) {
+	if locked["title"] {
+		item.Title, item.TitleSort = cur.title, cur.sort
+	}
+	if locked["title_sort"] {
+		item.TitleSort = cur.sort
+	}
+}
+
 // trackColumnOf maps a provenance field onto the track column it describes: a credit
 // writes the same denormalized column as its scalar twin.
 func trackColumnOf(field string) string {
@@ -232,9 +243,7 @@ func overlayStoredTrackTx(ctx context.Context, tx *sql.Tx, log logger, fileID in
 	}
 	prior.track = &cur
 
-	if locked["title"] {
-		item.Title, item.SortKey = curTitle, model.SortKey(curTitle)
-	}
+	keepLockedTitle(item, curTitle, locked)
 	for f := range locked {
 		copyTrackField(tr, cur, trackColumnOf(f))
 	}
@@ -260,7 +269,7 @@ func overlayStoredTrackTx(ctx context.Context, tx *sql.Tx, log logger, fileID in
 			continue
 		}
 		if col == "title" {
-			item.Title, item.SortKey = curTitle, model.SortKey(curTitle)
+			item.Title = curTitle.title
 		} else {
 			copyTrackField(tr, cur, col)
 		}
@@ -297,7 +306,7 @@ func fillRowsHold(fields []string, rows map[string]storedRow, reproduces func(fi
 
 // trackFillHolds is fillRowsHold for a track column, the credit row behind the artist or
 // composer display included.
-func trackFillHolds(col string, rows map[string]storedRow, curTitle string, cur model.Track) bool {
+func trackFillHolds(col string, rows map[string]storedRow, curTitle itemTitle, cur model.Track) bool {
 	fields := []string{col}
 	switch col {
 	case "artist":
@@ -325,11 +334,11 @@ func trackFieldSilent(col string, tr model.Track, derived []string) bool {
 	case "genre":
 		return tr.Genre == "" && len(tr.Genres) == 0
 	case "year", "track_no", "track_total", "disc_no", "disc_total", "bpm":
-		return scanFieldValue(col, "", tr) == "0"
+		return scanFieldValue(col, itemTitle{}, tr) == "0"
 	case "compilation":
 		return !tr.Compilation
 	}
-	return scanFieldValue(col, "", tr) == ""
+	return scanFieldValue(col, itemTitle{}, tr) == ""
 }
 
 // sameAlbumTags reports whether a scanned track names the album its stored columns do,
@@ -383,9 +392,11 @@ func copyTrackField(tr *model.Track, cur model.Track, field string) {
 	case "artist":
 		tr.Artist, tr.ArtistSort, tr.Artists = cur.Artist, cur.ArtistSort, cur.Artists
 	case "album_artist":
-		tr.AlbumArtist = cur.AlbumArtist
+		tr.AlbumArtist, tr.AlbumArtistSort = cur.AlbumArtist, cur.AlbumArtistSort
 	case "album":
-		tr.Album = cur.Album
+		tr.Album, tr.AlbumSort = cur.Album, cur.AlbumSort
+	case "album_sort":
+		tr.AlbumSort = cur.AlbumSort
 	case "composer":
 		tr.Composer, tr.ComposerSort = cur.Composer, cur.ComposerSort
 	case "composer_sort":
@@ -459,9 +470,7 @@ func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int
 	}
 	prior.book = &cur
 
-	if locked["title"] {
-		item.Title, item.SortKey = curTitle, model.SortKey(curTitle)
-	}
+	keepLockedTitle(item, curTitle, locked)
 	for f := range locked {
 		copyBookField(b, cur, bookColumnOf(f))
 	}
@@ -473,7 +482,7 @@ func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int
 			continue
 		}
 		if col == "title" {
-			item.Title, item.SortKey = curTitle, model.SortKey(curTitle)
+			item.Title = curTitle.title
 		} else {
 			copyBookField(b, cur, col)
 		}

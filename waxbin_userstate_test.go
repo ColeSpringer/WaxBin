@@ -204,3 +204,35 @@ func facadeItemTitles(items []*model.ItemView) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestRuleReadsUserStateThroughFacade: the facade answers whether a rule reads per-user
+// state without evaluating it, and a stored smart playlist answers through its rule, so a
+// host knows which lists to cache per user.
+func TestRuleReadsUserStateThroughFacade(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	starred := query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build()
+	byYear := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
+	if got, err := lib.RuleReadsUserState(starred); err != nil || !got {
+		t.Errorf("RuleReadsUserState(starred) = %v, %v; want true", got, err)
+	}
+	if got, err := lib.RuleReadsUserState(byYear); err != nil || got {
+		t.Errorf("RuleReadsUserState(year) = %v, %v; want false", got, err)
+	}
+	pls := lib.Playlists()
+	smart, err := pls.CreateSmart(ctx, "Starred", "", model.VisibilityPrivate, starred)
+	if err != nil {
+		t.Fatalf("create smart: %v", err)
+	}
+	static, err := pls.CreateStatic(ctx, "Mine", "", model.VisibilityPrivate)
+	if err != nil {
+		t.Fatalf("create static: %v", err)
+	}
+	if got, err := pls.ReadsUserState(ctx, smart); err != nil || !got {
+		t.Errorf("ReadsUserState(smart starred) = %v, %v; want true", got, err)
+	}
+	if got, err := pls.ReadsUserState(ctx, static); err != nil || got {
+		t.Errorf("ReadsUserState(static) = %v, %v; want false", got, err)
+	}
+}

@@ -35,7 +35,7 @@ func bookIn(libID int64, path, essence, title, author, series, asin, isbn string
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: key,
+			IdentityKey: key,
 		},
 		Book: model.Book{
 			Author: author, AuthorSort: model.SortKey(author), Authors: []string{author},

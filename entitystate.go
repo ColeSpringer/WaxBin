@@ -49,3 +49,10 @@ func (l *Library) EntityPlayState(ctx context.Context, userPID model.PID, kind m
 func (l *Library) StarredEntities(ctx context.Context, userPID model.PID, kind model.MergeEntity) ([]model.EntityPlayState, error) {
 	return l.store.StarredEntities(ctx, userPID, kind)
 }
+
+// RatedEntities lists a user's rated entities of one kind, highest rating first, then the
+// most recently rated. A rating of 0 counts; a starred entity with no rating does not.
+// Pair it with EntityByPIDs, as StarredEntities.
+func (l *Library) RatedEntities(ctx context.Context, userPID model.PID, kind model.MergeEntity) ([]model.EntityPlayState, error) {
+	return l.store.RatedEntities(ctx, userPID, kind)
+}

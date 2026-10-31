@@ -41,7 +41,7 @@ func seedBook(t *testing.T, st *sqlite.Store, libID int64, path, essence, title,
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "book:" + essence,
+			IdentityKey: "book:" + essence,
 		},
 		Book: model.Book{Author: author, Authors: []string{author}},
 	})

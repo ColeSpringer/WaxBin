@@ -95,7 +95,7 @@ func TestScanPopulatesAlbumIdentifiers(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "One",
-			SortKey: model.SortKey("One"), IdentityKey: "essence:e1",
+			IdentityKey: "essence:e1",
 		},
 		Track: model.Track{
 			Artist: "Artist", Album: "Album",

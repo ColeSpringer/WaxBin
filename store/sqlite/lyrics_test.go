@@ -18,7 +18,7 @@ func putWithLyrics(t *testing.T, st *Store, libID int64, content string, ly *mod
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "S",
-			SortKey: model.SortKey("S"), IdentityKey: "essence:e",
+			IdentityKey: "essence:e",
 		},
 		Track:  model.Track{Artist: "A", Album: "Al"},
 		Lyrics: ly,
@@ -121,7 +121,7 @@ func TestCoverageCountsHeldLyrics(t *testing.T) {
 			},
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: title,
-				SortKey: model.SortKey(title), IdentityKey: "essence:e-" + title,
+				IdentityKey: "essence:e-" + title,
 			},
 			Track:  model.Track{Artist: "A", Album: "Al"},
 			Lyrics: ly,

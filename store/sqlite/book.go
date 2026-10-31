@@ -73,7 +73,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
-		fileTitle, fileBook := in.Item.Title, in.Book
+		fileTitle, fileBook := titleOf(in.Item), in.Book
 
 		// Overlay locked book fields, and the fills the part says nothing about, onto the
 		// scanned values before any writer runs (overlayStoredBookTx).
@@ -93,7 +93,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
 		// first to create the item adopts it, the rest join it by book key.
-		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, in.Book.Year, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID, key)
+		itemID, itemPID, created, stateChanged, held, err := upsertItem(ctx, tx, s.log, in.Item, in.Book.Year, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID, key)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -236,14 +236,14 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			}
 			ownsTitle = len(parts) == 1
 		}
-		title := in.Item.Title
+		title := titleOf(in.Item)
 		switch {
-		case !ownsTitle && priorTitle != in.Item.Title:
-			if _, err := tx.ExecContext(ctx, "UPDATE playable_item SET title=?, sort_key=? WHERE id=?",
-				priorTitle, model.SortKey(priorTitle), itemID); err != nil {
+		case !ownsTitle && (held.title != in.Item.Title || held.sort != in.Item.TitleSort):
+			if _, err := tx.ExecContext(ctx, "UPDATE playable_item SET title=?, title_sort=?, sort_key=?, title_key=? WHERE id=?",
+				held.title, held.sort, itemSortKey(held.title, held.sort), model.SortKey(held.title), itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			title = priorTitle
+			title = held
 		case ownsTitle && !created:
 			var rows map[string]rederivable
 			if known := prior.priorFor(itemID); known != nil {
@@ -251,8 +251,17 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			} else if rows, err = rederivableRowsTx(ctx, tx, itemID, in.PreserveLocks); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if r, ok := rows["title"]; priorTitle != in.Item.Title || (ok && r.value != in.Item.Title) {
-				if _, err := retireProvenanceTx(ctx, tx, itemID, []string{"title"}, in.PreserveLocks); err != nil {
+			// The title and its spelling, each re-derived when the put moved it or its row
+			// records a value the put does not write.
+			var moved []string
+			if r, ok := rows["title"]; held.title != in.Item.Title || (ok && r.value != in.Item.Title) {
+				moved = append(moved, "title")
+			}
+			if r, ok := rows["title_sort"]; held.sort != in.Item.TitleSort || (ok && r.value != in.Item.TitleSort) {
+				moved = append(moved, "title_sort")
+			}
+			if len(moved) > 0 {
+				if _, err := retireProvenanceTx(ctx, tx, itemID, moved, in.PreserveLocks); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				res.MetadataChanged = true
@@ -524,7 +533,7 @@ func resolveContributors(ctx context.Context, tx *sql.Tx, itemID int64, b model.
 	add := func(names []string, role model.ContributorRole) (int64, error) {
 		var firstID int64
 		for pos, name := range names {
-			aid, err := resolveArtist(ctx, tx, name, "")
+			aid, err := resolveArtist(ctx, tx, name, "", affected)
 			if err != nil {
 				return 0, err
 			}
@@ -913,7 +922,7 @@ func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, p
 // settled against the stored book. The book emits an update when the edge changed or
 // the put brought it back from missing (stateChanged).
 func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedBookInput, fileID int64, filePID model.PID,
-	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title string, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64, cover examinedArt) error {
+	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title itemTitle, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64, cover examinedArt) error {
 	const op = "store.PutScannedBook"
 	res.AttachedAsCopy, res.Joined = true, link.changed
 	d := model.FileDiagnostic{Code: model.DiagDuplicateCopy, Severity: model.SeverityInfo}
@@ -1395,7 +1404,8 @@ type bookPart struct {
 	sortKey    string
 	role       string // the item_file edge role: primary or part
 	libraryPID model.PID
-	virtual    bool // the edge plays a window of the file
+	virtual    bool              // the edge plays a window of the file
+	facts      model.ItemFileRef // the file's facts alone (fileFactCols)
 }
 
 // bookParts returns a book's parts in reading order, leaving out alternates. It is the
@@ -1413,8 +1423,8 @@ func (s *Store) bookParts(ctx context.Context, bookItemID int64) ([]bookPart, er
 func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, error) {
 	const op = "store.bookParts"
 	rows, err := q.QueryContext(ctx,
-		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path, itf.role,
-			(SELECT l.pid FROM library l WHERE l.id = f.library_id), itf.start_frames IS NOT NULL
+		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, f.rel_path, itf.role,
+			(SELECT l.pid FROM library l WHERE l.id = f.library_id), itf.start_frames IS NOT NULL, `+fileFactCols+`
 		 FROM item_file itf JOIN file f ON f.id = itf.file_id
 		 WHERE itf.item_id = ? AND itf.role IN ('primary', 'part')`, bookItemID)
 	if err != nil {
@@ -1425,9 +1435,11 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	for rows.Next() {
 		var p bookPart
 		var rel []byte
-		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel, &p.role, &p.libraryPID, &p.virtual); err != nil {
+		if err := rows.Scan(append([]any{&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &rel, &p.role,
+			&p.libraryPID, &p.virtual}, fileFactDests(&p.facts)...)...); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		p.DurationMS = p.facts.DurationMS
 		// model.SortKey zero-pads digit runs, so a plain string compare of the keys is
 		// numeric-aware ("p0000000002" < "p0000000010").
 		p.sortKey = model.SortKey(string(rel))
@@ -1688,12 +1700,13 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	}
 	out := make([]model.ItemFileRef, len(parts))
 	for i, p := range parts {
-		out[i] = model.ItemFileRef{
-			FilePID: p.FilePID, Path: p.path, DisplayPath: p.DisplayPath, Position: p.Position, Role: p.role,
-			LibraryPID: p.libraryPID, Virtual: p.virtual,
-		}
+		ref := p.facts
+		ref.FilePID, ref.Path, ref.DisplayPath, ref.Position, ref.Role = p.FilePID, p.path, p.DisplayPath, p.Position, p.role
+		ref.LibraryPID, ref.Virtual = p.libraryPID, p.virtual
+		out[i] = ref
 	}
-	rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid, itf.start_frames IS NOT NULL
+	rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid, itf.start_frames IS NOT NULL,
+			`+fileFactCols+`
 		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN library l ON l.id = f.library_id
 		WHERE itf.item_id = ? AND itf.role = 'alternate' ORDER BY itf.position, f.id`, itemID)
 	if err != nil {
@@ -1702,7 +1715,8 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	defer rows.Close()
 	for rows.Next() {
 		ref := model.ItemFileRef{Role: alternateRole}
-		if err := rows.Scan(&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position, &ref.LibraryPID, &ref.Virtual); err != nil {
+		if err := rows.Scan(append([]any{&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position, &ref.LibraryPID,
+			&ref.Virtual}, fileFactDests(&ref)...)...); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		out = append(out, ref)

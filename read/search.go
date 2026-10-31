@@ -47,6 +47,12 @@ type SearchOptions struct {
 	// compatibility, so a call site forgotten at the next addition silently
 	// reverts to today's behavior rather than failing.
 	States []model.ItemState
+
+	// Podcasts, when non-nil, keeps only the episodes of these shows, in the metadata
+	// rungs and the transcript rung alike, and narrows inside the candidate pool as the
+	// other two do; tracks and books are not affected. An empty non-nil list keeps no
+	// episode at all. An unknown show pid is an error, as an unknown library is.
+	Podcasts []model.PID
 }
 
 // SearchHit is one ranked search result: an entity reference plus its display

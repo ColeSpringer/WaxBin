@@ -117,16 +117,17 @@ type itemView struct {
 	DiscTotal   int    `json:"discTotal,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
-	// Entity handles: the effective artist/album-artist/album/release-group/podcast
-	// entity pids, so a consumer can group by real identity. albumPid and
+	// Entity handles: the effective artist/album-artist/album/release-group/podcast/
+	// series entity pids, so a consumer can group by real identity. albumPid and
 	// releaseGroupPid are absent for a book or episode, releaseGroupPid is also absent
-	// for a track whose album has no release group, and podcastPid is present only for
-	// an episode.
+	// for a track whose album has no release group, podcastPid is present only for an
+	// episode, and seriesPid only for a book in a series.
 	ArtistPID       string `json:"artistPid,omitempty"`
 	AlbumArtistPID  string `json:"albumArtistPid,omitempty"`
 	AlbumPID        string `json:"albumPid,omitempty"`
 	ReleaseGroupPID string `json:"releaseGroupPid,omitempty"`
 	PodcastPID      string `json:"podcastPid,omitempty"`
+	SeriesPID       string `json:"seriesPid,omitempty"`
 	// The registered root the item's primary file sits under, absent for a fileless
 	// item such as an undownloaded episode.
 	LibraryPID string `json:"libraryPid,omitempty"`
@@ -138,11 +139,14 @@ type itemView struct {
 	ReleaseGroupMBID string `json:"releaseGroupMbid,omitempty"`
 	ArtistMBID       string `json:"artistMbid,omitempty"`
 	AlbumArtistMBID  string `json:"albumArtistMbid,omitempty"`
-	// The composer and the artist and composer sort spellings as stated, present for
-	// track items.
-	Composer     string `json:"composer,omitempty"`
-	ArtistSort   string `json:"artistSort,omitempty"`
-	ComposerSort string `json:"composerSort,omitempty"`
+	// The composer and the sort spellings as stated: the title's (a book's included), and
+	// a track's artist, album, album artist and composer spellings.
+	Composer        string `json:"composer,omitempty"`
+	TitleSort       string `json:"titleSort,omitempty"`
+	ArtistSort      string `json:"artistSort,omitempty"`
+	AlbumSort       string `json:"albumSort,omitempty"`
+	AlbumArtistSort string `json:"albumArtistSort,omitempty"`
+	ComposerSort    string `json:"composerSort,omitempty"`
 	// The track's stated tempo, a whole number, absent when the file states none.
 	BPM int `json:"bpm,omitempty"`
 	// Episode fields, present for episode items only. pubDateNs is nanoseconds, the
@@ -157,7 +161,14 @@ type itemView struct {
 	// Everything below is kind-agnostic; the episode block above ends at pubDateNs.
 	Source     string `json:"source,omitempty"`
 	DurationMS int64  `json:"durationMs,omitempty"`
+	// createdAt is when the item entered the catalog (unix ns, a string as every catalog
+	// stamp here is), and the file facts are the primary file's.
+	CreatedAt  int64  `json:"createdAt,string,omitempty"`
 	Codec      string `json:"codec,omitempty"`
+	Container  string `json:"container,omitempty"`
+	SampleRate int    `json:"sampleRate,omitempty"`
+	Bitrate    int    `json:"bitrate,omitempty"` // kilobits per second
+	FileSize   int64  `json:"fileSize,omitempty"`
 	Path       string `json:"path,omitempty"`
 	FilePID    string `json:"filePid,omitempty"`
 	// A virtual track (a cue TRACK of a single-file rip) plays only one window within
@@ -190,14 +201,16 @@ func toItemView(v *model.ItemView) itemView {
 		TrackTotal: v.TrackTotal, Disc: v.DiscNo, DiscTotal: v.DiscTotal, Year: v.Year, Genre: v.Genre,
 		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
 		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),
-		PodcastPID: string(v.PodcastPID), LibraryPID: string(v.LibraryPID),
+		PodcastPID: string(v.PodcastPID), SeriesPID: string(v.SeriesPID), LibraryPID: string(v.LibraryPID),
 		MBID: v.MBID, ISRC: v.ISRC, AlbumMBID: v.AlbumMBID,
 		ReleaseGroupMBID: v.ReleaseGroupMBID,
 		ArtistMBID:       v.ArtistMBID, AlbumArtistMBID: v.AlbumArtistMBID,
-		ArtistSort: v.ArtistSort, Composer: v.Composer, ComposerSort: v.ComposerSort, BPM: v.BPM,
+		TitleSort: v.TitleSort, ArtistSort: v.ArtistSort, AlbumSort: v.AlbumSort, AlbumArtistSort: v.AlbumArtistSort,
+		Composer: v.Composer, ComposerSort: v.ComposerSort, BPM: v.BPM,
 		Explicit: v.Explicit, PodcastExplicit: v.PodcastExplicit,
 		Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
-		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
+		DurationMS: v.DurationMS, CreatedAt: v.CreatedAt, Codec: v.Codec, Container: v.Container,
+		SampleRate: v.SampleRate, Bitrate: v.Bitrate, FileSize: v.FileSize, Path: v.DisplayPath, FilePID: string(v.FilePID),
 		Virtual: v.Virtual, StartFrames: v.StartFrames, EndFrames: v.EndFrames,
 		StartMS: v.StartMS, EndMS: v.EndMS,
 	}
@@ -594,6 +607,7 @@ type derivedView struct {
 	BookISBNKeyDrift        int `json:"bookIsbnKeyDrift"`
 	AlbumYearDrift          int `json:"albumYearDrift"`
 	ReleaseYearDrift        int `json:"releaseYearDrift"`
+	SortSpellingDrift       int `json:"sortSpellingDrift"`
 	PlaylistPositionDrift   int `json:"playlistPositionDrift"`
 	RollupsPending          int `json:"rollupsPending"`
 	OrphanArtSources        int `json:"orphanArtSources"`
@@ -627,6 +641,8 @@ type refreshView struct {
 	AlbumYears         int `json:"albumYears"`
 	ReleaseYears       int `json:"releaseYears"`
 	PlaylistsCompacted int `json:"playlistsCompacted"`
+	SortSpellings      int `json:"sortSpellings"`
+	SortSpellingKeys   int `json:"sortSpellingKeys"`
 }
 
 func toRefreshView(r *model.RefreshReport) *refreshView {
@@ -643,7 +659,7 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
-		AlbumYearDrift: r.AlbumYearDrift, ReleaseYearDrift: r.ReleaseYearDrift,
+		AlbumYearDrift: r.AlbumYearDrift, ReleaseYearDrift: r.ReleaseYearDrift, SortSpellingDrift: r.SortSpellingDrift,
 		PlaylistPositionDrift: r.PlaylistPositionDrift, RollupsPending: r.RollupsPending,
 		OrphanArtSources:            r.OrphanArtSources,
 		OrphanThumbnails:            r.OrphanThumbnails,

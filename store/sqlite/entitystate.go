@@ -223,11 +223,25 @@ func (s *Store) EntityPlayState(ctx context.Context, userPID model.PID, kind mod
 // StarredEntities lists a user's starred entities of one kind, most-recently-starred
 // first (starred_at DESC). It carries the change stamps a sync consumer needs and is the
 // getStarred2 read-back primitive: pair it with EntityByPIDs to hydrate display names in
-// one batch. As in EntityPlayState the kind's own table is joined to project the public
-// pid, and the eps.entity_type filter scopes the join to this kind (a rowid is not unique
-// across the entity tables).
+// one batch.
 func (s *Store) StarredEntities(ctx context.Context, userPID model.PID, kind model.MergeEntity) ([]model.EntityPlayState, error) {
-	const op = "store.StarredEntities"
+	return s.entityStates(ctx, "store.StarredEntities", userPID, kind, "eps.starred_at IS NOT NULL", "eps.starred_at DESC")
+}
+
+// RatedEntities lists a user's rated entities of one kind, highest rating first and,
+// within a rating, the most recently rated first. A rating of 0 is a rating; an entity
+// the user starred and never rated is not listed. Starred says whether it is starred too.
+func (s *Store) RatedEntities(ctx context.Context, userPID model.PID, kind model.MergeEntity) ([]model.EntityPlayState, error) {
+	return s.entityStates(ctx, "store.RatedEntities", userPID, kind, "eps.rating IS NOT NULL",
+		"eps.rating DESC, eps.rating_changed_at DESC")
+}
+
+// entityStates lists the entity_play_state rows of one user and kind that cond keeps, in
+// order, with the pid as the last tiebreak. As in EntityPlayState the kind's own table is
+// joined to project the public pid, and the eps.entity_type filter scopes the join to
+// this kind (a rowid is not unique across the entity tables). The user and kind lead the
+// primary key, so the read seeks them and sorts what it finds.
+func (s *Store) entityStates(ctx context.Context, op string, userPID model.PID, kind model.MergeEntity, cond, order string) ([]model.EntityPlayState, error) {
 	if !kind.Starrable() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "entity type carries no per-user state: "+string(kind))
 	}
@@ -239,15 +253,15 @@ func (s *Store) StarredEntities(ctx context.Context, userPID model.PID, kind mod
 	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT e.pid, eps.rating, eps.starred_at, eps.rating_changed_at, eps.starred_changed_at, eps.updated_at
 		 FROM entity_play_state eps JOIN `+table+` e ON e.id = eps.entity_id
-		 WHERE eps.user_id = ? AND eps.entity_type = ? AND eps.starred_at IS NOT NULL
-		 ORDER BY eps.starred_at DESC`, userID, table)
+		 WHERE eps.user_id = ? AND eps.entity_type = ? AND `+cond+`
+		 ORDER BY `+order+`, e.pid`, userID, table)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
 	var out []model.EntityPlayState
 	for rows.Next() {
-		st := model.EntityPlayState{Kind: kind, UserPID: userPID, Starred: true}
+		st := model.EntityPlayState{Kind: kind, UserPID: userPID}
 		var pid string
 		var rating, starredAt, ratingChanged, starredChanged, updatedAt sql.NullInt64
 		if err := rows.Scan(&pid, &rating, &starredAt, &ratingChanged, &starredChanged, &updatedAt); err != nil {
@@ -255,7 +269,7 @@ func (s *Store) StarredEntities(ctx context.Context, userPID model.PID, kind mod
 		}
 		st.EntityPID = model.PID(pid)
 		st.Rating, st.HasRating = int(rating.Int64), rating.Valid
-		st.StarredAt = starredAt.Int64
+		st.Starred, st.StarredAt = starredAt.Valid, starredAt.Int64
 		st.RatingChangedAt, st.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
 		st.UpdatedAt = updatedAt.Int64
 		out = append(out, st)

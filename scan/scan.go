@@ -941,30 +941,12 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.DeferRollups = sc.rollups != nil
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
-		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
-			LibraryID: lib.ID,
-			File:      file,
-			Item: model.PlayableItem{
-				Kind:        model.KindTrack,
-				State:       model.StatePresent,
-				Title:       tags.Title,
-				SortKey:     model.SortKey(tags.Title),
-				IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
-			},
-			Track:            trackFromTags(tags),
-			Lyrics:           lyrics,
-			CoverArt:         cover,
-			CustomTags:       tags.Custom,
-			AuxObservations:  aux,
-			PreferredItemPID: adoptedPID(sc, fm),
-			Acquisition:      tags.Acquisition,
-			Diagnostics:      diags,
-			PreserveLocks:    sc.preserveLocks,
-			Derived:          derived,
-			LockKind:         lockKind,
-			KindForced:       forceKind != "",
-			DeferRollups:     sc.rollups != nil,
-		})
+		in := trackInput(lib.ID, file, tags, essenceHash)
+		in.Lyrics, in.CoverArt, in.AuxObservations = lyrics, cover, aux
+		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
+		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
+		in.DeferRollups = sc.rollups != nil
+		out, err = s.cat.PutScannedTrack(ctx, in)
 	}
 	if err != nil {
 		return err
@@ -1154,6 +1136,25 @@ func adoptedPID(sc *scanCtx, fm *meta.FileMeta) model.PID {
 	return model.PID(fm.ItemPIDHint)
 }
 
+// trackInput composes one music file into a track persistence input, the fields the
+// file's tags decide; the caller adds what the scan itself knows.
+func trackInput(libraryID int64, file model.File, tags model.Tags, essenceHash string) model.PutScannedTrackInput {
+	return model.PutScannedTrackInput{
+		LibraryID: libraryID,
+		File:      file,
+		Item: model.PlayableItem{
+			Kind:        model.KindTrack,
+			State:       model.StatePresent,
+			Title:       tags.Title,
+			TitleSort:   tags.TitleSort,
+			IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
+		},
+		Track:       trackFromTags(tags),
+		CustomTags:  tags.Custom,
+		Acquisition: tags.Acquisition,
+	}
+}
+
 // bookInput composes one audiobook file into a book persistence input. The book
 // title and author are the album/album-artist (the file title/artist hold a
 // chapter or part name in multi-file books); the book key groups the parts of one
@@ -1186,7 +1187,7 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 			Kind:        model.KindBook,
 			State:       model.StatePresent,
 			Title:       title,
-			SortKey:     model.SortKey(title),
+			TitleSort:   bookTitleSort(tags),
 			IdentityKey: key,
 		},
 		Book: model.Book{
@@ -1276,6 +1277,15 @@ func carvedTracks(essenceHash string, tags model.Tags, sheet *meta.CueSheet, win
 			StartFrames: w.StartFrames,
 			EndFrames:   w.EndFrames,
 		}
+		// The file's album spellings spell the carved album and album artist where those
+		// are the file's own. Its TITLESORT spells the whole rip, so no track takes it, and
+		// a sheet has no spelling of its own.
+		if vt.Track.Album == tags.Album {
+			vt.Track.AlbumSort = tags.AlbumSort
+		}
+		if vt.Track.AlbumArtist == tags.AlbumArtist {
+			vt.Track.AlbumArtistSort = tags.AlbumArtistSort
+		}
 		fillRipTrack(&vt, tags)
 		tracks = append(tracks, vt)
 	}
@@ -1284,7 +1294,7 @@ func carvedTracks(essenceHash string, tags model.Tags, sheet *meta.CueSheet, win
 
 // fillRipTrack completes a virtual track from its own fields and the file's tags.
 func fillRipTrack(vt *model.VirtualTrack, tags model.Tags) {
-	vt.Item.Kind, vt.Item.State, vt.Item.SortKey = model.KindTrack, model.StatePresent, model.SortKey(vt.Item.Title)
+	vt.Item.Kind, vt.Item.State = model.KindTrack, model.StatePresent
 	vt.Track.Genres = identity.SplitGenres(vt.Track.Genre)
 	// From the file's own tags: a .cue has no vocabulary for these, and without them a
 	// carved rip's album row is empty where a plain rip's is filled.
@@ -1300,7 +1310,8 @@ func fillRipTrack(vt *model.VirtualTrack, tags model.Tags) {
 }
 
 // keptRip returns the virtual tracks a file was last carved into, each with its own
-// stored identity key, fields and window, so re-putting them reconciles as a no-op.
+// stored identity key, fields, spellings and window, so re-putting them reconciles as a
+// no-op.
 // Rebuilding identity from the stored track number would fork a track the user
 // renumbered, and one track's album fields would spread its edits to the rest.
 func (s *Scanner) keptRip(ctx context.Context, path string, tags model.Tags) ([]model.VirtualTrack, error) {
@@ -1340,6 +1351,16 @@ func BookTitle(tags model.Tags) string {
 	return cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
 }
 
+// bookTitleSort is the spelling beside the tag a book's title comes from: its ALBUMSORT,
+// or the TITLESORT of a book titled by its TITLE for want of an album. An ALBUMSORT stated
+// without an album still wins, since that is where a book's spelling is written back.
+func bookTitleSort(tags model.Tags) string {
+	if firstNonEmpty(tags.Album, tags.AlbumSort) != "" {
+		return tags.AlbumSort
+	}
+	return tags.TitleSort
+}
+
 // cleanBookTitle removes a trailing bracketed abridged/unabridged marker from a
 // book title.
 func cleanBookTitle(s string) string {
@@ -1377,7 +1398,9 @@ func trackFromTags(tags model.Tags) model.Track {
 		Artists:          creditArtists(tags),
 		ArtistSort:       tags.ArtistSort,
 		Album:            tags.Album,
+		AlbumSort:        tags.AlbumSort,
 		AlbumArtist:      tags.AlbumArtist,
+		AlbumArtistSort:  tags.AlbumArtistSort,
 		Composer:         tags.Composer,
 		ComposerSort:     tags.ComposerSort,
 		Comment:          tags.Comment,

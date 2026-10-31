@@ -348,7 +348,7 @@ func putBookPart(t *testing.T, st *Store, libID int64, path, bookKey, essence st
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: "Book",
-			SortKey: model.SortKey("Book"), IdentityKey: "book:" + bookKey,
+			IdentityKey: "book:" + bookKey,
 		},
 		Book:     model.Book{Author: "Auth", Authors: []string{"Auth"}},
 		Position: position,

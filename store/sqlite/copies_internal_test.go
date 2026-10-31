@@ -34,7 +34,7 @@ func TestCopyJoinedReportsANewEdge(t *testing.T) {
 			File: model.File{Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
 				Kind: model.FileAudio, Size: int64(len(content)), MTimeNS: 1, ContentHash: content,
 				EssenceHash: "sha256:SAME", ScanState: model.ScanIndexed},
-			Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "Song", SortKey: "song", IdentityKey: "essence:sha256:SAME"},
+			Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "Song", IdentityKey: "essence:sha256:SAME"},
 			Track: model.Track{Artist: "Artist", Album: "Album", TrackNo: 1},
 		}
 	}

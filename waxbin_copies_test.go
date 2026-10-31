@@ -262,7 +262,8 @@ func TestCopyOfABookPartIsNotOrganizedAsAPart(t *testing.T) {
 
 // titleSortCopies scans one recording twice, in a managed root and an in-place one, both
 // files carrying TITLESORT "Old Sort", flags the root holding the side named by
-// readOnlyPrimary read-only, and returns the library, the item, and the file pids.
+// readOnlyPrimary read-only, and returns the library, the item, and the primary and copy
+// file pids.
 func titleSortCopies(t *testing.T, readOnlyPrimary bool) (*waxbin.Library, model.PID, model.PID, model.PID) {
 	t.Helper()
 	ctx := context.Background()
@@ -323,22 +324,13 @@ func owedKeys(t *testing.T, lib *waxbin.Library, file model.PID) []string {
 	return keys
 }
 
-// TestTitleSortClearFollowsThePrimary: a title write-back clears TITLESORT from every file
-// it reaches. The catalog follows the primary, whose tags own the item: when a copy in a
-// read-only library refuses the clear, the catalog drops TITLESORT and the copy owes the
-// clear; when the primary refuses, the catalog keeps it and the copy that dropped it owes
-// it back.
-func TestTitleSortClearFollowsThePrimary(t *testing.T) {
+// TestTitleSortClearReachesEveryFileItCan: a title edit drops the catalog's title spelling
+// whichever file refuses its write-back, the TITLESORT clear lands with the title on every
+// file that takes the write, and a file in a read-only library owes the title, with which
+// the clear rides when it is paid.
+func TestTitleSortClearReachesEveryFileItCan(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	hasTitleSort := func(lib *waxbin.Library, pid model.PID) bool {
-		t.Helper()
-		tags, err := lib.ItemTags(ctx, pid)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return slices.ContainsFunc(tags, func(it model.ItemTag) bool { return it.Key == "TITLESORT" })
-	}
 	for _, readOnlyPrimary := range []bool{false, true} {
 		lib, pid, primary, copy := titleSortCopies(t, readOnlyPrimary)
 		err := lib.EditFields(ctx, pid, map[string]string{"title": "New"}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true})
@@ -346,15 +338,18 @@ func TestTitleSortClearFollowsThePrimary(t *testing.T) {
 		if !errors.As(err, &wbErr) || len(wbErr.Failures) != 1 {
 			t.Fatalf("edit (read-only primary %v) = %v, want one refusal", readOnlyPrimary, err)
 		}
-		if got := hasTitleSort(lib, pid); got != readOnlyPrimary {
-			t.Errorf("read-only primary %v: catalog keeps TITLESORT = %v, want %v", readOnlyPrimary, got, readOnlyPrimary)
+		if v, err := lib.Get(ctx, pid); err != nil || v.TitleSort != "" {
+			t.Errorf("read-only primary %v: catalog title_sort = %q (err %v), want it dropped", readOnlyPrimary, v.TitleSort, err)
 		}
-		owed := owedKeys(t, lib, copy)
-		if !slices.Contains(owed, "tag.TITLESORT") {
-			t.Errorf("read-only primary %v: the copy owes %v, want tag.TITLESORT among them", readOnlyPrimary, owed)
+		refused, landed := copy, primary
+		if readOnlyPrimary {
+			refused, landed = primary, copy
 		}
-		if got := owedKeys(t, lib, primary); !readOnlyPrimary && len(got) != 0 {
-			t.Errorf("the primary owes %v, want nothing once the catalog dropped TITLESORT", got)
+		if got := owedKeys(t, lib, refused); !slices.Equal(got, []string{"title"}) {
+			t.Errorf("read-only primary %v: the refusing file owes %v, want [title]", readOnlyPrimary, got)
+		}
+		if got := owedKeys(t, lib, landed); len(got) != 0 {
+			t.Errorf("read-only primary %v: the landed file owes %v, want nothing", readOnlyPrimary, got)
 		}
 	}
 }

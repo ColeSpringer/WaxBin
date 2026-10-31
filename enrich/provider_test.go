@@ -579,7 +579,7 @@ func seedTrackWithLyrics(t *testing.T, st *sqlite.Store, libID int64, ly *model.
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Have Lyrics",
-			SortKey: model.SortKey("Have Lyrics"), IdentityKey: "essence:ess-lyr",
+			IdentityKey: "essence:ess-lyr",
 		},
 		Track:  model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Meddle", TrackNo: 1},
 		Lyrics: ly,

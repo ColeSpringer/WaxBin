@@ -20,7 +20,7 @@ func putFile(t *testing.T, st *Store, libID int64, path, essence string, duratio
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: essence,
-			SortKey: essence, IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{Artist: "A"},
 	})

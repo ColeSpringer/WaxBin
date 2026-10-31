@@ -294,3 +294,57 @@ func TestEpisodeViewsCarryTheTranscriptFlag(t *testing.T) {
 		}
 	}
 }
+
+// TestItemViewJSONCarriesTheSeries: a book's series pid rides beside the other entity
+// handles, and an item in no series leaves it out.
+func TestItemViewJSONCarriesTheSeries(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(toItemView(&model.ItemView{PID: "b1", Kind: model.KindBook, SeriesPID: "s1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"seriesPid":"s1"`) {
+		t.Errorf("json = %s, want it to carry the series pid", b)
+	}
+	b, err = json.Marshal(toItemView(&model.ItemView{PID: "t1", Kind: model.KindTrack}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "seriesPid") {
+		t.Errorf("json = %s, want no series pid for an item in no series", b)
+	}
+}
+
+// TestItemViewJSONCarriesTheFileFacts: the item JSON carries its added time (unix ns as a
+// decimal string, like every catalog stamp in this contract) and its primary file's size,
+// bitrate, container and sample rate.
+func TestItemViewJSONCarriesTheFileFacts(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(toItemView(&model.ItemView{PID: "t1", CreatedAt: 1793410998825960484,
+		FileSize: 4000000, Bitrate: 320, Container: "flac", SampleRate: 44100}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"createdAt":"1793410998825960484"`, `"fileSize":4000000`, `"bitrate":320`,
+		`"container":"flac"`, `"sampleRate":44100`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("json = %s, want it to carry %s", b, want)
+		}
+	}
+}
+
+// TestItemViewJSONCarriesTheSpellings: the item JSON carries the title, album and
+// album-artist spellings beside the artist and composer ones.
+func TestItemViewJSONCarriesTheSpellings(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(toItemView(&model.ItemView{PID: "t1", TitleSort: "Tokyo", AlbumSort: "Wall, The",
+		AlbumArtistSort: "Floyd, Pink"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"titleSort":"Tokyo"`, `"albumSort":"Wall, The"`, `"albumArtistSort":"Floyd, Pink"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("json = %s, want it to carry %s", b, want)
+		}
+	}
+}

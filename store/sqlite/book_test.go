@@ -18,6 +18,7 @@ type bookSpec struct {
 	path, essence, content string
 	title, author          string
 	authorSort             string // the sort spelling the file states, empty when none
+	titleSort              string // the title's spelling (a book's ALBUMSORT), empty when none
 	narrators              []string
 	series, seq            string
 	asin, isbn, edition    string
@@ -60,7 +61,7 @@ func bookSpecInput(libID int64, s bookSpec) model.PutScannedBookInput {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: s.title,
-			SortKey: model.SortKey(s.title), IdentityKey: key,
+			TitleSort: s.titleSort, IdentityKey: key,
 		},
 		Book: model.Book{
 			Author: s.author, AuthorSort: s.authorSort, Authors: []string{s.author},
@@ -1950,7 +1951,7 @@ func vtrackSpecInput(libID int64, path, essence, content string, dur int64, wind
 		title := "Track " + string(rune('1'+i))
 		tracks[i] = model.VirtualTrack{
 			Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: title,
-				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey(essence, i+1, w[0])},
+				IdentityKey: identity.VirtualTrackKey(essence, i+1, w[0])},
 			Track:       model.Track{Artist: "A", AlbumArtist: "A", Album: "Rip", TrackNo: i + 1},
 			StartFrames: w[0], EndFrames: w[1],
 		}
@@ -1961,5 +1962,73 @@ func vtrackSpecInput(libID int64, path, essence, content string, dur int64, wind
 			Kind: model.FileAudio, Size: int64(len(content)), MTimeNS: 1, ContentHash: content, EssenceHash: essence,
 			DurationMS: dur, ScanState: model.ScanIndexed},
 		Tracks: tracks,
+	}
+}
+
+// TestItemFilesCarryEachFilesFacts: every file ref names its own file's facts (size,
+// format, duration, first sighting), a book's parts and its alternate alike, and so do
+// the refs FileOwner and EntityMemberFiles return.
+func TestItemFilesCarryEachFilesFacts(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(path, essence, content string, pos int, dur int64, bitrate int) *model.ScanItemResult {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		in := bookSpecInput(lib.ID, bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: dur})
+		in.File.Bitrate, in.File.SampleRate, in.File.Channels, in.File.BitDepth = bitrate, 44100, 2, 16
+		in.File.Codec, in.File.Container = "mp3", "mpeg"
+		r, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatalf("put %s: %v", path, err)
+		}
+		return r
+	}
+	r1 := put(filepath.Join(root, "book", "part1.mp3"), "mb1", "mc1", 1, 1000, 128)
+	r2 := put(filepath.Join(root, "book", "part2.mp3"), "mb2", "mc2-longer", 2, 2000, 192)
+	rc := put(filepath.Join(root, "backup", "part2.mp3"), "mb2", "mc2-copy!", 2, 2000, 256)
+	if !rc.AttachedAsCopy {
+		t.Fatalf("copy = %+v, want an alternate", rc)
+	}
+
+	refs, err := st.ItemFiles(ctx, r1.ItemPID)
+	if err != nil || len(refs) != 3 {
+		t.Fatalf("ItemFiles = %+v (err %v), want two parts and the copy", refs, err)
+	}
+	want := map[model.PID]struct {
+		size    int64
+		bitrate int
+		dur     int64
+	}{r1.FilePID: {3, 128, 1000}, r2.FilePID: {10, 192, 2000}, rc.FilePID: {9, 256, 2000}}
+	for _, r := range refs {
+		w := want[r.FilePID]
+		seen := int64(scalarInt(t, st, "SELECT first_seen FROM file WHERE pid = ?", string(r.FilePID)))
+		if r.Size != w.size || r.Bitrate != w.bitrate || r.DurationMS != w.dur || r.FirstSeen != seen ||
+			r.SampleRate != 44100 || r.Channels != 2 || r.BitDepth != 16 || r.Codec != "mp3" || r.Container != "mpeg" {
+			t.Errorf("%s ref (%s) = %+v, want size %d, %d kbps, %d ms, first seen %d and the shared format",
+				r.Role, r.FilePID, r, w.size, w.bitrate, w.dur, seen)
+		}
+	}
+
+	_, owned, err := st.FileOwner(ctx, r2.FilePID)
+	if err != nil || owned.Size != 10 || owned.Bitrate != 192 || owned.Codec != "mp3" || owned.DurationMS != 2000 {
+		t.Errorf("FileOwner ref = %+v (err %v), want part two's facts", owned, err)
+	}
+	tr := putTrack(t, st, lib.ID, trackSpec{path: filepath.Join(root, "a.flac"), essence: "et", content: "ct-1",
+		title: "T", artist: "X", album: "Al", durationMS: 500})
+	members, err := st.EntityMemberFiles(ctx, model.MergeAlbum, entityPIDByName(t, st, "album", "title", "Al"))
+	if err != nil || len(members) != 1 || members[0].FilePID != tr.FilePID || members[0].Size != 4 || members[0].DurationMS != 500 {
+		t.Errorf("EntityMemberFiles = %+v (err %v), want the track's file with its facts", members, err)
 	}
 }

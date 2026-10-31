@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
 
@@ -311,5 +313,49 @@ func TestDBVerifyFixReplacesADamagedThumbFile(t *testing.T) {
 	}
 	if data := verifyData(t, db, root); data["thumbnailsDamaged"] != false {
 		t.Errorf("db verify after the fix = %v, want a sound cache", data)
+	}
+}
+
+// TestDBVerifyFixSaysCursorsMoveOnlyWhenAKeyDid: the fix's note to re-page open cursors and
+// its sortKeysRewritten count come from the sort keys it moved, so a sort spelling it
+// repairs under a key that stays put leaves both quiet.
+func TestDBVerifyFixSaysCursorsMoveOnlyWhenAKeyDid(t *testing.T) {
+	for _, tc := range []struct {
+		name, seed string
+		moved      int
+	}{
+		{"spelling only", "UPDATE album SET title_sort = 'stale'", 0},
+		{"spelling and key", "UPDATE album SET title_sort = 'stale', sort_key = '" + model.SortKey("stale") + "'", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, root, _ := creditCLIFixture(t)
+			seed := func() {
+				t.Helper()
+				raw, err := sql.Open("sqlite", "file:"+db)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer raw.Close()
+				if _, err := raw.Exec(tc.seed); err != nil {
+					t.Fatalf("break the spelling by hand: %v", err)
+				}
+			}
+			seed()
+			text, err := runCLIText(t, db, root, "db", "verify", "--fix")
+			if err != nil {
+				t.Fatalf("db verify --fix: %v (%s)", err, text)
+			}
+			if strings.Contains(text, "re-page") != (tc.moved > 0) ||
+				!strings.Contains(text, fmt.Sprintf("sort keys rewritten:      %d\n", tc.moved)) {
+				t.Errorf("text = %q, want %d sort keys rewritten and the cursor note only for a moved key", text, tc.moved)
+			}
+			seed()
+			data := verifyData(t, db, root, "--fix")
+			moved, _ := data["sortKeysRewritten"].(float64)
+			refreshed, _ := data["refreshed"].(map[string]any)
+			if int(moved) != tc.moved || refreshed["sortSpellings"] != float64(1) || refreshed["sortSpellingKeys"] != float64(tc.moved) {
+				t.Errorf("db verify --fix = %v, want one spelling rewritten and %d keys moved", data, tc.moved)
+			}
+		})
 	}
 }

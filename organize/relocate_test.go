@@ -206,7 +206,7 @@ func TestExecuteCarriesCoversWhenCancelled(t *testing.T) {
 			},
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: name,
-				SortKey: model.SortKey(name), IdentityKey: "essence:e-" + name,
+				IdentityKey: "essence:e-" + name,
 			},
 			Track: model.Track{Artist: "A", AlbumArtist: "A", Album: "Al", TrackNo: i + 1},
 		})
@@ -285,7 +285,7 @@ func TestExecuteTakesSharedLyricsWithTheLastFile(t *testing.T) {
 				Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
 				ContentHash: "c-" + name, EssenceHash: "e-" + name, ScanState: model.ScanIndexed},
 			Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: name,
-				SortKey: model.SortKey(name), IdentityKey: "essence:e-" + name},
+				IdentityKey: "essence:e-" + name},
 			Track: model.Track{Artist: "A", AlbumArtist: "A", Album: name, TrackNo: i + 1},
 		})
 		if err != nil {
@@ -331,7 +331,7 @@ func TestParkRecordsItsPathBelowTheActionsRoot(t *testing.T) {
 		File: model.File{Path: []byte(src), DisplayPath: src, RelPath: []byte(filepath.Join("Book", "01.mp3")),
 			Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
 			ContentHash: "c-1", EssenceHash: "e-1", ScanState: model.ScanIndexed},
-		Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "One", SortKey: model.SortKey("One"), IdentityKey: "essence:e-1"},
+		Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "One", IdentityKey: "essence:e-1"},
 		Track: model.Track{Artist: "A", AlbumArtist: "A", Album: "Book", TrackNo: 1},
 	})
 	if err != nil {

@@ -246,7 +246,7 @@ func TestItemsByContentHash(t *testing.T) {
 		vt.Tracks = append(vt.Tracks, model.VirtualTrack{
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: title,
-				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey("ripe1", n, start),
+				IdentityKey: identity.VirtualTrackKey("ripe1", n, start),
 			},
 			Track:       model.Track{Artist: "Rip Artist", Album: "Rip Album", TrackNo: n},
 			StartFrames: start,

@@ -268,7 +268,7 @@ func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, before c
 	seen := make(map[int64]bool, len(e.clean))
 	resolved := make([]string, 0, len(e.clean))
 	for _, name := range e.clean {
-		aid, err := resolveArtist(ctx, tx, name, "")
+		aid, err := resolveArtist(ctx, tx, name, "", affected)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

@@ -18,28 +18,35 @@ import (
 // has to follow the column: the entity links, the search row, the item delta, and the
 // provenance row, which would otherwise describe a value the item no longer holds.
 
-// scanFields are the item columns a track scan put writes. artist_sort has no edit
-// surface of its own, but a put that changes only it still changes the item.
+// scanFields are the item columns a track scan put writes. artist_sort and
+// album_artist_sort have no edit surface of their own, but a put that changes only one
+// still changes the item.
 var scanFields = []string{
-	"title", "artist", "artist_sort", "album", "album_artist", "composer", "composer_sort",
-	"comment", "genre", "year", "track_no", "track_total", "disc_no", "disc_total", "bpm",
-	"isrc", "mbid", "compilation",
+	"title", "title_sort", "artist", "artist_sort", "album", "album_sort", "album_artist", "album_artist_sort",
+	"composer", "composer_sort", "comment", "genre", "year", "track_no", "track_total", "disc_no", "disc_total",
+	"bpm", "isrc", "mbid", "compilation",
 }
 
 // scanFieldValue reads one scanFields column off the values a put writes, as the string
 // the comparison uses.
-func scanFieldValue(field, title string, tr model.Track) string {
+func scanFieldValue(field string, it itemTitle, tr model.Track) string {
 	switch field {
 	case "title":
-		return title
+		return it.title
+	case "title_sort":
+		return it.sort
 	case "artist":
 		return tr.Artist
 	case "artist_sort":
 		return tr.ArtistSort
 	case "album":
 		return tr.Album
+	case "album_sort":
+		return tr.AlbumSort
 	case "album_artist":
 		return tr.AlbumArtist
+	case "album_artist_sort":
+		return tr.AlbumArtistSort
 	case "composer":
 		return tr.Composer
 	case "composer_sort":
@@ -104,7 +111,7 @@ func rederivableRowsTx(ctx context.Context, tx *sql.Tx, itemID int64, preserveLo
 // rederivedTrackTx works out which fields a track put re-derives over an existing item,
 // reading the stored columns before upsertTrack replaces them. It returns those fields
 // and the provenance rows they were judged against.
-func rederivedTrackTx(ctx context.Context, tx *sql.Tx, itemID int64, priorTitle, title string, tr model.Track, preserveLocks bool, known *scanPrior) ([]string, map[string]rederivable, error) {
+func rederivedTrackTx(ctx context.Context, tx *sql.Tx, itemID int64, priorTitle, title itemTitle, tr model.Track, preserveLocks bool, known *scanPrior) ([]string, map[string]rederivable, error) {
 	known = known.priorFor(itemID)
 	var prior model.Track
 	if known != nil && known.track != nil {
@@ -134,7 +141,7 @@ func rederivedTrackTx(ctx context.Context, tx *sql.Tx, itemID int64, priorTitle,
 // rederivedFields lists the columns a put re-derives: each one whose stored value the put
 // replaces, and each one a provenance row describes with a value that does not reproduce
 // what the put writes (a stale row an older scan left behind).
-func rederivedFields(priorTitle string, prior model.Track, rows map[string]rederivable, title string, tr model.Track) []string {
+func rederivedFields(priorTitle itemTitle, prior model.Track, rows map[string]rederivable, title itemTitle, tr model.Track) []string {
 	set := map[string]bool{}
 	for _, f := range scanFields {
 		if scanFieldValue(f, priorTitle, prior) != scanFieldValue(f, title, tr) {
@@ -153,10 +160,12 @@ func rederivedFields(priorTitle string, prior model.Track, rows map[string]reder
 // its value, applied the way an edit applies it, yields what the put writes. A credit row
 // holds the "; "-joined list, which syncCreditDenormTx writes to the column as the artist
 // display or verbatim as the composer. col is empty for a row no track column carries.
-func rowReproduces(field, value, title string, tr model.Track) (col string, ok bool) {
+func rowReproduces(field, value string, title itemTitle, tr model.Track) (col string, ok bool) {
 	switch field {
 	case "title":
-		return "title", value == title
+		return "title", value == title.title
+	case "title_sort":
+		return "title_sort", value == title.sort
 	case model.CreditField(model.RoleArtist):
 		return "artist", strings.Join(strings.Split(value, "; "), ", ") == tr.Artist
 	case model.CreditField(model.RoleComposer):

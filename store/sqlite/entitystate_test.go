@@ -558,3 +558,67 @@ func TestEntityStateRejectsSeries(t *testing.T) {
 		t.Errorf("starred series: got %v, want CodeInvalid", err)
 	}
 }
+
+// TestRatedEntitiesOrdersByRatingThenRecency: a user's rated entities of one kind come
+// highest rating first, ties by the later rating change, a rating of 0 counting as rated;
+// an entity starred and never rated is left out, as are another user's ratings, and
+// Starred is true only for an entity the user starred too.
+func TestRatedEntitiesOrdersByRatingThenRecency(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pids := map[string]model.PID{}
+	for i, title := range []string{"Top", "TieOld", "TieNew", "Zero", "StarOnly", "Bobs"} {
+		n := string(rune('a' + i))
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: "T" + n, artist: "A" + n, albumArt: "A" + n, album: title})
+		pids[title] = model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", title))
+	}
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := func(v int64) *int64 { return &v }
+	rate := func(user model.PID, album string, r int, at int64) {
+		t.Helper()
+		if _, err := st.SetEntityRating(ctx, user, model.MergeAlbum, pids[album], &r, ns(at)); err != nil {
+			t.Fatalf("rate %s: %v", album, err)
+		}
+	}
+	rate("", "Top", 100, 10)
+	rate("", "TieOld", 60, 20)
+	rate("", "TieNew", 60, 30)
+	rate("", "Zero", 0, 40)
+	rate(bob.PID, "Bobs", 90, 50)
+	for _, album := range []string{"StarOnly", "TieNew"} {
+		if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, pids[album], true, ns(60)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.RatedEntities(ctx, "", model.MergeAlbum)
+	if err != nil {
+		t.Fatalf("rated: %v", err)
+	}
+	want := []struct {
+		album   string
+		rating  int
+		starred bool
+	}{{"Top", 100, false}, {"TieNew", 60, true}, {"TieOld", 60, false}, {"Zero", 0, false}}
+	if len(got) != len(want) {
+		t.Fatalf("rated = %+v, want %d entries", got, len(want))
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.EntityPID != pids[w.album] || !g.HasRating || g.Rating != w.rating || g.Starred != w.starred ||
+			g.Kind != model.MergeAlbum || g.UpdatedAt == 0 {
+			t.Errorf("rated[%d] = %+v, want %s rated %d starred %v", i, g, w.album, w.rating, w.starred)
+		}
+	}
+	if bobs, err := st.RatedEntities(ctx, bob.PID, model.MergeAlbum); err != nil || len(bobs) != 1 || bobs[0].EntityPID != pids["Bobs"] {
+		t.Errorf("bob's rated = %+v (err %v), want his one album", bobs, err)
+	}
+	if _, err := st.RatedEntities(ctx, "", model.MergeEntity("series")); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("rated series = %v, want CodeInvalid", err)
+	}
+}

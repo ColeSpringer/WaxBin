@@ -58,45 +58,109 @@ const searchDisplayJoins = `
 		LEFT JOIN artist art ON art.id = t.artist_id
 		LEFT JOIN album al ON al.id = t.album_id`
 
-// searchNarrow returns the fragment narrowing matched items (the pi alias) to the
-// given states and libraries, plus its bind args. It is spliced directly after a
-// caller's own `JOIN playable_item pi ON ...` line, because the two rungs join pi
-// on different columns and disagree about whether the join is wanted when nothing
-// narrows at all. For libIDs=[7] and states=[present remote] it returns:
+// searchScope is what narrows a search's matched items: the libraries their files sit
+// in, their states, and for an episode its show. shows nil keeps every show's episodes;
+// an empty non-nil shows keeps none.
+type searchScope struct {
+	libIDs []int64
+	states []model.ItemState
+	shows  []int64
+}
+
+// searchNarrow returns the fragment narrowing matched items (the pi alias) to a scope,
+// plus its bind args. It is spliced directly after a caller's own `JOIN playable_item pi
+// ON ...` line, because the two rungs join pi on different columns and disagree about
+// whether the join is wanted when nothing narrows at all. For libIDs=[7],
+// states=[present remote] and shows=[3] it returns:
 //
 //	` AND pi.state IN (?,?) AND pi.id IN (SELECT spf.item_id FROM file sf
-//		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN (?))`
+//		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN (?))
+//		AND (pi.kind <> 'episode' OR pi.id IN (SELECT se.item_id FROM episode se
+//		WHERE se.podcast_id IN (SELECT value FROM json_each(?))))`
 //
-// Both narrowings ride the pi join's ON clause. pi is INNER-joined in both rungs, so ON
+// Every narrowing rides the pi join's ON clause. pi is INNER-joined in both rungs, so ON
 // and WHERE are equivalent here, and keeping them in one contiguous fragment is what
 // makes the bind order fall out of fragment order.
 //
 // An item counts in a library when any of its files lives there, its alternates'
 // included, so a host scoping by library finds it wherever it can serve a file. One with
 // no file at all (an undownloaded episode) drops out of a scoped search. The membership
-// subquery seeks file_library once. Either half being empty contributes nothing.
-func searchNarrow(libIDs []int64, states []model.ItemState) (string, []any) {
-	if len(libIDs) == 0 && len(states) == 0 {
+// subquery seeks file_library once, and the show list, bound as one JSON array so a
+// caller's list of any length runs one statement, seeks episode_podcast. A part left
+// empty contributes nothing, except an empty non-nil show list, which keeps every
+// episode out.
+func searchNarrow(sc searchScope) (string, []any) {
+	if len(sc.libIDs) == 0 && len(sc.states) == 0 && sc.shows == nil {
 		return "", nil
 	}
 	// Exact capacity so every caller's append reallocates rather than writing into
 	// a shared backing array.
-	args := make([]any, 0, len(states)+len(libIDs))
+	n := len(sc.states) + len(sc.libIDs)
+	if len(sc.shows) > 0 {
+		n++
+	}
+	args := make([]any, 0, n)
 	frag := ""
-	if len(states) > 0 { // placeholders(0) is "()", and IN () is a syntax error
-		frag += ` AND pi.state IN ` + placeholders(len(states))
-		for _, st := range states {
+	if len(sc.states) > 0 { // placeholders(0) is "()", and IN () is a syntax error
+		frag += ` AND pi.state IN ` + placeholders(len(sc.states))
+		for _, st := range sc.states {
 			args = append(args, string(st))
 		}
 	}
-	if len(libIDs) > 0 {
+	if len(sc.libIDs) > 0 {
 		frag += ` AND pi.id IN (SELECT spf.item_id FROM file sf
-		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN ` + placeholders(len(libIDs)) + `)`
-		for _, id := range libIDs {
+		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN ` + placeholders(len(sc.libIDs)) + `)`
+		for _, id := range sc.libIDs {
 			args = append(args, id)
 		}
 	}
+	switch {
+	case sc.shows == nil:
+	case len(sc.shows) == 0:
+		frag += ` AND pi.kind <> 'episode'`
+	default:
+		frag += ` AND (pi.kind <> 'episode' OR pi.id IN (SELECT se.item_id FROM episode se
+		WHERE se.podcast_id IN ` + inArray + `))`
+		args = append(args, idArray(sc.shows))
+	}
 	return frag, args
+}
+
+// podcastIDsByPIDs resolves a show list to podcast ids in one statement, keeping a nil
+// list nil and an empty one empty, since the two narrow differently. An unknown pid is
+// CodeNotFound.
+func (s *Store) podcastIDsByPIDs(ctx context.Context, pids []model.PID, op string) ([]int64, error) {
+	if pids == nil {
+		return nil, nil
+	}
+	ids := make(map[model.PID]int64, len(pids))
+	if len(pids) > 0 {
+		rows, err := s.rstmts.queryContext(ctx, s.rdb(), "SELECT pid, id FROM podcast WHERE pid IN "+inArray, pidArray(pids))
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var pid string
+			var id int64
+			if err := rows.Scan(&pid, &id); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			ids[model.PID(pid)] = id
+		}
+		if err := rows.Err(); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	out := make([]int64, 0, len(pids))
+	for _, pid := range pids {
+		id, ok := ids[pid]
+		if !ok {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such podcast: "+string(pid))
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 // checkItemStates rejects an unknown item state, failing closed on a typo the way
@@ -136,9 +200,9 @@ func checkItemStates(states []model.ItemState, op string) error {
 // row exactly would cost a second pass over the pool for a one-row nicety. The
 // narrowing sits inside the wrap, so a match the caller excluded by library or by
 // state never consumes the pool.
-func searchStmt(match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState) (string, []any, int) {
+func searchStmt(match string, limit, maxCandidates int, sc searchScope) (string, []any, int) {
 	scanCap := searchScanCap(limit, maxCandidates)
-	narrow, narrowArgs := searchNarrow(libIDs, states)
+	narrow, narrowArgs := searchNarrow(sc)
 
 	if maxCandidates <= 0 {
 		stmt := `SELECT ` + searchDisplayCols + `, ` + searchBM25 + ` AS score
@@ -192,9 +256,9 @@ func searchScanCap(limit, maxCandidates int) int {
 // by how each name meets the query (searchTier), first-seen order breaking ties. A
 // query of symbols alone, which has no word to match, is looked up by sort key
 // instead (searchItemsBySortKey); an empty one returns an empty result, not an error.
-// opt.MaxCandidates bounds the match pool, while opt.Libraries and opt.States narrow
-// it and the entity lookups alike (see read.SearchOptions for all three contracts),
-// and an unknown library or state is refused whatever the query holds.
+// opt.MaxCandidates bounds the match pool, while opt.Libraries, opt.States and
+// opt.Podcasts narrow it and the entity lookups alike (see read.SearchOptions for their
+// contracts), and an unknown library, state or show is refused whatever the query holds.
 func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOptions) (*read.SearchResult, error) {
 	const op = "store.Search"
 	res := &read.SearchResult{Query: queryStr}
@@ -209,19 +273,24 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	if err := checkItemStates(opt.States, op); err != nil {
 		return nil, err
 	}
+	shows, err := s.podcastIDsByPIDs(ctx, opt.Podcasts, op)
+	if err != nil {
+		return nil, err
+	}
+	sc := searchScope{libIDs: libIDs, states: opt.States, shows: shows}
 	g := newSearchGroups(res, limit, queryStr)
 	match := ftsMatchQuery(queryStr)
 	if match == "" {
 		if g.q.sort == "" {
 			return res, nil
 		}
-		if err := s.searchItemsBySortKey(ctx, g.q.sort, limit, opt.MaxCandidates, libIDs, opt.States, g); err != nil {
+		if err := s.searchItemsBySortKey(ctx, g.q.sort, limit, opt.MaxCandidates, sc, g); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-	} else if err := s.searchMatches(ctx, match, limit, opt.MaxCandidates, libIDs, opt.States, g); err != nil {
+	} else if err := s.searchMatches(ctx, match, limit, opt.MaxCandidates, sc, g); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if err := s.searchEntitiesByName(ctx, queryStr, limit, libIDs, opt.States, g); err != nil {
+	if err := s.searchEntitiesByName(ctx, queryStr, limit, sc, g); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	g.rankEntities()
@@ -230,7 +299,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	// a title match outranks a body match. Episodes already surfaced by metadata are
 	// skipped to avoid duplicates.
 	if match != "" && len(res.Episodes) < limit {
-		if err := s.searchTranscripts(ctx, match, limit, opt.MaxCandidates, libIDs, opt.States, g.episodeSeen, res); err != nil {
+		if err := s.searchTranscripts(ctx, match, limit, opt.MaxCandidates, sc, g.episodeSeen, res); err != nil {
 			return nil, err
 		}
 	}
@@ -241,8 +310,8 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 // their cap so a full result set signals truncation (a spent candidate pool or a
 // spent ranked-row scan alike) rather than silently dropping matches. score is
 // tie-broken by pid so equal-score rows come back in a stable, deterministic order.
-func (s *Store) searchMatches(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, g *searchGroups) error {
-	stmt, args, cap := searchStmt(match, limit, maxCandidates, libIDs, states)
+func (s *Store) searchMatches(ctx context.Context, match string, limit, maxCandidates int, sc searchScope, g *searchGroups) error {
+	stmt, args, cap := searchStmt(match, limit, maxCandidates, sc)
 	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, args...)
 	if err != nil {
 		return err
@@ -397,14 +466,15 @@ func searchTier(name, q nameKeys) int {
 }
 
 // searchItemsBySortKey answers a query of symbols alone ("$", "÷", "!!!"), which
-// tokenizes to nothing, by looking its sort key up among item titles and track artists,
+// tokenizes to nothing, by looking its sort key up among item titles (their title_key,
+// since a title spelling moves the item's sort_key) and track artists,
 // under the same narrowing. An artist named without a letter or digit has no entity of
 // its own, so a track's artist display is read for it, whole or as one name of a
 // comma-joined list, as well as its sort, which an artist sort tag can spell otherwise
 // ("Chk Chk Chk" for "!!!"). Newest first, it reads one row past its cap as the ranked
 // search does, so a full result sets Truncated, and a smaller candidate cap is the cap.
-func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, g *searchGroups) error {
-	narrow, narrowArgs := searchNarrow(libIDs, states)
+func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, maxCandidates int, sc searchScope, g *searchGroups) error {
+	narrow, narrowArgs := searchNarrow(sc)
 	cap := searchScanCap(limit, maxCandidates)
 	rows, err := s.rstmts.queryContext(ctx, s.rdb(), itemsBySortKeyQ(narrow, cap+1), append([]any{key}, narrowArgs...)...)
 	if err != nil {
@@ -430,7 +500,7 @@ func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, max
 // only a query of symbols alone pays.
 func itemsBySortKeyQ(narrow string, fetch int) string {
 	return `SELECT ` + searchDisplayCols + `, 0.0
-		FROM (SELECT id FROM playable_item WHERE sort_key = ?1
+		FROM (SELECT id FROM playable_item WHERE title_key = ?1
 			UNION SELECT item_id FROM track WHERE artist_sort_key = ?1
 			UNION SELECT item_id FROM track WHERE instr(artist, ?1) > 0
 				AND instr(', ' || artist || ', ', ', ' || ?1 || ', ') > 0) m
@@ -440,12 +510,13 @@ func itemsBySortKeyQ(narrow string, fetch int) string {
 
 // searchEntitiesByName adds the artists and albums whose own name is the query to the
 // gathered groups, under the same narrowing: an artist by its match key with the
-// spaces dropped (artistLookupKeys), or by its sort key, and an album by its sort key
-// (an album keeps no match key of its title). A query of symbols alone looks up albums
+// spaces dropped (artistLookupKeys), or by its name's sort key (name_key), and an album
+// by its title's (title_key; an album keeps no match key of its title). The name keys
+// are compared, not the sort keys, which a curated sort or a spelling moves. A query of symbols alone looks up albums
 // only, since such a name has no match key and never becomes an artist; an album gets
 // one when an MBID keys it. Every lookup is an equality on an indexed column.
-func (s *Store) searchEntitiesByName(ctx context.Context, query string, limit int, libIDs []int64, states []model.ItemState, g *searchGroups) error {
-	narrow, narrowArgs := searchNarrow(libIDs, states)
+func (s *Store) searchEntitiesByName(ctx context.Context, query string, limit int, sc searchScope, g *searchGroups) error {
+	narrow, narrowArgs := searchNarrow(sc)
 	if keys := artistLookupKeys(query); len(keys) > 0 {
 		args := append(anySlice(keys), g.q.sort)
 		artists, err := s.searchEntities(ctx, artistByNameQ(narrow, len(keys), limit),
@@ -494,12 +565,12 @@ func artistLookupKeys(query string) []string {
 
 // artistByNameQ looks artists up by match key with the spaces dropped (the
 // artist_joined_key index), against keys bound values, which equal match keys also
-// pass, and by sort key, keeping one credited on, or the album artist of, a track the
+// pass, and by name key, keeping one credited on, or the album artist of, a track the
 // narrowing keeps, at most limit of them. narrow is spliced twice, so its args bind
 // twice.
 func artistByNameQ(narrow string, keys, limit int) string {
 	return `SELECT art.pid, art.name, '' FROM artist art
-		WHERE (replace(art.match_key, ' ', '') IN ` + placeholders(keys) + ` OR art.sort_key = ?)
+		WHERE (replace(art.match_key, ' ', '') IN ` + placeholders(keys) + ` OR art.name_key = ?)
 		AND (EXISTS (SELECT 1 FROM item_contributor ic JOIN track t ON t.item_id = ic.item_id
 			JOIN playable_item pi ON pi.id = ic.item_id` + narrow + ` WHERE ic.artist_id = art.id)
 		OR EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
@@ -507,11 +578,11 @@ func artistByNameQ(narrow string, keys, limit int) string {
 		ORDER BY art.pid LIMIT ` + strconv.Itoa(limit)
 }
 
-// albumByNameQ looks albums up by sort key, keeping at most limit that hold a track the
+// albumByNameQ looks albums up by title key, keeping at most limit that hold a track the
 // narrowing keeps.
 func albumByNameQ(narrow string, limit int) string {
 	return `SELECT al.pid, al.title, ` + albumSubtitle + ` FROM album al
-		WHERE al.sort_key = ? AND EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
+		WHERE al.title_key = ? AND EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
 			WHERE t.album_id = al.id)
 		ORDER BY al.pid LIMIT ` + strconv.Itoa(limit)
 }
@@ -546,16 +617,16 @@ func (s *Store) searchEntities(ctx context.Context, q string, args ...any) ([]re
 // that group holds fewer than limit, which means every episode the metadata rows saw is
 // in it, and an episode has one transcript row, so limit rows always hold enough unseen
 // ones to fill the group; a fixed fetch also keeps the statement one text for the cache.
-// It honors every search knob:
-// a library scope keeps a transcript hit from leaking an episode whose file lives outside
-// the scope (an undownloaded one included), a state narrowing does the same for an
-// episode the caller excluded, and a candidate cap bounds the ranked pool with the same
-// rowid-DESC recency bias (transcript_fts rowids follow transcript insertion order).
+// It honors every search knob: a library scope keeps a transcript hit from leaking an
+// episode whose file lives outside the scope (an undownloaded one included), a state
+// narrowing or a show list does the same for an episode the caller excluded, and a
+// candidate cap bounds the ranked pool with the same rowid-DESC recency bias
+// (transcript_fts rowids follow transcript insertion order).
 // Exhausting the transcript pool does not set Truncated; the small Episodes group cap
 // already bounds what a fuller pool could add.
-func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, seen map[model.PID]bool, res *read.SearchResult) error {
+func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxCandidates int, sc searchScope, seen map[model.PID]bool, res *read.SearchResult) error {
 	const op = "store.Search"
-	narrow, narrowArgs := searchNarrow(libIDs, states)
+	narrow, narrowArgs := searchNarrow(sc)
 	stmt := transcriptsStmt(narrow, maxCandidates, limit)
 	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, append(narrowArgs, match)...)
 	if err != nil {

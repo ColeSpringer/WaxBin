@@ -43,8 +43,10 @@ type TagEdit struct {
 // cannot drift apart.
 var fieldTagKeys = map[string]string{
 	"title":         "TITLE",
+	"title_sort":    "TITLESORT",
 	"artist":        "ARTIST",
 	"album":         "ALBUM",
+	"album_sort":    "ALBUMSORT",
 	"album_artist":  "ALBUMARTIST",
 	"composer":      "COMPOSER",
 	"composer_sort": "COMPOSERSORT",
@@ -110,32 +112,46 @@ func AcquisitionTagEdits(sourceURL, sourceID string, acquiredAtNS int64) []TagEd
 	return edits
 }
 
-// DerivedSortPair names a display field whose edit regenerates a stored sort key:
-// the catalog sort field that can carry an explicit value or a lock (empty for
-// artist, whose sort has no edit surface of its own) and the on-disk tag a scan's
-// derivation reads. The write-back uses it to clear the stale sort tag beside a
-// display-name edit; a tag left behind would feed the next derivation and undo
-// the regenerated sort. See Library.writeBackFields.
+// DerivedSortPair names a display field whose edit drops the sort spelling beside it:
+// the catalog sort field that can carry an explicit value or a lock (empty for the artist
+// and the album artist, whose spellings have no edit surface of their own) and the
+// on-disk tag a scan reads the spelling from. The write-back uses it to clear the stale
+// sort tag beside a display-name edit; a tag left behind would feed the next scan and
+// bring back the spelling of the name the edit replaced. See Library.writeBackFields.
 type DerivedSortPair struct {
 	Field     string
 	SortField string
 	TagKey    string
 }
 
-// derivedSortPairs is ordered so the produced tag edits are deterministic.
-var derivedSortPairs = []DerivedSortPair{
-	{Field: "title", SortField: "", TagKey: string(tag.TitleSort)},
-	{Field: "artist", SortField: "", TagKey: string(tag.ArtistSort)},
-	{Field: "author", SortField: "author_sort", TagKey: string(tag.AlbumArtistSort)},
-	// A book's author sort is read from ARTISTSORT where ALBUMARTISTSORT says none.
-	{Field: "author", SortField: "author_sort", TagKey: string(tag.ArtistSort)},
-	{Field: "composer", SortField: "composer_sort", TagKey: string(tag.ComposerSort)},
-}
+// The pairs per kind, each ordered so the produced tag edits are deterministic. A book's
+// title is its album tag, so its spelling is ALBUMSORT, and its author is its album
+// artist, whose sort is read from ARTISTSORT where ALBUMARTISTSORT says none.
+var (
+	trackSortPairs = []DerivedSortPair{
+		{Field: "title", SortField: "title_sort", TagKey: string(tag.TitleSort)},
+		{Field: "artist", SortField: "", TagKey: string(tag.ArtistSort)},
+		{Field: "album", SortField: "album_sort", TagKey: string(tag.AlbumSort)},
+		{Field: "album_artist", SortField: "", TagKey: string(tag.AlbumArtistSort)},
+		{Field: "composer", SortField: "composer_sort", TagKey: string(tag.ComposerSort)},
+	}
+	bookSortPairs = []DerivedSortPair{
+		{Field: "title", SortField: "title_sort", TagKey: string(tag.AlbumSort)},
+		{Field: "author", SortField: "author_sort", TagKey: string(tag.AlbumArtistSort)},
+		{Field: "author", SortField: "author_sort", TagKey: string(tag.ArtistSort)},
+	}
+)
 
-// DerivedSortPairs returns the display-field to derived-sort correspondences, in
-// a fixed order.
-func DerivedSortPairs() []DerivedSortPair {
-	return append([]DerivedSortPair(nil), derivedSortPairs...)
+// DerivedSortPairs returns a kind's display-field to sort-spelling correspondences, in a
+// fixed order; none for a kind with no on-disk write-back.
+func DerivedSortPairs(kind model.Kind) []DerivedSortPair {
+	switch kind {
+	case model.KindTrack:
+		return slices.Clone(trackSortPairs)
+	case model.KindBook:
+		return slices.Clone(bookSortPairs)
+	}
+	return nil
 }
 
 // roleTagKeys maps a contributor role to its canonical WaxLabel tag key for on-disk
@@ -214,6 +230,7 @@ func CreditTagValues(key string, names []string) []string {
 // (BookFieldClearKeys).
 var bookFieldTagKeys = map[string][]string{
 	"title":       {string(tag.Album)},
+	"title_sort":  {string(tag.AlbumSort)},
 	"author":      {string(tag.AlbumArtist)},
 	"author_sort": {string(tag.AlbumArtistSort)},
 	"narrator":    {string(tag.Narrator), string(tag.Composer)},
@@ -237,16 +254,19 @@ func BookFieldTagKeys(field string) ([]string, bool) {
 }
 
 // BookFieldClearKeys returns the keys a clear of a book field must empty besides the ones
-// it writes. The reader folds DESCRIPTION and LONGDESCRIPTION into one description, and
-// reads the author sort from ARTISTSORT where ALBUMARTISTSORT is empty, so clearing the
-// first key alone lets the other read back as the old value; a set leaves the other alone,
-// since the key it writes is the one read first.
+// it writes. The reader folds DESCRIPTION and LONGDESCRIPTION into one description, reads
+// the author sort from ARTISTSORT where ALBUMARTISTSORT is empty, and reads the title
+// spelling of a book with no album from TITLESORT where ALBUMSORT is empty, so clearing
+// the first key alone lets the other read back as the old value; a set leaves the other
+// alone, since the key it writes is the one read first.
 func BookFieldClearKeys(field string) []string {
 	switch field {
 	case "description":
 		return []string{string(tag.LongDescription)}
 	case "author_sort":
 		return []string{string(tag.ArtistSort)}
+	case "title_sort":
+		return []string{string(tag.TitleSort)}
 	}
 	return nil
 }

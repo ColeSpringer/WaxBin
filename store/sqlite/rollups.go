@@ -21,37 +21,59 @@ import (
 
 // affectedRollups accumulates the entity ids whose rollups a write must refresh, and
 // the albums whose maintained year it must (refreshAlbumYearsTx). deferred marks them
-// dirty instead (PutScannedTrackInput.DeferRollups).
+// dirty instead (PutScannedTrackInput.DeferRollups). fresh holds, by table, the albums,
+// release groups and artists the write created, which are keyed from their members
+// whether or not it defers.
 type affectedRollups struct {
 	artists  map[int64]bool
 	rgs      map[int64]bool
 	genres   map[int64]bool
 	albums   map[int64]bool
+	fresh    map[string][]int64
 	deferred bool
 }
 
 func newAffectedRollups() *affectedRollups {
 	return &affectedRollups{artists: map[int64]bool{}, rgs: map[int64]bool{}, genres: map[int64]bool{},
-		albums: map[int64]bool{}}
+		albums: map[int64]bool{}, fresh: map[string][]int64{}}
+}
+
+// created records an album, release group or artist the write inserted, which is as
+// affected as one it touched.
+func (a *affectedRollups) created(table string, id int64) {
+	a.fresh[table] = append(a.fresh[table], id)
+	switch table {
+	case "artist":
+		a.artists[id] = true
+	case "release_group":
+		a.rgs[id] = true
+	case "album":
+		a.albums[id] = true
+	}
 }
 
 func (a *affectedRollups) empty() bool {
 	return len(a.artists) == 0 && len(a.rgs) == 0 && len(a.genres) == 0 && len(a.albums) == 0
 }
 
-// collect records the item's current artist, album artist, album, release group, and
-// genres as affected. Call it before and after relinks, and before orphan
-// deletes, so every entity that gains or loses the track is refreshed.
+// collect records the item's current artist, album artist, album, release group, a
+// book's author, and genres as affected. Call it before and after relinks, and before
+// orphan deletes, so every entity that gains or loses the item is refreshed.
 func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	var artistID, albumArtistID, albumID, rgID sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT t.artist_id, t.album_artist_id, t.album_id, al.release_group_id
-		FROM track t LEFT JOIN album al ON al.id = t.album_id WHERE t.item_id = ?`, itemID).
-		Scan(&artistID, &albumArtistID, &albumID, &rgID)
+	var artistID, albumArtistID, albumID, rgID, authorID sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT t.artist_id, t.album_artist_id, t.album_id, al.release_group_id, bk.author_id
+		FROM playable_item pi LEFT JOIN track t ON t.item_id = pi.id LEFT JOIN album al ON al.id = t.album_id
+		LEFT JOIN book bk ON bk.item_id = pi.id WHERE pi.id = ?`, itemID).
+		Scan(&artistID, &albumArtistID, &albumID, &rgID, &authorID)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
 	if artistID.Valid {
 		a.artists[artistID.Int64] = true
+	}
+	// An author's spelling derives from its books (entityspelling.go).
+	if authorID.Valid {
+		a.artists[authorID.Int64] = true
 	}
 	if albumArtistID.Valid {
 		a.artists[albumArtistID.Int64] = true
@@ -62,6 +84,12 @@ func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64)
 	if rgID.Valid {
 		a.rgs[rgID.Int64] = true
 	}
+	return a.collectGenres(ctx, tx, itemID)
+}
+
+// collectGenres records the item's genres as affected, for a write that moves its genres
+// and nothing the other rollups count.
+func (a *affectedRollups) collectGenres(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	rows, err := tx.QueryContext(ctx, "SELECT genre_id FROM item_genre WHERE item_id = ?", itemID)
 	if err != nil {
 		return err
@@ -78,15 +106,20 @@ func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64)
 }
 
 // collectAlbumOf records the album the item's track sits on as affected, for a write
-// that moves the track's year and nothing the other rollups count.
-func (a *affectedRollups) collectAlbumOf(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	var albumID sql.NullInt64
-	err := tx.QueryRowContext(ctx, "SELECT album_id FROM track WHERE item_id = ?", itemID).Scan(&albumID)
+// that moves the track's year and nothing the other rollups count; with group, its
+// release group too, for a write that moves the track's album spelling.
+func (a *affectedRollups) collectAlbumOf(ctx context.Context, tx *sql.Tx, itemID int64, group bool) error {
+	var albumID, rgID sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT t.album_id, al.release_group_id FROM track t
+		LEFT JOIN album al ON al.id = t.album_id WHERE t.item_id = ?`, itemID).Scan(&albumID, &rgID)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
 	if albumID.Valid {
 		a.albums[albumID.Int64] = true
+	}
+	if group && rgID.Valid {
+		a.rgs[rgID.Int64] = true
 	}
 	return nil
 }
@@ -103,11 +136,19 @@ type rollupKind struct {
 var rollupKinds = []rollupKind{
 	{"artist", func(a *affectedRollups) map[int64]bool { return a.artists },
 		func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error {
-			return refreshRollupSubset(ctx, tx, ids, artistRollupSelect, now)
+			if err := refreshRollupSubset(ctx, tx, ids, artistRollupSelect, now); err != nil {
+				return err
+			}
+			_, _, err := settleSpellingsTx(ctx, tx, artistSpelling, ids)
+			return err
 		}, func(r *model.RollupSettle) *int { return &r.Artists }},
 	{"release_group", func(a *affectedRollups) map[int64]bool { return a.rgs },
 		func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error {
-			return refreshRollupSubset(ctx, tx, ids, releaseGroupRollupSelect, now)
+			if err := refreshRollupSubset(ctx, tx, ids, releaseGroupRollupSelect, now); err != nil {
+				return err
+			}
+			_, _, err := settleSpellingsTx(ctx, tx, releaseGroupSpelling, ids)
+			return err
 		}, func(r *model.RollupSettle) *int { return &r.ReleaseGroups }},
 	{"genre", func(a *affectedRollups) map[int64]bool { return a.genres },
 		func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error {
@@ -115,17 +156,30 @@ var rollupKinds = []rollupKind{
 		}, func(r *model.RollupSettle) *int { return &r.Genres }},
 	{"album", func(a *affectedRollups) map[int64]bool { return a.albums },
 		func(ctx context.Context, tx *sql.Tx, ids []int64, _ int64) error {
-			return refreshAlbumYearsTx(ctx, tx, ids)
+			if err := refreshAlbumYearsTx(ctx, tx, ids); err != nil {
+				return err
+			}
+			_, _, err := settleSpellingsTx(ctx, tx, albumSpelling, ids)
+			return err
 		},
 		func(r *model.RollupSettle) *int { return &r.Albums }},
 }
 
 // maintainRollupsTx recomputes rollups for the affected entities inside the
-// caller's transaction, and the affected albums' years. Each row is deleted and
+// caller's transaction, the affected albums' years, and the derived sort spellings of the
+// affected albums, release groups and artists (entityspelling.go). Each row is deleted and
 // reinserted from a base-table aggregation scoped to its id, so touched entities with
 // zero tracks still get the zero row expected by the consistency check. A deferred set
 // is only recorded in rollup_dirty.
 func maintainRollupsTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, now int64) error {
+	// A new entity takes its spelling from the members it has now, by the rule the settle
+	// applies, rather than keying by its name until a deferred settle. Its create delta
+	// covers the key.
+	for _, sp := range entitySpellings {
+		if _, _, err := refreshSpellingsTx(ctx, tx, sp, aff.fresh[sp.table]); err != nil {
+			return err
+		}
+	}
 	for _, k := range rollupKinds {
 		set := ids(k.of(aff))
 		var err error
@@ -226,8 +280,8 @@ func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, select
 
 // RefreshRollups recomputes every rollup from the base tables in one transaction,
 // plus each book's denormalized total duration and ISBN key, each album's year and each
-// item's release year, and renumbers each static playlist whose positions are not its
-// listing indexes, reporting what it rewrote. Per-write maintenance keeps them current
+// item's release year and each derived sort spelling, and renumbers each static playlist
+// whose positions are not its listing indexes, reporting what it rewrote. Per-write maintenance keeps them current
 // during normal operation; this whole-catalog rebuild repairs drift reported by `db
 // verify`. The book columns, the two years and the playlist positions are not rollup
 // tables, but they are the same kind of maintained value, they are on the same drift
@@ -255,6 +309,9 @@ func (s *Store) RefreshRollups(ctx context.Context) (*model.RefreshReport, error
 			return err
 		}
 		if rep.PlaylistsCompacted, err = compactAllPlaylistsTx(ctx, tx); err != nil {
+			return err
+		}
+		if rep.SortSpellings, rep.SortSpellingKeys, err = refreshAllSpellingsTx(ctx, tx); err != nil {
 			return err
 		}
 		// A WHERE keeps SQLite off its truncate path, which rewrites the root page of an empty
@@ -371,17 +428,23 @@ func chunkSlice[T any](s []T, size int, fn func([]T) error) error {
 // (whole catalog). Each is an upsert that writes a row only when it is missing or its
 // values differ, so a recompute of an unchanged entity writes nothing and the rows it
 // affected are the rows that drifted.
+//
+// Counts and durations are the live members' (liveMembers): the item and its files are
+// reached through pi, which a trashed item does not join. The duration left a trashed
+// member out before the count did, because trash deletes its file row, so it was only an
+// accident that kept it out; a missing member keeps its file row and counts in both.
 const artistRollupSelect = `
 INSERT INTO artist_rollup(artist_id, release_group_count, track_count, total_duration_ms, updated_at)
 SELECT a.id,
        (SELECT COUNT(*) FROM release_group rg WHERE rg.primary_artist_id = a.id),
-       COUNT(DISTINCT t.item_id),
+       COUNT(DISTINCT pi.id),
        COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
        ?
 FROM artist a
-LEFT JOIN track t      ON t.artist_id = a.id
-LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
-LEFT JOIN file f       ON f.id = pf.file_id
+LEFT JOIN track t          ON t.artist_id = a.id
+LEFT JOIN playable_item pi ON pi.id = t.item_id AND pi.state <> 'archived'
+LEFT JOIN item_file pf     ON pf.item_id = pi.id AND pf.role = 'primary'
+LEFT JOIN file f           ON f.id = pf.file_id
 WHERE a.id /*FILTER*/
 GROUP BY a.id
 ON CONFLICT(artist_id) DO UPDATE SET release_group_count = excluded.release_group_count,
@@ -393,14 +456,15 @@ WHERE (release_group_count, track_count, total_duration_ms) <>
 const releaseGroupRollupSelect = `
 INSERT INTO release_group_rollup(release_group_id, track_count, total_duration_ms, updated_at)
 SELECT rg.id,
-       COUNT(DISTINCT t.item_id),
+       COUNT(DISTINCT pi.id),
        COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
        ?
 FROM release_group rg
-LEFT JOIN album al     ON al.release_group_id = rg.id
-LEFT JOIN track t      ON t.album_id = al.id
-LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
-LEFT JOIN file f       ON f.id = pf.file_id
+LEFT JOIN album al         ON al.release_group_id = rg.id
+LEFT JOIN track t          ON t.album_id = al.id
+LEFT JOIN playable_item pi ON pi.id = t.item_id AND pi.state <> 'archived'
+LEFT JOIN item_file pf     ON pf.item_id = pi.id AND pf.role = 'primary'
+LEFT JOIN file f           ON f.id = pf.file_id
 WHERE rg.id /*FILTER*/
 GROUP BY rg.id
 ON CONFLICT(release_group_id) DO UPDATE SET track_count = excluded.track_count,
@@ -417,13 +481,14 @@ WHERE (track_count, total_duration_ms) <> (excluded.track_count, excluded.total_
 const genreRollupSelect = `
 INSERT INTO genre_rollup(genre_id, track_count, total_duration_ms, updated_at)
 SELECT g.id,
-       COUNT(DISTINCT ig.item_id),
+       COUNT(DISTINCT pi.id),
        COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
        ?
 FROM genre g
-LEFT JOIN item_genre ig ON ig.genre_id = g.id
-LEFT JOIN item_file pf  ON pf.item_id = ig.item_id AND pf.role IN ('primary', 'part')
-LEFT JOIN file f        ON f.id = pf.file_id
+LEFT JOIN item_genre ig    ON ig.genre_id = g.id
+LEFT JOIN playable_item pi ON pi.id = ig.item_id AND pi.state <> 'archived'
+LEFT JOIN item_file pf     ON pf.item_id = pi.id AND pf.role IN ('primary', 'part')
+LEFT JOIN file f           ON f.id = pf.file_id
 WHERE g.id /*FILTER*/
 GROUP BY g.id
 ON CONFLICT(genre_id) DO UPDATE SET track_count = excluded.track_count,

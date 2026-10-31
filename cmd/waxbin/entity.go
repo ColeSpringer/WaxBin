@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
@@ -34,14 +37,14 @@ func newEntityCmd(g *globals) *cobra.Command {
 			"`entity rename` is the other verb: those fields never key an entity, while a " +
 			"rename moves the key itself. Renamable types: album, release_group, artist.\n" +
 			"`entity info` reads those three plus genre and series.\n" +
-			"Star-able types (star/rate/state/stars): artist, release_group, album, genre.\n" +
+			"Star-able types (star/rate/state/stars/ratings): artist, release_group, album, genre.\n" +
 			"`entity folds` and `entity unfold` list and forget the keys merges folded into an " +
 			"entity: artist, release_group, album, genre, series.",
 	}
 	cmd.AddCommand(
 		newEntityEditCmd(g), newEntityRenameCmd(g), newEntityShowCmd(g), newEntityInfoCmd(g),
 		newEntityListCmd(g),
-		newEntityStarCmd(g), newEntityRateCmd(g), newEntityStateCmd(g), newEntityStarsCmd(g),
+		newEntityStarCmd(g), newEntityRateCmd(g), newEntityStateCmd(g), newEntityStarsCmd(g), newEntityRatingsCmd(g),
 		newEntityFoldsCmd(g), newEntityUnfoldCmd(g),
 	)
 	return cmd
@@ -661,10 +664,24 @@ func newEntityStateCmd(g *globals) *cobra.Command {
 }
 
 func newEntityStarsCmd(g *globals) *cobra.Command {
+	return newEntityStateListCmd(g, "stars <type>", "List a user's starred entities of a type, most recent first",
+		(*waxbin.Library).StarredEntities)
+}
+
+func newEntityRatingsCmd(g *globals) *cobra.Command {
+	return newEntityStateListCmd(g, "ratings <type>",
+		"List a user's rated entities of a type, highest rating first, then the most recently rated",
+		(*waxbin.Library).RatedEntities)
+}
+
+// newEntityStateListCmd builds a command listing a user's entity states of one type
+// through list.
+func newEntityStateListCmd(g *globals, use, short string,
+	list func(*waxbin.Library, context.Context, model.PID, model.MergeEntity) ([]model.EntityPlayState, error)) *cobra.Command {
 	var user string
 	cmd := &cobra.Command{
-		Use:   "stars <type>",
-		Short: "List a user's starred entities of a type, most recent first",
+		Use:   use,
+		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, err := parseStarEntity(args[0])
@@ -680,7 +697,7 @@ func newEntityStarsCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			states, err := lib.StarredEntities(ctx(cmd), uPID, kind)
+			states, err := list(lib, ctx(cmd), uPID, kind)
 			if err != nil {
 				return err
 			}
@@ -691,15 +708,32 @@ func newEntityStarsCmd(g *globals) *cobra.Command {
 				}
 				return printJSON(cmd, views)
 			}
-			w := out(cmd)
-			for i := range states {
-				fmt.Fprintf(w, "%s\t%s\n", states[i].Kind, states[i].EntityPID)
-			}
+			printEntityStates(out(cmd), states)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&user, "user", "", "user name (default user when omitted)")
 	return cmd
+}
+
+// printEntityStates prints one line per entity: its type and pid, its rating, whether it
+// is starred, and when its state last changed, a dash for what it lacks.
+func printEntityStates(w io.Writer, states []model.EntityPlayState) {
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	for _, st := range states {
+		rating, starred, updated := "-", "-", "-"
+		if st.HasRating {
+			rating = fmt.Sprintf("%d/100", st.Rating)
+		}
+		if st.Starred {
+			starred = "starred"
+		}
+		if st.UpdatedAt != 0 {
+			updated = time.Unix(0, st.UpdatedAt).Format(time.RFC3339)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", st.Kind, st.EntityPID, rating, starred, updated)
+	}
+	_ = tw.Flush()
 }
 
 // entityPlayStateView is the JSON shape for a user's star/rating on an entity. The change
@@ -714,12 +748,14 @@ type entityPlayStateView struct {
 	StarredAt        int64  `json:"starredAt,string,omitempty"`
 	RatingChangedAt  int64  `json:"ratingChangedAt,string,omitempty"`
 	StarredChangedAt int64  `json:"starredChangedAt,string,omitempty"`
+	UpdatedAt        int64  `json:"updatedAt,string,omitempty"`
 }
 
 func toEntityPlayStateView(st *model.EntityPlayState) entityPlayStateView {
 	v := entityPlayStateView{
 		Kind: string(st.Kind), EntityPID: string(st.EntityPID), Starred: st.Starred,
 		StarredAt: st.StarredAt, RatingChangedAt: st.RatingChangedAt, StarredChangedAt: st.StarredChangedAt,
+		UpdatedAt: st.UpdatedAt,
 	}
 	if st.HasRating {
 		r := st.Rating

@@ -21,7 +21,7 @@ func bookInputWithPID(libID int64, path, essence, title, author string, preferre
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Book:             model.Book{Author: author, AuthorSort: model.SortKey(author), Authors: []string{author}},
 		Chapters:         []model.Chapter{{Position: 0, Title: title}},

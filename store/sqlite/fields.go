@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // itemArtistIDExpr / itemAlbumArtistIDExpr resolve an item's effective artist /
@@ -45,6 +46,7 @@ const (
 	albumIDByPIDSub        = "(SELECT albq.id FROM album albq WHERE albq.pid = ?)"
 	releaseGroupIDByPIDSub = "(SELECT rgq.id FROM release_group rgq WHERE rgq.pid = ?)"
 	podcastIDByPIDSub      = "(SELECT podq.id FROM podcast podq WHERE podq.pid = ?)"
+	seriesIDByPIDSub       = "(SELECT srsq.id FROM series srsq WHERE srsq.pid = ?)"
 )
 
 // primaryLibraryFields reads the library field from an item's primary file (alias f in
@@ -111,9 +113,9 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // move updated_at), which is what makes last_progress the ordering key for "where was I".
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
-// text, so a facet drilldown can query by the bucket's EntityPID. There are nine, and
+// text, so a facet drilldown can query by the bucket's EntityPID. There are ten, and
 // they split three ways: artist_pid, album_artist_pid, album_pid, release_group_pid,
-// and podcast_pid are scalar columns lowered on the value side; genre_pid,
+// podcast_pid, and series_pid are scalar columns lowered on the value side; genre_pid,
 // credit_artist_pid, and playlist_pid are set fields, over item_genre,
 // item_contributor, and playlist_item, because those dimensions hold many rows per
 // item (the paragraphs below say why they stay set fields); and library is a member
@@ -123,9 +125,9 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
 // its author, like the artist facet). album_pid and release_group_pid are track-only
-// (NULL for books/episodes), podcast_pid is episode-only, and library matches the
-// library of any of the item's files (none for a fileless item, so `library
-// isMissing` matches undownloaded episodes). release_group_pid reads the album joined by itemJoins, so
+// (NULL for books/episodes), podcast_pid is episode-only, series_pid is NULL but for a
+// book in a series, and library matches the library of any of the item's files (none
+// for a fileless item, so `library isMissing` matches undownloaded episodes). release_group_pid reads the album joined by itemJoins, so
 // it is additionally NULL for a track whose album carries no release group:
 // isMissing there covers all three of no album, no release group, and not a track.
 //
@@ -134,8 +136,9 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // of the comparison. Doing it the other way round, a per-row correlated subquery
 // projecting each item's pid, forced a full scan and one pid lookup per row.
 // Lowering resolves the pid once per query and lets the planner
-// use the id column's index where one exists: podcast_pid seeks episode_podcast and
-// album_pid seeks track_album_id, so they narrow the outer loop and cost O(matches).
+// use the id column's index where one exists: podcast_pid seeks episode_podcast,
+// album_pid seeks track_album_id and series_pid book_series, so they narrow the outer
+// loop and cost O(matches).
 // library gets the same from its member form: the subquery seeks file_library once and
 // the items are reached by rowid.
 //
@@ -230,13 +233,21 @@ var itemFields = query.FieldMap{
 	"genre":        {Expr: "COALESCE(NULLIF(t.genre,''), bk.genre, '')", Kind: query.KindText},
 	// composer_sort and author_sort read the keys beside the spellings the item view
 	// shows, so a sorted list collates (and an item with no spelling sorts by its name);
-	// never NULL, '' for the kinds that lack them.
+	// never NULL, '' for the kinds that lack them. album_sort reads the key of the album
+	// the album field names (a book's series, an episode's show), and title_sort is the
+	// sort_key alias (model.QueryFieldAliases).
+	"album_sort":    {Expr: "COALESCE(alb.sort_key, srs.sort_key, pod.sort_key, '')", Kind: query.KindText},
 	"composer":      {Expr: "COALESCE(t.composer,'')", Kind: query.KindText},
 	"composer_sort": {Expr: "COALESCE(t.composer_sort_key,'')", Kind: query.KindText},
 	"author_sort":   {Expr: "COALESCE(bk.author_sort_key,'')", Kind: query.KindText},
-	"year":          {Expr: itemYearExpr, Kind: query.KindInt},
-	"track_no":      {Expr: "t.track_no", Kind: query.KindInt},
-	"disc_no":       {Expr: "t.disc_no", Kind: query.KindInt},
+	// A book's series, its place in it as the tag states it, and that place's key, which
+	// orders 2 before 10 as the series listing does; '' outside a series.
+	"series":          {Expr: "COALESCE(srs.name,'')", Kind: query.KindText},
+	"series_seq":      {Expr: "COALESCE(bk.series_seq,'')", Kind: query.KindText},
+	"series_seq_sort": {Expr: "COALESCE(bk.series_seq_sort,'')", Kind: query.KindText},
+	"year":            {Expr: itemYearExpr, Kind: query.KindInt},
+	"track_no":        {Expr: "t.track_no", Kind: query.KindInt},
+	"disc_no":         {Expr: "t.disc_no", Kind: query.KindInt},
 	// The column is read straight, like track_no and unlike the identifiers below: a
 	// track that states no tempo is genuinely missing one, so `bpm isMissing` should
 	// select it rather than a COALESCE turning it into a track at 0 bpm.
@@ -267,6 +278,7 @@ var itemFields = query.FieldMap{
 	"album_pid":         {Expr: "t.album_id", ValueSub: albumIDByPIDSub, Kind: query.KindInt},
 	"release_group_pid": {Expr: "alb.release_group_id", ValueSub: releaseGroupIDByPIDSub, Kind: query.KindInt},
 	"podcast_pid":       {Expr: "ep.podcast_id", ValueSub: podcastIDByPIDSub, Kind: query.KindInt},
+	"series_pid":        {Expr: "bk.series_id", ValueSub: seriesIDByPIDSub, Kind: query.KindInt},
 	"library":           {Member: &query.MemberColumn{IDExpr: "pi.id", Sub: libraryMemberSub}},
 	"genre_pid": {Set: &query.SetColumn{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
@@ -380,6 +392,21 @@ func init() {
 		}
 		itemFields[alias] = col
 	}
+}
+
+// QueryNeedsUser reports whether q references a per-user field in its filter or its sort
+// (Compiled.NeedsUser), which is when its results depend on the user they are read for.
+// A rule that does not compile is refused with the compiler's error.
+func (s *Store) QueryNeedsUser(q query.Query) (bool, error) {
+	fm, ok := fieldMapFor(q.Entity)
+	if !ok {
+		return false, waxerr.New(waxerr.CodeInvalid, "store.QueryNeedsUser", "unsupported query entity: "+string(q.Entity))
+	}
+	c, err := query.Compile(q, fm)
+	if err != nil {
+		return false, err
+	}
+	return c.NeedsUser, nil
 }
 
 // userStateJoinClause binds the current user's play_state as the ps alias. The user

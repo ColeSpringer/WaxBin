@@ -1,11 +1,14 @@
 package sqlite
 
 import (
+	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/playlist"
+	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // TestNoUndeclaredFieldAliases is the guard on the alias relation. Two itemFields
@@ -102,6 +105,78 @@ func TestNSPExportableFieldsAreQueryFields(t *testing.T) {
 	for _, f := range fields {
 		if _, ok := itemFields[f]; !ok {
 			t.Errorf("nsp exports %q, which is not a query field", f)
+		}
+	}
+}
+
+// TestPerUserFieldsAreExactlyTheNine pins the fields that read the calling user's play
+// state and that QueryNeedsUser answers for each field by that flag alone, so a tenth
+// per-user field cannot arrive without a host caching rule results hearing of it.
+func TestPerUserFieldsAreExactlyTheNine(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	var got []string
+	for name, col := range itemFields {
+		if col.NeedsUser {
+			got = append(got, name)
+		}
+		needs, err := st.QueryNeedsUser(query.New(query.EntityItems).Where(name, query.OpIsPresent, nil).Build())
+		if err != nil {
+			t.Errorf("%s isPresent: %v", name, err)
+			continue
+		}
+		if needs != col.NeedsUser {
+			t.Errorf("QueryNeedsUser(%s isPresent) = %v, want %v", name, needs, col.NeedsUser)
+		}
+	}
+	sort.Strings(got)
+	want := []string{"finished", "last_played", "last_progress", "play_count", "played", "position_ms",
+		"rating", "starred", "starred_at"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("per-user fields = %v, want %v", got, want)
+	}
+}
+
+// TestQueryNeedsUserFollowsSortsToo: a rule that only orders by a per-user field still
+// reads per-user state, and one nesting the field under a negation does too.
+func TestQueryNeedsUserFollowsSortsToo(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	for _, tc := range []struct {
+		name string
+		q    query.Query
+		want bool
+	}{
+		{"no rule", query.New(query.EntityItems).Build(), false},
+		{"title sort", query.New(query.EntityItems).OrderBy("title", false).Build(), false},
+		{"rating sort", query.New(query.EntityItems).OrderBy("rating", true).Build(), true},
+		{"negated play count", query.New(query.EntityItems).
+			WhereNode(query.Not{Node: query.Cond{Field: "play_count", Op: query.OpGt, Value: 0}}).Build(), true},
+		{"tag filter", query.New(query.EntityItems).Where("tag.MOOD", query.OpIs, "calm").Build(), false},
+	} {
+		got, err := st.QueryNeedsUser(tc.q)
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: QueryNeedsUser = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestQueryNeedsUserRefusesAnUnknownField: a rule that does not compile has no answer, so
+// it is refused with the compiler's error rather than read as user-agnostic.
+func TestQueryNeedsUserRefusesAnUnknownField(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	for _, q := range []query.Query{
+		query.New(query.EntityItems).Where("bogus", query.OpIs, 1).Build(),
+		query.New(query.EntityItems).OrderBy("bogus", false).Build(),
+		query.New(query.Entity("albums")).Build(),
+	} {
+		if _, err := st.QueryNeedsUser(q); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("QueryNeedsUser(%+v) = %v, want CodeInvalid", q, err)
 		}
 	}
 }

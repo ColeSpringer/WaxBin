@@ -261,3 +261,34 @@ func mustPictures(t *testing.T, ctx context.Context, path string) []waxlabel.Pic
 	}
 	return doc.Pictures()
 }
+
+// TestDerivedSortPairsFollowTheKind: a track's title spelling is TITLESORT and its album's
+// ALBUMSORT, while a book's title spelling is ALBUMSORT, since its title is the album tag.
+func TestDerivedSortPairsFollowTheKind(t *testing.T) {
+	t.Parallel()
+	tagOf := func(kind model.Kind, field string) []string {
+		var out []string
+		for _, p := range DerivedSortPairs(kind) {
+			if p.Field == field {
+				out = append(out, p.TagKey)
+			}
+		}
+		return out
+	}
+	for _, c := range []struct {
+		kind  model.Kind
+		field string
+		want  []string
+	}{
+		{model.KindTrack, "title", []string{"TITLESORT"}},
+		{model.KindTrack, "album", []string{"ALBUMSORT"}},
+		{model.KindTrack, "album_artist", []string{"ALBUMARTISTSORT"}},
+		{model.KindBook, "title", []string{"ALBUMSORT"}},
+		{model.KindBook, "author", []string{"ALBUMARTISTSORT", "ARTISTSORT"}},
+		{model.KindEpisode, "title", nil},
+	} {
+		if got := tagOf(c.kind, c.field); !slices.Equal(got, c.want) {
+			t.Errorf("%s %s pairs = %v, want %v", c.kind, c.field, got, c.want)
+		}
+	}
+}

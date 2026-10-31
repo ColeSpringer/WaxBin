@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -341,6 +342,114 @@ func TestCreditsSavedAgainKeepTheirDisplayAndSpelling(t *testing.T) {
 	set(model.RoleArtist, "Simon")
 	if v := view(); v.Artist != "Simon" || v.ArtistSort != "" {
 		t.Errorf("after crediting another set: artist (%q, %q), want the new display and no spelling", v.Artist, v.ArtistSort)
+	}
+	assertVerifyClean(t, st)
+}
+
+// itemSortCols reads an item's title spelling and key.
+func itemSortCols(t *testing.T, st *Store, pid model.PID) (string, string) {
+	t.Helper()
+	var sp, k string
+	if err := st.rdb().QueryRowContext(context.Background(),
+		"SELECT title_sort, sort_key FROM playable_item WHERE pid = ?", string(pid)).Scan(&sp, &k); err != nil {
+		t.Fatalf("read title_sort: %v", err)
+	}
+	return sp, k
+}
+
+// TestTitleSortOrdersTheItem: a stated title spelling is what the item collates by, so a
+// kanji title with its reading sorts by the reading, the spelling kept as stated beside
+// the key; a later put that states none folds the title again.
+func TestTitleSortOrdersTheItem(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	tokyo := trackSpec{path: "/lib/t.flac", essence: "et", content: "ct", title: "東京", titleSort: "Tokyo",
+		artist: "X", album: "Al"}
+	tr := putTrack(t, st, lib.ID, tokyo)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "Berlin", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/z.flac", essence: "ez", content: "cz", title: "Zurich", artist: "X", album: "Al"})
+	if sp, k := itemSortCols(t, st, tr.ItemPID); sp != "Tokyo" || k != model.SortKey("Tokyo") {
+		t.Errorf("title_sort/sort_key = %q/%q, want Tokyo and its key", sp, k)
+	}
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(titlesOf(items), ","); got != "Berlin,東京,Zurich" {
+		t.Errorf("order = %s, want Berlin,東京,Zurich (the kanji title by its reading)", got)
+	}
+	tokyo.titleSort, tokyo.content = "", "ct2"
+	putTrack(t, st, lib.ID, tokyo)
+	if sp, k := itemSortCols(t, st, tr.ItemPID); sp != "" || k != model.SortKey("東京") {
+		t.Errorf("after a put with no spelling = %q/%q, want none and the title's key", sp, k)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestABookTakesAlbumSortAsItsTitleSpelling: a book collates by its title spelling as a
+// track does (the scan reads it from the book's ALBUMSORT, scan.TestBookInputTakesAlbumSort).
+func TestABookTakesAlbumSortAsItsTitleSpelling(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	b := putBook(t, st, lib.ID, bookSpec{path: "/lib/a.m4b", essence: "ea", content: "ca", title: "A Tale",
+		titleSort: "Zz Tale", author: "Au"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb", title: "Middle", author: "Au"})
+	if sp, k := itemSortCols(t, st, b.ItemPID); sp != "Zz Tale" || k != model.SortKey("Zz Tale") {
+		t.Errorf("book title_sort/sort_key = %q/%q, want the spelling and its key", sp, k)
+	}
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(titlesOf(items), ","); got != "Middle,A Tale" {
+		t.Errorf("order = %s, want Middle,A Tale", got)
+	}
+}
+
+// TestRefreshSortKeysAgreesWithTheWriters: the keys the writers store are the ones the
+// drift check and the repair compute, so a catalog written with spellings is clean and a
+// repair rewrites nothing, and a key knocked off its spelling is put back from it.
+func TestRefreshSortKeysAgreesWithTheWriters(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	tr := putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct", title: "東京",
+		titleSort: "Tokyo", artist: "X", album: "Al"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/a.m4b", essence: "ea", content: "ca", title: "A Tale",
+		titleSort: "Tale, A", author: "Au"})
+	assertVerifyClean(t, st)
+	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 0 {
+		t.Fatalf("RefreshSortKeys = %d (err %v), want nothing to rewrite", n, err)
+	}
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE playable_item SET sort_key = 'stale' WHERE pid = ?", string(tr.ItemPID)); err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := st.VerifyDerived(ctx); err != nil || rep.SortKeyDrift != 1 {
+		t.Fatalf("verify = %+v (err %v), want one sort key drifted", rep, err)
+	}
+	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 1 {
+		t.Fatalf("RefreshSortKeys = %d (err %v), want the one row", n, err)
+	}
+	if _, k := itemSortCols(t, st, tr.ItemPID); k != model.SortKey("Tokyo") {
+		t.Errorf("repaired key = %q, want the spelling's", k)
+	}
+	// The names' own keys are checked and repaired the same way.
+	for _, q := range []string{"UPDATE playable_item SET title_key = 'stale'", "UPDATE artist SET name_key = 'stale'",
+		"UPDATE album SET title_key = 'stale'"} {
+		if _, err := st.wdb().ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rep, err := st.VerifyDerived(ctx); err != nil || rep.SortKeyDrift != 5 {
+		t.Fatalf("verify = %+v (err %v), want the five name keys drifted", rep, err)
+	}
+	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 5 {
+		t.Fatalf("RefreshSortKeys = %d (err %v), want the five rows", n, err)
+	}
+	if got := scalarStr(t, st, "SELECT title_key FROM playable_item WHERE pid = ?", string(tr.ItemPID)); got != model.SortKey("東京") {
+		t.Errorf("repaired title key = %q, want the title's", got)
 	}
 	assertVerifyClean(t, st)
 }

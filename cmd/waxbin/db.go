@@ -392,11 +392,12 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 	var refreshed *model.RefreshReport
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Check derived data (FTS, rollups, sort keys, book durations and ISBN keys, album and release years, playlist positions) against the source rows",
+		Short: "Check derived data (FTS, rollups, sort keys and spellings, book durations and ISBN keys, album and release years, playlist positions) against the source rows",
 		Long: "Runs the derived-data consistency check: the writer-maintained FTS, " +
-			"rollups, generated sort keys, book durations and ISBN keys, album and release " +
+			"rollups, generated sort keys, the sort spellings albums, release groups and " +
+			"artists take from their members, book durations and ISBN keys, album and release " +
 			"years and playlist positions are compared against a fresh recompute from the " +
-			"source rows. Reports drift; --fix recomputes the maintained rollups, book " +
+			"source rows. Reports drift; --fix recomputes the maintained rollups, sort spellings, book " +
 			"durations and ISBN keys, and album and release years, renumbers playlist " +
 			"positions, refolds stale sort keys and rebuilds stale search rows first, reporting " +
 			"how many rows each rewrote. Rollups a running scan has yet to settle are reported " +
@@ -484,6 +485,9 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				view := toDerivedView(rep)
 				view.SortKeysRewritten = resorted
+				if refreshed != nil {
+					view.SortKeysRewritten += refreshed.SortSpellingKeys
+				}
 				view.SearchRowsRebuilt = reindexed
 				view.ThumbnailsReplaced = replaced
 				view.Refreshed = toRefreshView(refreshed)
@@ -503,6 +507,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "book-isbn-key drift:      %d\n", rep.BookISBNKeyDrift)
 				fmt.Fprintf(w, "album-year drift:         %d\n", rep.AlbumYearDrift)
 				fmt.Fprintf(w, "release-year drift:       %d\n", rep.ReleaseYearDrift)
+				fmt.Fprintf(w, "sort-spelling drift:      %d\n", rep.SortSpellingDrift)
 				fmt.Fprintf(w, "playlist-position drift:  %d\n", rep.PlaylistPositionDrift)
 				fmt.Fprintf(w, "rollups pending:          %d\n", rep.RollupsPending)
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
@@ -521,14 +526,15 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 					fmt.Fprintf(w, "books rewritten:          %d durations, %d ISBN keys\n", r.BookDurations, r.ISBNKeys)
 					fmt.Fprintf(w, "years rewritten:          %d albums, %d items\n", r.AlbumYears, r.ReleaseYears)
 					fmt.Fprintf(w, "playlists renumbered:     %d\n", r.PlaylistsCompacted)
-					fmt.Fprintf(w, "sort keys rewritten:      %d\n", resorted)
+					fmt.Fprintf(w, "sort keys rewritten:      %d\n", resorted+r.SortSpellingKeys)
+					fmt.Fprintf(w, "sort spellings rewritten: %d\n", r.SortSpellings)
 					fmt.Fprintf(w, "search rows rebuilt:      %d\n", reindexed)
 					if replaced {
 						fmt.Fprintln(w, "thumbnail file:           replaced, it was damaged")
 					}
-					// A refold moves the keys page cursors resume against, and a moved
-					// release year the newest list's.
-					if resorted > 0 || r.ReleaseYears > 0 {
+					// A refold or a spelling moves the keys page cursors resume against,
+					// and a moved release year the newest list's.
+					if resorted > 0 || r.ReleaseYears > 0 || r.SortSpellingKeys > 0 {
 						fmt.Fprintln(w, "note: sort keys or release years moved; re-page any open cursors")
 					}
 				}

@@ -214,7 +214,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			var rederived []string
 			var prov map[string]rederivable
 			if had {
-				rederived, prov, err = rederivedTrackTx(ctx, tx, ex.itemID, ex.title, vt.Item.Title, vt.Track, in.PreserveLocks, prior)
+				rederived, prov, err = rederivedTrackTx(ctx, tx, ex.itemID, ex.title, titleOf(vt.Item), vt.Track, in.PreserveLocks, prior)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
@@ -236,7 +236,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				continue
 			}
 
-			itemID, itemPID, created, _, priorTitle, err := upsertItem(ctx, tx, s.log, vt.Item, vt.Track.Year, bookAdoptKey{}, now, "", keys[vt.Item.IdentityKey])
+			itemID, itemPID, created, _, was, err := upsertItem(ctx, tx, s.log, vt.Item, vt.Track.Year, bookAdoptKey{}, now, "", keys[vt.Item.IdentityKey])
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -248,7 +248,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			// An item the catalog holds that this file did not back yet (a copy of the rip)
 			// has columns this put replaces too.
 			if !had && !created {
-				rederived, prov, err = rederivedTrackTx(ctx, tx, itemID, priorTitle, vt.Item.Title, vt.Track, in.PreserveLocks, prior)
+				rederived, prov, err = rederivedTrackTx(ctx, tx, itemID, was, titleOf(vt.Item), vt.Track, in.PreserveLocks, prior)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
@@ -337,7 +337,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 // the stored window used to decide whether a rescan moved it.
 type existingVirtualTrack struct {
 	itemID      int64
-	title       string
+	title       itemTitle
 	startFrames int64
 	endFrames   int64
 }
@@ -348,7 +348,7 @@ type existingVirtualTrack struct {
 // edge ever has. It drains and closes its cursor before returning so the caller can
 // write to the same transaction.
 func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[string]existingVirtualTrack, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT pi.identity_key, pi.id, pi.title, itf.start_frames, itf.end_frames
+	rows, err := tx.QueryContext(ctx, `SELECT pi.identity_key, pi.id, pi.title, pi.title_sort, itf.start_frames, itf.end_frames
 		FROM item_file itf
 		JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE itf.file_id = ? AND itf.role = 'primary' AND itf.start_frames IS NOT NULL`, fileID)
@@ -361,7 +361,7 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 		var key sql.NullString
 		var ex existingVirtualTrack
 		var startFrames, endFrames sql.NullInt64
-		if err := rows.Scan(&key, &ex.itemID, &ex.title, &startFrames, &endFrames); err != nil {
+		if err := rows.Scan(&key, &ex.itemID, &ex.title.title, &ex.title.sort, &startFrames, &endFrames); err != nil {
 			return nil, err
 		}
 		ex.startFrames = startFrames.Int64
@@ -374,15 +374,16 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 }
 
 // VirtualTracksForPath returns the virtual tracks the file at path backs, in start
-// order and with their stored identity keys, or none when it backs no rip. A copy of a
-// rip backs its tracks as an alternate, over windows of its own, and they count too. A
-// scan that cannot read the file's sheet re-puts these tracks instead of collapsing the
-// rip to one whole-file track.
+// order and with their stored identity keys, the fields a sheet states and the spellings
+// beside them, or none when it backs no rip. A copy of a rip backs its tracks as an
+// alternate, over windows of its own, and they count too. A scan that cannot read the
+// file's sheet re-puts these tracks instead of collapsing the rip to one whole-file track.
 func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.VirtualTrack, error) {
 	const op = "store.VirtualTracksForPath"
-	rows, err := s.rdb().QueryContext(ctx, `SELECT COALESCE(pi.identity_key,''), pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
-			COALESCE(t.album_artist,''), COALESCE(t.genre,''), COALESCE(t.track_no,0), COALESCE(t.year,0),
-			itf.start_frames, COALESCE(itf.end_frames,0)
+	rows, err := s.rdb().QueryContext(ctx, `SELECT COALESCE(pi.identity_key,''), pi.title, pi.title_sort,
+			COALESCE(t.artist,''), COALESCE(t.artist_sort,''), COALESCE(t.album,''), COALESCE(t.album_sort,''),
+			COALESCE(t.album_artist,''), COALESCE(t.album_artist_sort,''), COALESCE(t.genre,''), COALESCE(t.track_no,0),
+			COALESCE(t.year,0), itf.start_frames, COALESCE(itf.end_frames,0)
 		FROM file f
 		JOIN item_file itf ON itf.file_id = f.id AND itf.role IN ('primary', 'alternate') AND itf.start_frames IS NOT NULL
 		JOIN playable_item pi ON pi.id = itf.item_id
@@ -397,8 +398,9 @@ func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.
 	seen := map[string]bool{}
 	for rows.Next() {
 		var vt model.VirtualTrack
-		if err := rows.Scan(&vt.Item.IdentityKey, &vt.Item.Title, &vt.Track.Artist, &vt.Track.Album, &vt.Track.AlbumArtist,
-			&vt.Track.Genre, &vt.Track.TrackNo, &vt.Track.Year, &vt.StartFrames, &vt.EndFrames); err != nil {
+		if err := rows.Scan(&vt.Item.IdentityKey, &vt.Item.Title, &vt.Item.TitleSort, &vt.Track.Artist, &vt.Track.ArtistSort,
+			&vt.Track.Album, &vt.Track.AlbumSort, &vt.Track.AlbumArtist, &vt.Track.AlbumArtistSort, &vt.Track.Genre,
+			&vt.Track.TrackNo, &vt.Track.Year, &vt.StartFrames, &vt.EndFrames); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if !seen[vt.Item.IdentityKey] {

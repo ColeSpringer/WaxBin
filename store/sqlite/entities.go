@@ -57,7 +57,7 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID 
 	// group and album keeps the match_key it already has.
 	var albumArtistID int64
 	if names, ids := creditNames(anchor, nil, albumArtistIDs); len(names) > 0 {
-		albumArtistID, err = resolveArtist(ctx, tx, names[0], ids[0])
+		albumArtistID, err = resolveArtist(ctx, tx, names[0], ids[0], affected)
 		if err != nil {
 			return err
 		}
@@ -176,7 +176,7 @@ func resolveTrackArtists(ctx context.Context, tx *sql.Tx, itemID int64, tr model
 	seen := make(map[int64]bool, len(names))
 	pos := 0
 	for i, name := range names {
-		aid, err := resolveArtist(ctx, tx, name, ids[i])
+		aid, err := resolveArtist(ctx, tx, name, ids[i], affected)
 		if err != nil {
 			return 0, err
 		}
@@ -325,7 +325,7 @@ func resolveAlbumChain(ctx context.Context, tx *sql.Tx, log logger, tr model.Tra
 	if ok {
 		return row.id, row.fillTx(ctx, tx, tr)
 	}
-	return newAlbumTx(ctx, tx, log, albumKey, rgID, tr)
+	return newAlbumTx(ctx, tx, log, albumKey, rgID, tr, affected)
 }
 
 // resolveArtist finds-or-creates an artist by normalized match key, returning
@@ -350,7 +350,7 @@ func resolveAlbumChain(ctx context.Context, tx *sql.Tx, log logger, tr model.Tra
 // Nothing enforces uniqueness on artist.mbid, so this can leave two rows sharing
 // one, exactly as ApplyArtistEnrichment can. That is what audit's duplicate_artist
 // reports and what merge fixes.
-func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, error) {
+func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string, affected *affectedRollups) (int64, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return 0, nil
@@ -401,8 +401,8 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	}
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		"INSERT INTO artist(pid, name, sort_key, match_key, mbid) VALUES (?,?,?,?,?)",
-		string(newPID), name, model.SortKey(name), mk, nullStr(mbid))
+		"INSERT INTO artist(pid, name, sort_key, name_key, match_key, mbid) VALUES (?,?,?,?,?,?)",
+		string(newPID), name, model.SortKey(name), model.SortKey(name), mk, nullStr(mbid))
 	if err != nil {
 		return 0, err
 	}
@@ -410,6 +410,7 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	if err != nil {
 		return 0, err
 	}
+	affected.created("artist", id)
 	return id, appendChange(ctx, tx, "artist", newPID, model.OpCreate)
 }
 
@@ -492,6 +493,7 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 	if err != nil {
 		return 0, err
 	}
+	affected.created("release_group", id)
 	return id, appendChange(ctx, tx, "release_group", pid, model.OpCreate)
 }
 
@@ -526,7 +528,7 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 // the editions MusicBrainz knows. Aggregating the album's distinct media would not help,
 // since discriminating on the SET means requiring a release to cover every value, and
 // narrowing is the shape the matcher rejects.
-func newAlbumTx(ctx context.Context, tx *sql.Tx, log logger, key string, releaseGroupID int64, tr model.Track) (int64, error) {
+func newAlbumTx(ctx context.Context, tx *sql.Tx, log logger, key string, releaseGroupID int64, tr model.Track, affected *affectedRollups) (int64, error) {
 	adopted, err := adoptEntityByMBIDTx(ctx, tx, log, "album", key)
 	if err != nil {
 		return 0, err
@@ -540,9 +542,9 @@ func newAlbumTx(ctx context.Context, tx *sql.Tx, log logger, key string, release
 	}
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		`INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid,
-			barcode, label, catalog_number, media, country, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
+		`INSERT INTO album(pid, release_group_id, title, sort_key, title_key, year, disc_total, mbid,
+			barcode, label, catalog_number, media, country, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), model.SortKey(tr.Album), nullInt(tr.Year),
 		nullInt(tr.DiscTotal), nullStr(normMBID(tr.MBReleaseID)),
 		nullStr(strings.TrimSpace(tr.Barcode)), nullStr(strings.TrimSpace(tr.Label)),
 		nullStr(strings.TrimSpace(tr.CatalogNumber)), nullStr(strings.TrimSpace(tr.Media)),
@@ -554,6 +556,7 @@ func newAlbumTx(ctx context.Context, tx *sql.Tx, log logger, key string, release
 	if err != nil {
 		return 0, err
 	}
+	affected.created("album", id)
 	return id, appendChange(ctx, tx, "album", newPID, model.OpCreate)
 }
 

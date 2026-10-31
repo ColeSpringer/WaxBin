@@ -315,12 +315,15 @@ func TestRefreshSortKeysSpansBatches(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	const n = sortKeyBatch + 25
+	// Each artist's sort key and name key are both seeded wrong, so the run rewrites two
+	// rows per artist.
+	const artists = sortKeyBatch/2 + 25
+	const n = 2 * artists
 	if _, err := st.wdb().ExecContext(ctx, `
 		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
-		INSERT INTO artist(pid, name, sort_key, match_key)
-		SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'edith ' || i FROM seq`, n); err != nil {
-		t.Fatalf("seed %d artists: %v", n, err)
+		INSERT INTO artist(pid, name, sort_key, name_key, match_key)
+		SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'WRONG', 'edith ' || i FROM seq`, artists); err != nil {
+		t.Fatalf("seed %d artists: %v", artists, err)
 	}
 
 	before, _ := st.LatestChangeSeq(ctx)

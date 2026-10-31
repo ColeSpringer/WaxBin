@@ -83,14 +83,14 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 	switch kind {
 	case read.EntityAlbum:
 		err = s.rstmts.queryRowContext(ctx, s.rdb(), `SELECT COUNT(DISTINCT t.item_id), COALESCE(SUM(`+itemEffectiveDurationExpr+`),0)
-			FROM track t
+			FROM track t `+liveMembers+`
 			LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 			LEFT JOIN file f ON f.id = pf.file_id
 			WHERE t.album_id = ?`, id).
 			Scan(&info.ItemCount, &info.TotalDurationMS)
 	case read.EntitySeries:
 		err = s.rstmts.queryRowContext(ctx, s.rdb(),
-			"SELECT COUNT(*), COALESCE(SUM(bk.total_duration_ms),0) FROM book bk WHERE bk.series_id = ?", id).
+			"SELECT COUNT(*), COALESCE(SUM(bk.total_duration_ms),0) FROM book bk "+liveBooks+" WHERE bk.series_id = ?", id).
 			Scan(&info.ItemCount, &info.TotalDurationMS)
 	}
 	if err != nil {
@@ -591,13 +591,13 @@ func (s *Store) entityLiveCountsBatch(ctx context.Context, kind read.EntityKind,
 	switch kind {
 	case read.EntityAlbum:
 		stmt = `SELECT t.album_id, COUNT(DISTINCT t.item_id), COALESCE(SUM(` + itemEffectiveDurationExpr + `),0)
-			FROM track t
+			FROM track t ` + liveMembers + `
 			LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 			LEFT JOIN file f ON f.id = pf.file_id
 			WHERE t.album_id IN ` + inArray + ` GROUP BY t.album_id`
 	case read.EntitySeries:
 		stmt = `SELECT bk.series_id, COUNT(*), COALESCE(SUM(bk.total_duration_ms),0)
-			FROM book bk WHERE bk.series_id IN ` + inArray + ` GROUP BY bk.series_id`
+			FROM book bk ` + liveBooks + ` WHERE bk.series_id IN ` + inArray + ` GROUP BY bk.series_id`
 	default:
 		return nil, nil
 	}

@@ -17,27 +17,27 @@ import (
 // severity-ranked findings (and, for duplicates, merge suggestions).
 
 // DuplicateArtists finds artist entities that likely should be one: they share an
-// MBID (an enrichment collision left for the merge primitive) or normalize to the
-// same collation sort key ("Beatles" vs "The Beatles"), which the match-key dedup
-// keeps apart.
+// MBID (an enrichment collision left for the merge primitive) or their names fold to the
+// same collation key ("Beatles" vs "The Beatles"), which the match-key dedup keeps apart.
+// The names are compared, not the sort keys, which a sort spelling moves.
 func (s *Store) DuplicateArtists(ctx context.Context) ([]model.DuplicateSet, error) {
 	byMBID, err := s.artistDupSets(ctx, "mbid", "shared MBID")
 	if err != nil {
 		return nil, err
 	}
-	bySort, err := s.artistDupSets(ctx, "sort_key", "same collation key")
+	bySort, err := s.artistDupSets(ctx, "name_key", "same collation key")
 	if err != nil {
 		return nil, err
 	}
 	return append(byMBID, bySort...), nil
 }
 
-// The duplicate sets count their members' tracks live rather than reading the rollups,
-// which trail a running scan until its next settle, so the member backing the most
-// tracks leads its set (the survivor a merge keeps) whatever a scan has left pending.
+// The duplicate sets count their members' live tracks (liveMembers) rather than reading
+// the rollups, which trail a running scan until its next settle, so the member backing the
+// most tracks leads its set (the survivor a merge keeps) whatever a scan has left pending.
 const (
-	artistLiveTracks = `(SELECT COUNT(DISTINCT t.item_id) FROM track t WHERE t.artist_id = e.id)`
-	genreLiveTracks  = `(SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = e.id)`
+	artistLiveTracks = `(SELECT COUNT(DISTINCT t.item_id) FROM track t ` + liveMembers + ` WHERE t.artist_id = e.id)`
+	genreLiveTracks  = `(SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig ` + liveGenreMembers + ` WHERE ig.genre_id = e.id)`
 )
 
 func (s *Store) artistDupSets(ctx context.Context, col, reason string) ([]model.DuplicateSet, error) {

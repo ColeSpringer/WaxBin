@@ -120,7 +120,8 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/o1.flac", essence: "e3", content: "c3",
 		title: "Three", artist: "Orbital", albumArt: "Orbital", album: "Insides", genre: "Electronic"})
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/earthsea.m4b", essence: "be1", content: "bc1",
-		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", genres: []string{"Fantasy"}})
+		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", genres: []string{"Fantasy"},
+		series: "Earthsea", seq: "1"})
 	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
 
 	// A default-user playlist, so the playlist row of the mirror table below has a
@@ -152,6 +153,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		{read.GroupReleaseGroup, "release_group_pid"},
 		{read.GroupGenre, "genre_pid"},
 		{read.GroupPodcast, "podcast_pid"},
+		{read.GroupSeries, "series_pid"},
 		// The playlist dimension holds too, even though its buckets are owner-scoped
 		// and the field is not: scoping selects which playlists get buckets, never
 		// which items land in one. The loop is one-directional, so the divergence is
@@ -308,6 +310,7 @@ func TestLoweredIdentityFieldPlans(t *testing.T) {
 	}{
 		{"podcast_pid", "SEARCH ep USING COVERING INDEX episode_podcast"},
 		{"album_pid", "SEARCH t USING COVERING INDEX track_album_id"},
+		{"series_pid", "SEARCH bk USING COVERING INDEX book_series"},
 		// artist_pid and album_artist_pid COALESCE across track and book, so no single
 		// index covers the expression and the scan stays. What lowering buys them is
 		// one pid lookup per query instead of one per row.
@@ -481,7 +484,7 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	for _, field := range []string{"artist_pid", "release_group_pid"} {
+	for _, field := range []string{"artist_pid", "release_group_pid", "series_pid"} {
 		for _, op := range []query.Op{query.OpGt, query.OpLt, query.OpGte, query.OpLte,
 			query.OpContains, query.OpStartsWith, query.OpEndsWith} {
 			_, err := st.QueryItems(ctx, query.New(query.EntityItems).
@@ -494,7 +497,7 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 	// in and notIn are both accepted on every lowered field, at arity 1 and at 0,
 	// since the empty list takes a shortcut before the operator is ever consulted.
 	for _, field := range []string{"artist_pid", "album_artist_pid", "album_pid",
-		"release_group_pid", "podcast_pid", "library"} {
+		"release_group_pid", "podcast_pid", "series_pid", "library"} {
 		for _, op := range []query.Op{query.OpIn, query.OpNotIn} {
 			for _, vals := range [][]any{{"some-pid"}, {}} {
 				if _, err := st.QueryItems(ctx, query.New(query.EntityItems).
@@ -504,10 +507,12 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 			}
 		}
 	}
-	_, err := st.QueryItems(ctx, query.New(query.EntityItems).
-		OrderBy("album_pid", false).Build(), "")
-	if !waxerr.Is(err, waxerr.CodeInvalid) {
-		t.Errorf("sort by album_pid: want CodeInvalid, got %v", err)
+	for _, field := range []string{"album_pid", "series_pid"} {
+		_, err := st.QueryItems(ctx, query.New(query.EntityItems).
+			OrderBy(field, false).Build(), "")
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("sort by %s: want CodeInvalid, got %v", field, err)
+		}
 	}
 }
 
@@ -910,7 +915,7 @@ func TestHasArtAcrossKinds(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindBook, State: model.StatePresent, Title: "Covered Book",
-			SortKey: model.SortKey("Covered Book"), IdentityKey: "essence:be",
+			IdentityKey: "essence:be",
 		},
 		Book:     model.Book{Author: "A. Author", AuthorSort: model.SortKey("A. Author"), Authors: []string{"A. Author"}},
 		CoverArt: testPNG(t, 24, 24),
@@ -1042,7 +1047,7 @@ func TestHasLyricsField(t *testing.T) {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Sung",
-			SortKey: model.SortKey("Sung"), IdentityKey: "essence:el",
+			IdentityKey: "essence:el",
 		},
 		Track:  model.Track{Artist: "X", Album: "Al"},
 		Lyrics: &model.Lyrics{Source: model.SourceTag, Unsynced: "la la la"},

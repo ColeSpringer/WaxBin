@@ -480,6 +480,26 @@ func TestReadComposerSort(t *testing.T) {
 	}
 }
 
+// TestReadTitleSortIsReserved: TITLESORT projects into Tags.TitleSort, which orders the
+// item, and no longer lands as a custom tag beside it.
+func TestReadTitleSortIsReserved(t *testing.T) {
+	t.Parallel()
+	raw := testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "東京", Artist: "Band", Album: "An Album",
+		TXXX: []testaudio.TXXXFrame{{Desc: "TITLESORT", Value: "Tokyo"}},
+	})
+	fm, err := NewReader().Read(context.Background(), writeTemp(t, "ts.mp3", raw))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.TitleSort != "Tokyo" {
+		t.Errorf("TitleSort = %q, want the tagged spelling", fm.Tags.TitleSort)
+	}
+	if _, ok := fm.Tags.Custom["TITLESORT"]; ok || !model.IsReservedTagKey("TITLESORT") {
+		t.Error("TITLESORT is still a custom tag; the reserved-key set must hold it")
+	}
+}
+
 func TestParseSeries(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

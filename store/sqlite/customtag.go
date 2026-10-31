@@ -33,19 +33,6 @@ import (
 // A change to the values is owed to the item's files (model.DiagTagWriteOwed) until a
 // write-back lands it, except under a key a tag write would land on another field.
 func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
-	return s.setItemTag(ctx, itemPID, key, values, attr, lock, force, true)
-}
-
-// ForgetItemTag drops a custom tag a write-back has just cleared from the files that own
-// the item's tags, its primary and parts, so the catalog follows them, and clears every
-// file's owed row for it; the caller notes a file still holding the tag. A locked tag is
-// refused.
-func (s *Store) ForgetItemTag(ctx context.Context, itemPID model.PID, key string) error {
-	_, _, err := s.setItemTag(ctx, itemPID, key, nil, model.Attribution{}, model.LockUnchanged, false, false)
-	return err
-}
-
-func (s *Store) setItemTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force, owe bool) (string, int, error) {
 	const op = "store.SetItemTag"
 	canon, ok := model.CanonicalTagKey(key)
 	if !ok {
@@ -96,12 +83,7 @@ func (s *Store) setItemTag(ctx context.Context, itemPID model.PID, key string, v
 		if err := writeItemTagTx(ctx, tx, itemID, canon, clean); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		switch {
-		case !owe:
-			if err := deleteOwedTx(ctx, tx, "file_id IN (SELECT file_id FROM item_file WHERE item_id = ?)", itemID, []string{field}); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-		case !model.IsRetargetedTagKey(canon) && !slices.Equal(before, clean):
+		if !model.IsRetargetedTagKey(canon) && !slices.Equal(before, clean) {
 			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{field}); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

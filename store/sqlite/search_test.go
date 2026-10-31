@@ -308,7 +308,7 @@ func TestSearchSymbolOnlyQueryHonorsTheCap(t *testing.T) {
 	}
 }
 
-// TestSearchValidatesOptionsBeforeTheQuery: an unknown library or state is refused
+// TestSearchValidatesOptionsBeforeTheQuery: an unknown library, state or show is refused
 // whatever the query holds, a symbol-only or empty one included.
 func TestSearchValidatesOptionsBeforeTheQuery(t *testing.T) {
 	t.Parallel()
@@ -320,6 +320,9 @@ func TestSearchValidatesOptionsBeforeTheQuery(t *testing.T) {
 		}
 		if _, err := st.Search(ctx, q, read.SearchOptions{States: []model.ItemState{"bogus"}}); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("search %q in an unknown state: err = %v, want CodeInvalid", q, err)
+		}
+		if _, err := st.Search(ctx, q, read.SearchOptions{Podcasts: []model.PID{"nope"}}); !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Errorf("search %q in an unknown show: err = %v, want CodeNotFound", q, err)
 		}
 	}
 }
@@ -343,7 +346,7 @@ func TestSearchStmtZeroPathGolden(t *testing.T) {
 		WHERE search_fts MATCH ?
 		ORDER BY score, pi.pid
 		LIMIT 501`
-	stmt, args, cap := searchStmt("beatles*", 20, 0, nil, nil)
+	stmt, args, cap := searchStmt("beatles*", 20, 0, searchScope{})
 	if stmt != want {
 		t.Errorf("zero-option statement drifted:\ngot:\n%s\nwant:\n%s", stmt, want)
 	}
@@ -852,9 +855,26 @@ func TestSearchStatesCoverTranscripts(t *testing.T) {
 	}
 }
 
-// TestSearchStmtNarrowArgOrder walks all eight statement shapes (flat and capped, by
-// nothing / scope / states / both) and pins that every placeholder has an arg and
-// that the args arrive in clause order. The statement text and its binds are built
+// TestSearchNarrowArgsHaveNoSpareCapacity: a caller appends its own binds to the narrowing
+// args, so they come back with no room past their length, or two appends from one fragment
+// would write into one backing array, whichever parts the scope sets.
+func TestSearchNarrowArgsHaveNoSpareCapacity(t *testing.T) {
+	t.Parallel()
+	for _, sc := range []searchScope{
+		{libIDs: []int64{7}},
+		{states: []model.ItemState{model.StatePresent}},
+		{libIDs: []int64{7}, shows: []int64{}},
+		{libIDs: []int64{7}, states: []model.ItemState{model.StatePresent}, shows: []int64{3}},
+	} {
+		if _, args := searchNarrow(sc); cap(args) != len(args) {
+			t.Errorf("searchNarrow(%+v) args len %d cap %d, want no spare room", sc, len(args), cap(args))
+		}
+	}
+}
+
+// TestSearchStmtNarrowArgOrder walks the statement shapes (flat and capped, by nothing /
+// scope / states / shows / an empty show list / all of them) and pins that every
+// placeholder has an arg and that the args arrive in clause order. The statement text and its binds are built
 // in two places, so a transposition is cheap to introduce and only shows up on one
 // combination behaviourally. limit and maxCandidates are chosen so the inner (601)
 // and outer (501) limits differ and a swap is visible.
@@ -868,26 +888,33 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 	)
 	libs := []int64{7, 9}
 	states := []model.ItemState{model.StatePresent, model.StateRemote}
+	shows := []int64{3, 4}
+	all := searchScope{libIDs: libs, states: states, shows: shows}
 	cases := []struct {
 		name   string
 		maxC   int
-		libIDs []int64
-		states []model.ItemState
+		scope  searchScope
 		want   []any
 		limits []string
 	}{
-		{"flat/none", 0, nil, nil, []any{"x*"}, []string{outer}},
-		{"flat/scope", 0, libs, nil, []any{int64(7), int64(9), "x*"}, []string{outer}},
-		{"flat/states", 0, nil, states, []any{"present", "remote", "x*"}, []string{outer}},
-		{"flat/both", 0, libs, states, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{outer}},
-		{"capped/none", maxC, nil, nil, []any{"x*"}, []string{inner, outer}},
-		{"capped/scope", maxC, libs, nil, []any{int64(7), int64(9), "x*"}, []string{inner, outer}},
-		{"capped/states", maxC, nil, states, []any{"present", "remote", "x*"}, []string{inner, outer}},
-		{"capped/both", maxC, libs, states, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{inner, outer}},
+		{"flat/none", 0, searchScope{}, []any{"x*"}, []string{outer}},
+		{"flat/scope", 0, searchScope{libIDs: libs}, []any{int64(7), int64(9), "x*"}, []string{outer}},
+		{"flat/states", 0, searchScope{states: states}, []any{"present", "remote", "x*"}, []string{outer}},
+		{"flat/both", 0, searchScope{libIDs: libs, states: states}, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{outer}},
+		{"flat/shows", 0, searchScope{shows: shows}, []any{"[3,4]", "x*"}, []string{outer}},
+		{"flat/no shows", 0, searchScope{shows: []int64{}}, []any{"x*"}, []string{outer}},
+		{"flat/all", 0, all, []any{"present", "remote", int64(7), int64(9), "[3,4]", "x*"}, []string{outer}},
+		{"capped/none", maxC, searchScope{}, []any{"x*"}, []string{inner, outer}},
+		{"capped/scope", maxC, searchScope{libIDs: libs}, []any{int64(7), int64(9), "x*"}, []string{inner, outer}},
+		{"capped/states", maxC, searchScope{states: states}, []any{"present", "remote", "x*"}, []string{inner, outer}},
+		{"capped/both", maxC, searchScope{libIDs: libs, states: states}, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{inner, outer}},
+		{"capped/shows", maxC, searchScope{shows: shows}, []any{"[3,4]", "x*"}, []string{inner, outer}},
+		{"capped/no shows", maxC, searchScope{shows: []int64{}}, []any{"x*"}, []string{inner, outer}},
+		{"capped/all", maxC, all, []any{"present", "remote", int64(7), int64(9), "[3,4]", "x*"}, []string{inner, outer}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stmt, args, _ := searchStmt("x*", limit, tc.maxC, tc.libIDs, tc.states)
+			stmt, args, _ := searchStmt("x*", limit, tc.maxC, tc.scope)
 			if n := strings.Count(stmt, "?"); n != len(args) {
 				t.Errorf("%d placeholders but %d args:\n%s", n, len(args), stmt)
 			}
@@ -919,14 +946,15 @@ func TestSearchNarrowPlan(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
 		title: "Harbor Lights", artist: "A", album: "Alp"})
 
-	flat, flatArgs, _ := searchStmt("harbor*", 20, 0, nil, []model.ItemState{model.StatePresent})
+	flat, flatArgs, _ := searchStmt("harbor*", 20, 0, searchScope{states: []model.ItemState{model.StatePresent}})
 	plan := explainPlan(t, st, flat, flatArgs...)
 	t.Logf("flat narrowed plan:\n%s", plan)
 	if !strings.Contains(plan, "SEARCH pi USING INTEGER PRIMARY KEY") {
 		t.Errorf("pi is no longer reached by rowid seek, so the state test is not a residual:\n%s", plan)
 	}
 
-	capped, cappedArgs, _ := searchStmt("harbor*", 20, 50, nil, []model.ItemState{model.StatePresent})
+	capped, cappedArgs, _ := searchStmt("harbor*", 20, 50, searchScope{states: []model.ItemState{model.StatePresent},
+		shows: []int64{1}})
 	lines := explainPlanLines(t, st, capped, cappedArgs...)
 	cplan := strings.Join(lines, "\n")
 	t.Logf("capped narrowed plan:\n%s", cplan)
@@ -952,17 +980,17 @@ func TestSearchNarrowPlan(t *testing.T) {
 
 // TestSearchByNamePlans pins that the direct name lookups seek their indexes rather than
 // scan their tables on every search, the space-dropped artist key included
-// (artist_joined_key), with a narrowing as with none, and that the sort-key item lookup a
-// query of symbols alone runs seeks its keys and reads only the track table whole, for
-// the artist display.
+// (artist_joined_key) and the name keys, with a narrowing as with none, and that the
+// sort-key item lookup a query of symbols alone runs seeks its keys and reads only the
+// track table whole, for the artist display.
 func TestSearchByNamePlans(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	for _, states := range [][]model.ItemState{nil, {model.StatePresent}} {
-		narrow, args := searchNarrow([]int64{1}, states)
+		narrow, args := searchNarrow(searchScope{libIDs: []int64{1}, states: states, shows: []int64{2}})
 		artists := strings.Join(explainPlanLines(t, st, artistByNameQ(narrow, 2, 5),
 			append(append([]any{"a", "b", "a"}, args...), args...)...), "\n")
-		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_sort"} {
+		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_name_key"} {
 			if !strings.Contains(artists, want) {
 				t.Errorf("artist lookup plan lacks %q:\n%s", want, artists)
 			}
@@ -971,11 +999,11 @@ func TestSearchByNamePlans(t *testing.T) {
 			t.Errorf("artist lookup scans the table:\n%s", artists)
 		}
 		albums := strings.Join(explainPlanLines(t, st, albumByNameQ(narrow, 5), append([]any{"a"}, args...)...), "\n")
-		if !strings.Contains(albums, "SEARCH al USING INDEX album_sort") {
-			t.Errorf("album lookup does not seek album_sort:\n%s", albums)
+		if !strings.Contains(albums, "SEARCH al USING INDEX album_title_key") {
+			t.Errorf("album lookup does not seek album_title_key:\n%s", albums)
 		}
 		items := strings.Join(explainPlanLines(t, st, itemsBySortKeyQ(narrow, 5), append([]any{"a"}, args...)...), "\n")
-		for _, want := range []string{"item_sort", "track_artist", "SCAN track", "SCAN m", "SEARCH pi USING INTEGER PRIMARY KEY"} {
+		for _, want := range []string{"item_title_key", "track_artist", "SCAN track", "SCAN m", "SEARCH pi USING INTEGER PRIMARY KEY"} {
 			if !strings.Contains(items, want) {
 				t.Errorf("sort-key item lookup plan lacks %q:\n%s", want, items)
 			}
@@ -1389,5 +1417,112 @@ func TestTranscriptHitsFillTheGroupPastSeenEpisodes(t *testing.T) {
 	}
 	if len(got.Episodes) != 2 || got.Episodes[0].Title != "Zanzibar Notes" {
 		t.Errorf("episodes = %+v, want the title hit and one transcript hit", got.Episodes)
+	}
+}
+
+// episodePIDsOf lists a search result's episode hits.
+func episodePIDsOf(res *read.SearchResult) []model.PID {
+	var out []model.PID
+	for _, h := range res.Episodes {
+		out = append(out, h.PID)
+	}
+	return out
+}
+
+// TestSearchPodcastsScopeKeepsOtherShowsOutOfThePool: a show list narrows the episodes
+// inside the candidate pool, so newer episodes of another show cannot take the pool and
+// starve the followed show's match, while tracks match as before.
+func TestSearchPodcastsScopeKeepsOtherShowsOutOfThePool(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
+		title: "Harbor Song", artist: "A", album: "Al"})
+	followed := putFeed(t, st, "http://cast.example/followed", "Harbor Talk")
+	putFeed(t, st, "http://cast.example/other", "Harbor One", "Harbor Two", "Harbor Three")
+	eps, err := st.EpisodesByPodcast(ctx, followed.PodcastPID, 0)
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("followed episodes = %v (err %v)", eps, err)
+	}
+	for _, maxC := range []int{0, 2} {
+		res, err := st.Search(ctx, "harbor", read.SearchOptions{Podcasts: []model.PID{followed.PodcastPID}, MaxCandidates: maxC})
+		if err != nil {
+			t.Fatalf("search (cap %d): %v", maxC, err)
+		}
+		if got := episodePIDsOf(res); len(got) != 1 || got[0] != eps[0].PID {
+			t.Errorf("cap %d: episodes = %v, want only the followed show's %s", maxC, got, eps[0].PID)
+		}
+		if len(res.Tracks) != 1 || res.Tracks[0].Title != "Harbor Song" {
+			t.Errorf("cap %d: tracks = %+v, want the track kept", maxC, res.Tracks)
+		}
+		if res.Truncated {
+			t.Errorf("cap %d: truncated, but the scope leaves two matches for a pool of two", maxC)
+		}
+	}
+	// A list resolves whole: a show named twice is one show, and one unknown show among
+	// known ones refuses the search.
+	twice, err := st.Search(ctx, "harbor", read.SearchOptions{Podcasts: []model.PID{followed.PodcastPID, followed.PodcastPID}})
+	if err != nil || len(twice.Episodes) != 1 {
+		t.Errorf("a show named twice = %+v (err %v), want its one episode", twice, err)
+	}
+	if _, err := st.Search(ctx, "harbor", read.SearchOptions{Podcasts: []model.PID{followed.PodcastPID, "nope"}}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("an unknown show among known ones = %v, want CodeNotFound", err)
+	}
+}
+
+// TestSearchPodcastsEmptyAdmitsNoEpisode: an empty show list keeps every episode out,
+// where no list at all narrows nothing.
+func TestSearchPodcastsEmptyAdmitsNoEpisode(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
+		title: "Harbor Song", artist: "A", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Harbor Talk")
+	none, err := st.Search(ctx, "harbor", read.SearchOptions{Podcasts: []model.PID{}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(none.Episodes) != 0 || len(none.Tracks) != 1 {
+		t.Errorf("empty show list = %d episodes, %d tracks; want none and the track", len(none.Episodes), len(none.Tracks))
+	}
+	all, err := st.Search(ctx, "harbor", read.SearchOptions{})
+	if err != nil || len(all.Episodes) != 1 {
+		t.Errorf("no show list = %+v (err %v), want the episode", all, err)
+	}
+}
+
+// TestSearchPodcastsScopeReachesTranscripts: a transcript hit of a show outside the list
+// is left out like a metadata hit.
+func TestSearchPodcastsScopeReachesTranscripts(t *testing.T) {
+	t.Parallel()
+	st, _, downloaded, remote := transcriptFixture(t)
+	ctx := context.Background()
+	other := putFeed(t, st, "http://cast.example/other", "Other Episode")
+	otherEps, err := st.EpisodesByPodcast(ctx, other.PodcastPID, 0)
+	if err != nil || len(otherEps) != 1 {
+		t.Fatalf("other episodes = %v (err %v)", otherEps, err)
+	}
+	if err := st.PutTranscript(ctx, model.PutTranscriptInput{
+		EpisodePID: otherEps[0].PID, Format: "text", Body: "zanzibar again",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mine := model.PID(scalarStr(t, st, `SELECT p.pid FROM podcast p JOIN episode e ON e.podcast_id = p.id
+		JOIN playable_item pi ON pi.id = e.item_id WHERE pi.pid = ?`, string(downloaded)))
+	res, err := st.Search(ctx, "zanzibar", read.SearchOptions{Podcasts: []model.PID{mine}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	got := episodePIDsOf(res)
+	if len(got) != 2 || !slices.Contains(got, downloaded) || !slices.Contains(got, remote) {
+		t.Errorf("transcript hits = %v, want the two of the listed show only", got)
+	}
+	res, err = st.Search(ctx, "zanzibar", read.SearchOptions{Podcasts: []model.PID{other.PodcastPID}, MaxCandidates: 1})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got := episodePIDsOf(res); len(got) != 1 || got[0] != otherEps[0].PID {
+		t.Errorf("capped transcript hits = %v, want the other show's one", got)
 	}
 }

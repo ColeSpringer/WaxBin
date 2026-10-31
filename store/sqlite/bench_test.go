@@ -54,7 +54,7 @@ func benchTrack(libID int64, i int) model.PutScannedTrackInput {
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:e" + fmt.Sprint(i),
+			IdentityKey: "essence:e" + fmt.Sprint(i),
 		},
 		Track: model.Track{
 			Artist: artist, ArtistSort: model.SortKey(artist), Album: album, AlbumArtist: artist,
@@ -86,14 +86,30 @@ func BenchmarkPutScannedTrack(b *testing.B) {
 }
 
 // BenchmarkPutScannedTrackSharedEntities measures one more put into an artist and a genre
-// holding 20,000 tracks: recomputing their rollups in the put, as an edit does, and
-// deferring them to a settle every 2,000 puts, as a scan does, the settles' cost included.
+// holding 20,000 tracks: recomputing their rollups and spellings in the put, as an edit
+// does, and deferring them to a settle every 2,000 puts, as a scan does, the settles' cost
+// included. The spelled catalog states ARTISTSORT and ALBUMARTISTSORT on every track, so
+// the artist's derived spelling reads every member (measured 2026-10-30: about 6.5 ms an
+// artist refresh unspelled, 48 ms spelled, beside a 32 ms artist rollup).
 func BenchmarkPutScannedTrackSharedEntities(b *testing.B) {
+	for _, spelled := range []bool{false, true} {
+		b.Run(map[bool]string{false: "plain", true: "spelled"}[spelled], func(b *testing.B) {
+			benchSharedEntities(b, spelled)
+		})
+	}
+}
+
+func benchSharedEntities(b *testing.B, spelled bool) {
 	st, lib := benchStore(b)
 	ctx := context.Background()
+	spelling := ""
+	if spelled {
+		spelling = "Artist, One"
+	}
 	shared := func(i int, deferred bool) model.PutScannedTrackInput {
 		in := benchTrack(lib.ID, i)
-		in.Track.Artist, in.Track.AlbumArtist, in.Track.ArtistSort = "One Artist", "One Artist", ""
+		in.Track.Artist, in.Track.AlbumArtist, in.Track.ArtistSort = "One Artist", "One Artist", spelling
+		in.Track.AlbumArtistSort = spelling
 		in.Track.Genre, in.Track.Genres = "Rock", []string{"Rock"}
 		in.Track.Album = fmt.Sprintf("Album %d", i/20)
 		in.DeferRollups = deferred

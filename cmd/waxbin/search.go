@@ -16,6 +16,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 		maxCandidates int
 		libraries     []string
 		states        []string
+		podcasts      []string
 	)
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
@@ -29,7 +30,8 @@ func newSearchCmd(g *globals) *cobra.Command {
 			"inside a CJK or Thai title is found; a query of symbols alone matches titles and artists spelled the same. " +
 			"--max-candidates bounds how many matches are ranked (the newest ones win under " +
 			"truncation), --library scopes the search to items playable from those libraries, " +
-			"and --state narrows it to items in those lifecycle states.",
+			"--state narrows it to items in those lifecycle states, and --podcast keeps only " +
+			"the episodes of those shows.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := strings.Join(args, " ")
@@ -49,6 +51,9 @@ func newSearchCmd(g *globals) *cobra.Command {
 			}
 			opt := read.SearchOptions{
 				Limit: limit, MaxCandidates: maxCandidates, Libraries: libPIDs, States: itemStates,
+			}
+			for _, p := range podcasts {
+				opt.Podcasts = append(opt.Podcasts, model.PID(p))
 			}
 			res, err := lib.Search(ctx(cmd), q, opt)
 			if err != nil {
@@ -80,6 +85,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 		"narrow to items in this item lifecycle state: "+model.ItemStateList()+
 			" (repeatable; not the per-user star/rating of the 'state' command, nor 'entity state';"+
 			" for anything richer than an allow-list, query the state field with in/notIn)")
+	cmd.Flags().StringArrayVar(&podcasts, "podcast", nil, "keep only the episodes of this show, by pid (repeatable; tracks and books are unaffected)")
 	return cmd
 }
 

@@ -117,7 +117,7 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 
 	// DISTINCT collapses a file that backs several members to one row.
 	rows, err := s.rdb().QueryContext(ctx,
-		"SELECT DISTINCT f.pid, f.path, f.display_path, itf.position "+entityMemberFilesFrom(et), id)
+		"SELECT DISTINCT f.pid, f.path, f.display_path, itf.position, "+fileFactCols+" "+entityMemberFilesFrom(et), id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -125,7 +125,7 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 	var out []model.ItemFileRef
 	for rows.Next() {
 		var ref model.ItemFileRef
-		if err := rows.Scan(&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position); err != nil {
+		if err := rows.Scan(append([]any{&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position}, fileFactDests(&ref)...)...); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		out = append(out, ref)
@@ -134,6 +134,72 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return out, nil
+}
+
+// FollowAlbumSortWrite gives each track of the album whose primary file is among files the
+// ALBUMSORT a write-back just put in those files, as the next scan of them would read it,
+// and settles the album's and its release group's derived spellings from it. A track whose
+// album_sort is locked keeps it, and its file, which now states the album's, owes it.
+func (s *Store) FollowAlbumSortWrite(ctx context.Context, albumPID model.PID, files []model.PID, spelling string) error {
+	const op = "store.FollowAlbumSortWrite"
+	if len(files) == 0 {
+		return nil
+	}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		var albumID int64
+		var groupID sql.NullInt64
+		err := tx.QueryRowContext(ctx, "SELECT id, release_group_id FROM album WHERE pid = ?", string(albumPID)).
+			Scan(&albumID, &groupID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		err = chunkSlice(uniquePIDs(files), idBatchSize, func(chunk []model.PID) error {
+			args := []any{albumID, spelling}
+			for _, p := range chunk {
+				args = append(args, string(p))
+			}
+			const locked = `EXISTS (SELECT 1 FROM field_provenance fp
+				WHERE fp.item_id = t.item_id AND fp.field = 'album_sort' AND fp.locked = 1)`
+			from := ` FROM track t
+				JOIN item_file e ON e.item_id = t.item_id AND e.role = 'primary'
+				JOIN file f ON f.id = e.file_id
+				WHERE t.album_id = ? AND t.album_sort != ? AND f.pid IN ` + placeholders(len(chunk))
+			held, err := queryInt64sTx(ctx, tx, "SELECT f.id"+from+" AND "+locked, args...)
+			if err != nil {
+				return err
+			}
+			if err := noteOwedTx(ctx, tx, held, []string{"album_sort"}); err != nil {
+				return err
+			}
+			members := "SELECT t.item_id" + from + " AND NOT " + locked
+			if _, err := tx.ExecContext(ctx, `INSERT INTO change_log(ts, entity_type, entity_pid, op)
+				SELECT ?, 'item', pi.pid, 'update' FROM playable_item pi WHERE pi.id IN (`+members+`)`,
+				append([]any{nowNS()}, args...)...); err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, "UPDATE track SET album_sort = ? WHERE item_id IN ("+members+")",
+				append([]any{spelling}, args...)...)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if _, _, err := settleSpellingsTx(ctx, tx, albumSpelling, []int64{albumID}); err != nil {
+			return err
+		}
+		if !groupID.Valid {
+			return nil
+		}
+		_, _, err = settleSpellingsTx(ctx, tx, releaseGroupSpelling, []int64{groupID.Int64})
+		return err
+	})
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return nil
 }
 
 // FollowArtistSortWrite gives each track the artist is the primary artist of, whose primary
@@ -147,7 +213,7 @@ func (s *Store) FollowArtistSortWrite(ctx context.Context, artistPID model.PID, 
 		return nil
 	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
-		return chunkSlice(uniquePIDs(files), idBatchSize, func(chunk []model.PID) error {
+		err := chunkSlice(uniquePIDs(files), idBatchSize, func(chunk []model.PID) error {
 			args := []any{string(artistPID), spelling}
 			for _, p := range chunk {
 				args = append(args, string(p))
@@ -180,6 +246,16 @@ func (s *Store) FollowArtistSortWrite(ctx context.Context, artistPID model.PID, 
 			}
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+		// The artist's own spelling derives from what its tracks now state.
+		ids, err := queryInt64sTx(ctx, tx, "SELECT id FROM artist WHERE pid = ?", string(artistPID))
+		if err != nil {
+			return err
+		}
+		_, _, err = settleSpellingsTx(ctx, tx, artistSpelling, ids)
+		return err
 	})
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)

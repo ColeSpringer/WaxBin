@@ -60,7 +60,7 @@ exit codes (`waxbin exit-codes`).
 | Area | Commands |
 | --- | --- |
 | **Lifecycle** | `init`, `library add`/`library list`/`library set`/`library remove`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
-| **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list`/`entity folds` |
+| **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`, `series`), `search` (incl. `--max-candidates`, `--library`, `--state`, `--podcast`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list`/`entity folds` |
 | **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]`, `kind --to book\|track [--write-back]` |
 | **Ingest / organize** | `inbox`, `import`, `organize` (incl. `organize history`, `organize undo`), `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent] [--file] [--reason]` (a file's sidecars go with it, and a folder it empties is removed), `mark-missing [--force]`, `merge`, `entity unfold`, `audit`, `diagnostics`, `upgrade` |
@@ -140,7 +140,8 @@ A value enrichment filled, or a normalize pass respelled, stays until the file s
 of its own.
 
 - `waxbin edit <pid> --set field=value` edits scalar metadata such as title, artist,
-  album, year, and track/disc numbers.
+  album, year, and track/disc numbers. `title_sort` and `album_sort` set the spellings an
+  item and its album collate by, as a file's TITLESORT and ALBUMSORT do.
 - `waxbin entity <pid> ...` edits a normalized entity's curated fields: a sort-name
   override, release identifiers such as barcode and label, and MusicBrainz IDs.
 - `waxbin credit <pid> ...` curates contributor roles such as composer and performer. A

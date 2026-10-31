@@ -16,10 +16,12 @@ CREATE TABLE artist (
   name      TEXT    NOT NULL,            -- canonical display casing
   name_sort TEXT    NOT NULL DEFAULT '', -- derived from the sort spellings its credits state, '' when none
   sort_key  TEXT    NOT NULL,            -- WaxBin-generated, BINARY-sortable
+  name_key  TEXT    NOT NULL DEFAULT '', -- the name alone folded (model.SortKey), what a lookup by name compares
   match_key TEXT    NOT NULL UNIQUE,     -- normalized dedup key
   mbid      TEXT                         -- not unique, not indexed; see above
 );
 CREATE INDEX artist_sort ON artist(sort_key);
+CREATE INDEX artist_name_key ON artist(name_key);
 -- Search finds an artist by its match key with the spaces dropped, so "jayz" is Jay-Z.
 CREATE INDEX artist_joined_key ON artist(replace(match_key, ' ', ''));
 
@@ -84,6 +86,7 @@ CREATE TABLE album (
   title            TEXT    NOT NULL,
   title_sort       TEXT    NOT NULL DEFAULT '',  -- derived from the album sort spellings its members state, '' when none
   sort_key         TEXT    NOT NULL,
+  title_key        TEXT    NOT NULL DEFAULT '',  -- the title alone folded (model.SortKey), what a lookup by title compares
   year             INTEGER,
   disc_total       INTEGER,
   mbid             TEXT,
@@ -96,6 +99,7 @@ CREATE TABLE album (
 );
 CREATE INDEX album_rg   ON album(release_group_id);
 CREATE INDEX album_sort ON album(sort_key);
+CREATE INDEX album_title_key ON album(title_key);
 -- See release_group_mbid: same role, same reason for staying non-unique and for the
 -- predicate stopping at IS NOT NULL.
 CREATE INDEX album_mbid ON album(mbid) WHERE mbid IS NOT NULL;

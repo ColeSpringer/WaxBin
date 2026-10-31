@@ -160,10 +160,10 @@ func (b *detachBatch) detachTx(ctx context.Context, tx *sql.Tx, fileID int64) (*
 		}
 	}
 
-	// The rollups' total_duration_ms sums from the file row, so dropping the file
-	// must refresh the touched entities or `db verify` would see drift. The track
-	// rows survive (the item is archived, not deleted), so the recompute keeps the
-	// track counts and only sheds the now-absent duration.
+	// The rollups sum durations from the file row and count live members, so dropping
+	// the file must refresh the touched entities or `db verify` would see drift. The
+	// track rows survive for a restore; an item left with no file is archived by
+	// settleTx before the recompute, which then sheds it from the counts as well.
 	for _, iid := range itemIDs {
 		if b.touched[iid] {
 			continue

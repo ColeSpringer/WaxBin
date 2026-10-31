@@ -38,7 +38,9 @@ const ExportFormat = "waxbin-export"
 // Version 8 adds the item's credits, additive again.
 // Version 9 adds a track's track and disc totals, a book's part total and the sort
 // spellings as stated, additive again.
-const ExportVersion = 9
+// Version 10 adds the title spelling and a track's album and album-artist spellings,
+// additive again.
+const ExportVersion = 10
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -102,9 +104,12 @@ type ItemExport struct {
 	RelPath   string `json:"relPath,omitempty"`
 	// The sort spellings as the file or an edit states them, empty when none; the keys a
 	// catalog sorts by derive from them.
-	ArtistSort   string `json:"artistSort,omitempty"`
-	ComposerSort string `json:"composerSort,omitempty"`
-	AuthorSort   string `json:"authorSort,omitempty"`
+	TitleSort       string `json:"titleSort,omitempty"`
+	ArtistSort      string `json:"artistSort,omitempty"`
+	AlbumSort       string `json:"albumSort,omitempty"`
+	AlbumArtistSort string `json:"albumArtistSort,omitempty"`
+	ComposerSort    string `json:"composerSort,omitempty"`
+	AuthorSort      string `json:"authorSort,omitempty"`
 	// The item's own external ids, the strongest cross-tool keys there are. Only its
 	// own two: this is a flat per-item record carrying no relational handles, and an
 	// album or artist id here would denormalize entity identity into every row.
@@ -192,7 +197,8 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 			Artist: it.Artist, AlbumArtist: it.AlbumArtist, Album: it.Album,
 			TrackNo: it.TrackNo, TrackTotal: it.TrackTotal, DiscNo: it.DiscNo, DiscTotal: it.DiscTotal,
 			PartTotal: it.PartTotal, Year: it.Year, Genre: it.Genre, BPM: it.BPM, MBID: it.MBID, ISRC: it.ISRC,
-			ArtistSort: it.ArtistSort, ComposerSort: it.ComposerSort, AuthorSort: it.AuthorSort,
+			TitleSort: it.TitleSort, ArtistSort: it.ArtistSort, AlbumSort: it.AlbumSort, AlbumArtistSort: it.AlbumArtistSort,
+			ComposerSort: it.ComposerSort, AuthorSort: it.AuthorSort,
 		}
 		if it.Source != model.SourceLocal {
 			ie.Source = string(it.Source)

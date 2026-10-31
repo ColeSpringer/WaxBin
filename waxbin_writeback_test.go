@@ -2000,10 +2000,10 @@ func TestEditTrackNumberWriteBackClearsStaleTotal(t *testing.T) {
 	}
 }
 
-// TestEditTitleWriteBackClearsStaleTitleSort: a written-back title edit clears the
-// TITLESORT the file carried, since an empty title is filled from it on a later read
-// and other players sort by it, and the catalog stops listing it as a custom tag. A
-// TITLESORT the user locked as a custom tag is curated and stays.
+// TestEditTitleWriteBackClearsStaleTitleSort: a written-back title edit drops the title
+// spelling the file stated and clears its TITLESORT, since the next scan would read it
+// back as the spelling of the new title; a locked title_sort is curated and stays, in the
+// catalog and in the file.
 func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2020,7 +2020,7 @@ func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
 		}
 		pid := itemPIDByTitle(t, ctx, lib, "Old")
 		if locked {
-			if err := lib.Lock(ctx, pid, "tag.TITLESORT"); err != nil {
+			if err := lib.Lock(ctx, pid, "title_sort"); err != nil {
 				t.Fatalf("lock the title sort: %v", err)
 			}
 		}
@@ -2035,13 +2035,12 @@ func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
 		if v, ok := doc.Tags().First(tag.TitleSort); ok != locked {
 			t.Errorf("locked %v: TITLESORT = %q (present %v) after the title write-back", locked, v, ok)
 		}
-		tags, err := lib.ItemTags(ctx, pid)
+		v, err := lib.Get(ctx, pid)
 		if err != nil {
-			t.Fatalf("item tags: %v", err)
+			t.Fatal(err)
 		}
-		listed := slices.ContainsFunc(tags, func(it model.ItemTag) bool { return it.Key == "TITLESORT" })
-		if listed != locked {
-			t.Errorf("locked %v: catalog lists TITLESORT %v, want %v", locked, listed, locked)
+		if want := map[bool]string{false: "", true: "Old Sort"}[locked]; v.TitleSort != want {
+			t.Errorf("locked %v: catalog title_sort = %q, want %q", locked, v.TitleSort, want)
 		}
 		if got := owedOn(t, ctx, lib, pid); got != nil {
 			t.Errorf("locked %v: owed after the write-back = %v, want none", locked, got)
@@ -2049,8 +2048,9 @@ func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
 	}
 }
 
-// TestTitleWriteBackPaysAnOwedTitleSortClear: a TITLESORT cleared in the catalog alone is
-// owed to the file, and a title write-back, which clears the file's TITLESORT too, pays it.
+// TestTitleWriteBackPaysAnOwedTitleSortClear: a catalog-only clear of the title spelling
+// leaves the file owing it, and a later title write-back that clears TITLESORT pays that
+// row along with its own.
 func TestTitleWriteBackPaysAnOwedTitleSortClear(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2063,11 +2063,11 @@ func TestTitleWriteBackPaysAnOwedTitleSortClear(t *testing.T) {
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
 	scanLib(t, ctx, lib)
 	pid := itemPIDByTitle(t, ctx, lib, "Old")
-	if _, _, err := lib.SetItemTag(ctx, pid, "TITLESORT", nil, waxbin.TagEditOptions{}); err != nil {
+	if err := lib.EditFields(ctx, pid, map[string]string{"title_sort": ""}, waxbin.EditOptions{Lock: model.LockOff}); err != nil {
 		t.Fatalf("catalog-only clear: %v", err)
 	}
-	if got := owedOn(t, ctx, lib, pid); !slices.Equal(got, []string{"tag.TITLESORT"}) {
-		t.Fatalf("owed after the catalog-only clear = %v, want [tag.TITLESORT]", got)
+	if got := owedOn(t, ctx, lib, pid); !slices.Equal(got, []string{"title_sort"}) {
+		t.Fatalf("owed after the catalog-only clear = %v, want [title_sort]", got)
 	}
 	if err := lib.EditFields(ctx, pid, map[string]string{"title": "New"},
 		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {

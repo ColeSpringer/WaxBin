@@ -582,8 +582,8 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 		// The update never writes playable_item.state, so a downloaded (present) episode
 		// is not knocked back to remote by a metadata re-sync.
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE playable_item SET title=?, sort_key=?, updated_at=? WHERE id=?",
-			fe.Title, model.SortKey(fe.Title), now, itemID); err != nil {
+			"UPDATE playable_item SET title=?, sort_key=?, title_key=?, updated_at=? WHERE id=?",
+			fe.Title, itemSortKey(fe.Title, ""), model.SortKey(fe.Title), now, itemID); err != nil {
 			return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := writeEpisodeRow(ctx, tx, itemID, podcastID, fe, exHash, pinned, managePinned, now); err != nil {
@@ -604,10 +604,10 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 	// New episode: insert the item (state=remote) and its subtype + FTS.
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx, `INSERT INTO playable_item
-		(pid, kind, state, title, sort_key, identity_key, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?)`,
+		(pid, kind, state, title, sort_key, title_key, identity_key, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
 		string(pid), string(model.KindEpisode), string(model.StateRemote),
-		fe.Title, model.SortKey(fe.Title), key, now, now)
+		fe.Title, itemSortKey(fe.Title, ""), model.SortKey(fe.Title), key, now, now)
 	if err != nil {
 		return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -702,8 +702,8 @@ func editEpisodeFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields [
 	now := nowNS()
 	if touchTitle {
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE playable_item SET title=?, sort_key=?, updated_at=? WHERE id=?",
-			newTitle, model.SortKey(newTitle), now, itemID); err != nil {
+			"UPDATE playable_item SET title=?, sort_key=?, title_key=?, updated_at=? WHERE id=?",
+			newTitle, itemSortKey(newTitle, ""), model.SortKey(newTitle), now, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}

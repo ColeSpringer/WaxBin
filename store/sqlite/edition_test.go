@@ -38,7 +38,7 @@ func editionTrack(t *testing.T, st *sqlite.Store, libID int64, essence, album st
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
-			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: tr,
 	})
@@ -638,7 +638,7 @@ func editionTrackWithCover(t *testing.T, st *sqlite.Store, libID int64, essence,
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
-			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: tr,
 		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 2, Height: 2,

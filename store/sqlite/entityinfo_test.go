@@ -180,14 +180,17 @@ func TestSeriesEntityCarriesNoMBID(t *testing.T) {
 	}
 }
 
-// TestEntityByPIDMatchesFacet pins the lookup's counts to the facet the pid came
-// from: an artist bucket's count and its EntityByPID ItemCount must agree.
+// TestEntityByPIDMatchesFacet: an entity's count is its live members, so it agrees with
+// the facet that leaves the trash out, a trashed member gone from both.
 func TestEntityByPIDMatchesFacet(t *testing.T) {
 	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
+	trashItemFile(t, st, &model.ScanItemResult{FilePID: model.PID(scalarStr(t, st,
+		"SELECT pid FROM file WHERE display_path = ?", "/lib/Radiohead/OK Computer/01.flac"))})
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "", 0, "")
+	live := query.New(query.EntityItems).WhereValues("state", query.OpNotIn, string(model.StateArchived)).Build()
+	res, err := st.Facet(ctx, live, read.GroupArtist, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -200,8 +203,8 @@ func TestEntityByPIDMatchesFacet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("lookup of facet pid %s: %v", b.EntityPID, err)
 		}
-		if info.ItemCount != b.Count {
-			t.Errorf("artist %s: facet count %d, entity count %d; must agree", b.Display, b.Count, info.ItemCount)
+		if info.ItemCount != b.Count || b.Count != 1 {
+			t.Errorf("artist %s: facet count %d, entity count %d; want both 1, the live member", b.Display, b.Count, info.ItemCount)
 		}
 		checked++
 	}
@@ -501,4 +504,97 @@ func TestEntityInfoAlbumIdentifiers(t *testing.T) {
 		t.Errorf("release group carries album identifiers %q/%q/%q, want all empty",
 			rg.Barcode, rg.Label, rg.CatalogNumber)
 	}
+}
+
+// liveCountFixture is two tracks of one album, artist and genre, and two books of one
+// series, with the inputs that put the first of each, for a trash and a restore put.
+func liveCountFixture(t *testing.T) (st *Store, lib *model.Library, one *model.ScanItemResult, oneSpec trackSpec,
+	first *model.ScanItemResult, firstSpec bookSpec) {
+	t.Helper()
+	st, lib = entityFixture(t)
+	oneSpec = trackSpec{path: "/lib/A/Al/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "A", albumArt: "A", album: "Al", genre: "Rock", durationMS: 100}
+	one = putTrack(t, st, lib.ID, oneSpec)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Al/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "A", albumArt: "A", album: "Al", genre: "Rock", durationMS: 250})
+	firstSpec = bookSpec{path: "/lib/B/1.m4b", essence: "be1", content: "bc1", title: "Book One",
+		author: "Au", series: "Saga", seq: "1", durationMS: 3000}
+	first = putBook(t, st, lib.ID, firstSpec)
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/B/2.m4b", essence: "be2", content: "bc2", title: "Book Two",
+		author: "Au", series: "Saga", seq: "2", durationMS: 5000})
+	return st, lib, one, oneSpec, first, firstSpec
+}
+
+// entityCountsOf reads an entity's count and duration through the single read and the
+// batch read, failing when the two disagree.
+func entityCountsOf(t *testing.T, st *Store, kind read.EntityKind, pid model.PID) (int, int64) {
+	t.Helper()
+	ctx := context.Background()
+	info, err := st.EntityByPID(ctx, kind, pid)
+	if err != nil {
+		t.Fatalf("%s %s: %v", kind, pid, err)
+	}
+	batch, err := st.EntityByPIDs(ctx, kind, []model.PID{pid})
+	if err != nil || batch[pid] == nil {
+		t.Fatalf("batch %s %s: %v", kind, pid, err)
+	}
+	if b := batch[pid]; b.ItemCount != info.ItemCount || b.TotalDurationMS != info.TotalDurationMS {
+		t.Errorf("%s batch counts %d/%d, single %d/%d", kind, b.ItemCount, b.TotalDurationMS, info.ItemCount, info.TotalDurationMS)
+	}
+	return info.ItemCount, info.TotalDurationMS
+}
+
+// TestEntityCountsLeaveTheTrashOut: an album's and a series' counts are their live
+// members, so a trashed member leaves the count as it leaves the duration, and the
+// restore's put brings both back.
+func TestEntityCountsLeaveTheTrashOut(t *testing.T) {
+	t.Parallel()
+	st, lib, one, oneSpec, first, firstSpec := liveCountFixture(t)
+	album := entityPIDByName(t, st, "album", "title", "Al")
+	series := entityPIDByName(t, st, "series", "name", "Saga")
+	check := func(step string, kind read.EntityKind, pid model.PID, wantN int, wantMS int64) {
+		t.Helper()
+		if n, ms := entityCountsOf(t, st, kind, pid); n != wantN || ms != wantMS {
+			t.Errorf("%s: %s counts %d/%d ms, want %d/%d", step, kind, n, ms, wantN, wantMS)
+		}
+	}
+	check("before", read.EntityAlbum, album, 2, 350)
+	check("before", read.EntitySeries, series, 2, 8000)
+	trashItemFile(t, st, one)
+	trashItemFile(t, st, first)
+	check("trashed", read.EntityAlbum, album, 1, 250)
+	check("trashed", read.EntitySeries, series, 1, 5000)
+	putTrack(t, st, lib.ID, oneSpec)
+	putBook(t, st, lib.ID, firstSpec)
+	check("restored", read.EntityAlbum, album, 2, 350)
+	check("restored", read.EntitySeries, series, 2, 8000)
+	assertVerifyClean(t, st)
+}
+
+// TestRollupsLeaveTheTrashOut: the artist, release-group and genre rollups count live
+// members as the album does, and verify recomputes them by the same rule, so a trash and
+// a restore each move the counts and leave no drift.
+func TestRollupsLeaveTheTrashOut(t *testing.T) {
+	t.Parallel()
+	st, lib, one, oneSpec, _, _ := liveCountFixture(t)
+	artist := entityPIDByName(t, st, "artist", "name", "A")
+	group := entityPIDByName(t, st, "release_group", "title", "Al")
+	genre := entityPIDByName(t, st, "genre", "name", "Rock")
+	check := func(step string, wantN int, wantMS int64) {
+		t.Helper()
+		for _, e := range []struct {
+			kind read.EntityKind
+			pid  model.PID
+		}{{read.EntityArtist, artist}, {read.EntityReleaseGroup, group}, {read.EntityGenre, genre}} {
+			if n, ms := entityCountsOf(t, st, e.kind, e.pid); n != wantN || ms != wantMS {
+				t.Errorf("%s: %s counts %d/%d ms, want %d/%d", step, e.kind, n, ms, wantN, wantMS)
+			}
+		}
+		assertVerifyClean(t, st)
+	}
+	check("before", 2, 350)
+	trashItemFile(t, st, one)
+	check("trashed", 1, 250)
+	putTrack(t, st, lib.ID, oneSpec)
+	check("restored", 2, 350)
 }

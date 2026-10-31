@@ -298,6 +298,19 @@ type ItemFileRef struct {
 	// Virtual reports that the item plays a window of the file, as a track a cue sheet
 	// carves out of a rip does, rather than the whole file.
 	Virtual bool
+
+	// The file's own facts, as model.File holds them (Bitrate in kilobits per second,
+	// FirstSeen in unix nanoseconds), 0 or empty where its header gave none. DurationMS is
+	// the whole file's even when Virtual.
+	FirstSeen  int64
+	Size       int64
+	Bitrate    int
+	SampleRate int
+	Channels   int
+	BitDepth   int
+	Codec      string
+	Container  string
+	DurationMS int64
 }
 
 // RelocateInput records a completed filesystem move so the store can update the
@@ -534,7 +547,8 @@ type Catalog interface {
 	// nothing, when to is not a valid pid or another item holds it.
 	AdoptItemPID(ctx context.Context, from, to PID) (bool, error)
 	// VirtualTracksForPath returns the virtual tracks the file at path backs, in start
-	// order and with their stored identity keys, or none when it is not a rip.
+	// order and with their stored identity keys, sheet fields and spellings, or none when
+	// it is not a rip.
 	VirtualTracksForPath(ctx context.Context, path []byte) ([]VirtualTrack, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)

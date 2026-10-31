@@ -706,3 +706,50 @@ func TestReleaseGroupMBIDField(t *testing.T) {
 		t.Errorf("query chain counts %d uncovered, audit counts %d; they must agree", uncovered, total)
 	}
 }
+
+// TestItemViewCarriesCreatedAndPrimaryFileFacts: the view carries the item's added time
+// and its primary file's size and bitrate, through the plain read and through the
+// megabytes budget, which appends its own column last; a fileless episode reads zeros.
+func TestItemViewCarriesCreatedAndPrimaryFileFacts(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	in := trackSpecInput(lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
+		title: "Airbag", artist: "X", album: "Al", durationMS: 1000})
+	in.File.Size, in.File.Bitrate, in.File.SampleRate = 4_000_000, 320, 44100
+	in.File.Container, in.File.Codec = "flac", "flac"
+	tr, err := st.PutScannedTrack(ctx, in)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	created := int64(scalarInt(t, st, "SELECT created_at FROM playable_item WHERE pid = ?", string(tr.ItemPID)))
+
+	v, err := st.ItemByPID(ctx, tr.ItemPID)
+	if err != nil {
+		t.Fatalf("item: %v", err)
+	}
+	if v.CreatedAt != created || v.FileSize != 4_000_000 || v.Bitrate != 320 {
+		t.Errorf("view created/size/bitrate = %d/%d/%d, want %d/4000000/320", v.CreatedAt, v.FileSize, v.Bitrate, created)
+	}
+	budget, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("kind", query.OpIs, "track").Limit(10).LimitBy(query.LimitMegabytes).Build(), "")
+	if err != nil || len(budget) != 1 {
+		t.Fatalf("megabytes query = %d items (err %v)", len(budget), err)
+	}
+	if b := budget[0]; b.CreatedAt != created || b.FileSize != 4_000_000 || b.Bitrate != 320 || b.SampleRate != 44100 {
+		t.Errorf("budget view = %d/%d/%d/%d, want the plain read's", b.CreatedAt, b.FileSize, b.Bitrate, b.SampleRate)
+	}
+
+	feed := putFeed(t, st, "http://cast.example/f", "Ep1")
+	eps, err := st.EpisodesByPodcast(ctx, feed.PodcastPID, 0)
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("episodes = %v (err %v)", eps, err)
+	}
+	ep, err := st.ItemByPID(ctx, eps[0].PID)
+	if err != nil {
+		t.Fatalf("episode view: %v", err)
+	}
+	if ep.CreatedAt == 0 || ep.FileSize != 0 || ep.Bitrate != 0 {
+		t.Errorf("fileless episode created/size/bitrate = %d/%d/%d, want a time and zeros", ep.CreatedAt, ep.FileSize, ep.Bitrate)
+	}
+}

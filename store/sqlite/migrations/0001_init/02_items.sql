@@ -7,6 +7,7 @@ CREATE TABLE playable_item (
   title        TEXT    NOT NULL,
   title_sort   TEXT    NOT NULL DEFAULT '',  -- the sort spelling the file states (a book's ALBUMSORT), '' when none
   sort_key     TEXT    NOT NULL,
+  title_key    TEXT    NOT NULL DEFAULT '',  -- the title alone folded (model.SortKey), what a lookup by title compares
   identity_key TEXT,                     -- entity-identity key (package identity)
   -- The track's or book's year, 0 when it has none and for an episode, kept here so the
   -- newest list walks an index; upsertTrack and upsertBook write it beside the year.
@@ -15,6 +16,7 @@ CREATE TABLE playable_item (
   updated_at   INTEGER NOT NULL
 );
 CREATE INDEX item_sort ON playable_item(sort_key);
+CREATE INDEX item_title_key ON playable_item(title_key);
 -- The recently-added and newest orders, the pid tiebreak included, so a page is a walk.
 -- A list scoped to one kind walks the kind-led twin of its order, which a lookup by kind
 -- alone also uses.

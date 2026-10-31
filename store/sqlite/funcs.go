@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"hash/fnv"
 
+	"github.com/colespringer/waxbin/identity"
 	msqlite "modernc.org/sqlite"
 )
 
@@ -17,6 +18,30 @@ func init() {
 	// the seed is what keeps a paginated shuffle stable across pages: the same seed
 	// yields the same order, and keyset pagination resumes after the cursor's hash.
 	msqlite.MustRegisterDeterministicScalarFunction("wb_shuffle", 2, wbShuffle)
+	// wb_sole_credit(credit, key) reports whether a music credit names one artist alone:
+	// it splits to one name, or the whole credit folds to key, the match key of the
+	// artist a credit resolving as one entity is named for (an artist's derived sort
+	// spelling, entityspelling.go).
+	msqlite.MustRegisterDeterministicScalarFunction("wb_sole_credit", 2, wbSoleCredit)
+}
+
+func wbSoleCredit(_ *msqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+	credit, key := sqlText(args[0]), sqlText(args[1])
+	if len(identity.SplitPerformerCredit(credit)) == 1 || identity.MatchKey(credit) == key {
+		return int64(1), nil
+	}
+	return int64(0), nil
+}
+
+// sqlText reads a text argument, "" for any other type.
+func sqlText(v driver.Value) string {
+	switch v := v.(type) {
+	case string:
+		return v
+	case []byte:
+		return string(v)
+	}
+	return ""
 }
 
 // wbShuffle returns a non-negative 63-bit FNV-1a hash of (seed, key). Masking off
@@ -28,13 +53,7 @@ func wbShuffle(_ *msqlite.FunctionContext, args []driver.Value) (driver.Value, e
 	if v, ok := args[0].(int64); ok {
 		seed = v
 	}
-	var key string
-	switch v := args[1].(type) {
-	case string:
-		key = v
-	case []byte:
-		key = string(v)
-	}
+	key := sqlText(args[1])
 	h := fnv.New64a()
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], uint64(seed))

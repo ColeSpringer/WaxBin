@@ -35,7 +35,7 @@ func seedTaggedTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence,
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Shine On",
-			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{
 			Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here",

@@ -15,9 +15,9 @@ func TestSchemaBatchColumnsExist(t *testing.T) {
 	ctx := context.Background()
 	columns := map[string][]string{
 		"file":            {"name"},
-		"playable_item":   {"title_sort"},
-		"artist":          {"name_sort"},
-		"album":           {"title_sort"},
+		"playable_item":   {"title_sort", "title_key"},
+		"artist":          {"name_sort", "name_key"},
+		"album":           {"title_sort", "title_key"},
 		"release_group":   {"title_sort"},
 		"entity_fold":     {"name", "folder", "library_id"},
 		"track":           {"album_sort", "album_artist_sort"},
@@ -56,6 +56,9 @@ func TestSchemaBatchColumnsExist(t *testing.T) {
 		"file_name_nocase":    {{"name", "NOCASE"}},
 		"file_display_nocase": {{"display_path", "NOCASE"}},
 		"chapter_book_file":   {{"book_item_id", "BINARY"}, {"file_id", "BINARY"}},
+		"item_title_key":      {{"title_key", "BINARY"}},
+		"artist_name_key":     {{"name_key", "BINARY"}},
+		"album_title_key":     {{"title_key", "BINARY"}},
 	}
 	for index, want := range indexes {
 		var have []key

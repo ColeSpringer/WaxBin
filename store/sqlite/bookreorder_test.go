@@ -134,7 +134,7 @@ func TestARipJoiningALargerBookLeavesItUnfinished(t *testing.T) {
 	for n, w := range [][2]int64{{0, 44100}, {44100, 0}} {
 		title := fmt.Sprintf("Track %d", n+1)
 		in.Tracks = append(in.Tracks, model.VirtualTrack{
-			Item:        model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: title, SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey("te1", n+1, w[0])},
+			Item:        model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: title, IdentityKey: identity.VirtualTrackKey("te1", n+1, w[0])},
 			Track:       model.Track{Artist: "Author", AlbumArtist: "Author", Album: "Tome", TrackNo: n + 1},
 			StartFrames: w[0], EndFrames: w[1],
 		})

@@ -83,7 +83,7 @@ func openWithTracks(t *testing.T, ctx context.Context, db string, names ...strin
 			},
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: name,
-				SortKey: model.SortKey(name), IdentityKey: "essence:e" + name,
+				IdentityKey: "essence:e" + name,
 			},
 			Track: model.Track{Artist: "Artist", Album: "Album", TrackNo: 1},
 		})

@@ -133,7 +133,7 @@ func seedTrackWith(t *testing.T, st *sqlite.Store, libID int64, path, essence, t
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: tr,
 	})

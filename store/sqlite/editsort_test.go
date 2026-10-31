@@ -213,7 +213,7 @@ func rescanTrackWithComposer(t *testing.T, st *Store, libID int64, path, essence
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Original",
-			SortKey: model.SortKey("Original"), IdentityKey: "essence:" + essence,
+			IdentityKey: "essence:" + essence,
 		},
 		Track: model.Track{
 			Artist: "Alpha", Composer: composer, ComposerSort: spelling,

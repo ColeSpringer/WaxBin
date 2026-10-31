@@ -44,11 +44,14 @@ func newEditCmd(g *globals) *cobra.Command {
 			"\"fields\": {...}} entries (\"-\" reads stdin), each item getting its own values, all " +
 			"applied in one atomic catalog transaction. It excludes pids, --set, and the selection " +
 			"flags, and honors the same preview gate.\n\n" +
-			"Track fields: title, artist, album_artist, album, composer, composer_sort, comment, " +
-			"genre, year, track_no, track_total, disc_no, disc_total, bpm, isrc, mbid, compilation. " +
-			"A track_no or disc_no edited past a total it does not name clears that total, unless the total is locked.\n" +
-			"Book fields: title, author, author_sort, narrator, series, subtitle, genre, year, " +
-			"asin, isbn, publisher, edition, description, mbid.",
+			"Track fields: title, title_sort, artist, album_artist, album, album_sort, composer, composer_sort, " +
+			"comment, genre, year, track_no, track_total, disc_no, disc_total, bpm, isrc, mbid, compilation. " +
+			"A track_no or disc_no edited past a total it does not name clears that total, unless the total is locked. " +
+			"A title, album or composer edit drops the sort spelling beside it unless that spelling is locked or edited with it, " +
+			"and an artist or album_artist edit drops that name's spelling, which has no field of its own to lock.\n" +
+			"Book fields: title, title_sort, author, author_sort, narrator, series, subtitle, genre, year, " +
+			"asin, isbn, publisher, edition, description, mbid. A title or author edit drops title_sort or author_sort " +
+			"the same way.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hasSelection := qf.title != "" || qf.artist != "" || qf.album != "" || qf.genre != "" ||
 				qf.kind != "" || qf.source != "" || qf.year != 0 || rulePath != ""

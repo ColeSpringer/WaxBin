@@ -40,6 +40,7 @@ type Store interface {
 	RemovePlaylistItemsAt(ctx context.Context, pid model.PID, indexes []int, expect []model.PID) error
 	ItemsByPlaylistPath(ctx context.Context, path string) ([]*model.ItemView, error)
 	UserByPID(ctx context.Context, pid model.PID) (*model.User, error)
+	QueryNeedsUser(q query.Query) (bool, error)
 }
 
 // Service exposes playlist operations to consumers.
@@ -77,6 +78,20 @@ func (s *Service) Get(ctx context.Context, pid model.PID) (*model.Playlist, erro
 // The user is bound at read time and never stored in the rule.
 func (s *Service) Items(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error) {
 	return s.store.PlaylistItems(ctx, pid, userPID)
+}
+
+// ReadsUserState reports whether the playlist's members depend on who reads them: a smart
+// playlist's do when its rule reads per-user state (see Items), and a static playlist's
+// never do.
+func (s *Service) ReadsUserState(ctx context.Context, pid model.PID) (bool, error) {
+	pl, err := s.store.PlaylistByPID(ctx, pid)
+	if err != nil {
+		return false, err
+	}
+	if pl.Kind != model.PlaylistSmart || pl.Rule == nil {
+		return false, nil
+	}
+	return s.store.QueryNeedsUser(*pl.Rule)
 }
 
 // CountItems returns how many of a playlist's members also match narrow, without

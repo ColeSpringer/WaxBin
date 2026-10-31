@@ -577,7 +577,7 @@ func TestAuditFilesYieldsOneRowPerSharedRip(t *testing.T) {
 		tracks[i] = model.VirtualTrack{
 			Item: model.PlayableItem{
 				Kind: model.KindTrack, State: model.StatePresent, Title: title,
-				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey("eRip", n, w[0]),
+				IdentityKey: identity.VirtualTrackKey("eRip", n, w[0]),
 			},
 			Track:       model.Track{Artist: "Band", AlbumArtist: "Band", Album: "Rip", TrackNo: n},
 			StartFrames: w[0], EndFrames: w[1],
@@ -793,5 +793,38 @@ func TestDuplicateSurvivorsCountLive(t *testing.T) {
 	}
 	if m := genres[0].Members[0]; m.Name != "The Blues" || m.TrackCount != 3 {
 		t.Errorf("genre set leads with %+v, want The Blues with 3 tracks", m)
+	}
+}
+
+// TestDuplicateSurvivorsLeaveTheTrashOut: a duplicate set counts its members' live tracks,
+// as EntityInfo does, so a member most of whose tracks are trashed does not lead the set.
+func TestDuplicateSurvivorsLeaveTheTrashOut(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i := range 2 {
+		putTrack(t, st, lib.ID, trackSpec{path: fmt.Sprintf("/lib/a/%d.flac", i), essence: fmt.Sprintf("ea%d", i),
+			content: fmt.Sprintf("ca%d", i), title: "T", artist: "Beatles", album: "A", genre: "Blues"})
+	}
+	for i := range 3 {
+		res := putTrack(t, st, lib.ID, trackSpec{path: fmt.Sprintf("/lib/b/%d.flac", i), essence: fmt.Sprintf("eb%d", i),
+			content: fmt.Sprintf("cb%d", i), title: "T", artist: "The Beatles", album: "B", genre: "The Blues"})
+		if i > 0 {
+			trashItemFile(t, st, res)
+		}
+	}
+	artists, err := st.DuplicateArtists(ctx)
+	if err != nil || len(artists) != 1 {
+		t.Fatalf("artist sets = %+v (err %v), want one", artists, err)
+	}
+	if m := artists[0].Members; m[0].Name != "Beatles" || m[0].TrackCount != 2 || m[1].TrackCount != 1 {
+		t.Errorf("artist set = %+v, want Beatles with 2 live tracks leading The Beatles with 1", m)
+	}
+	genres, err := st.DuplicateGenres(ctx)
+	if err != nil || len(genres) != 1 {
+		t.Fatalf("genre sets = %+v (err %v), want one", genres, err)
+	}
+	if m := genres[0].Members; m[0].Name != "Blues" || m[0].TrackCount != 2 || m[1].TrackCount != 1 {
+		t.Errorf("genre set = %+v, want Blues with 2 live tracks leading The Blues with 1", m)
 	}
 }

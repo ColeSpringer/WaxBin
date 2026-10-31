@@ -416,7 +416,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 
 		// What the file itself says, kept from before the lock overlay so the owed rows
 		// can be checked against it.
-		fileTitle, fileTrack := in.Item.Title, in.Track
+		fileTitle, fileTrack := titleOf(in.Item), in.Track
 
 		// Overlay the item's locked fields, and the fills the file says nothing about,
 		// onto the scanned values before any writer runs (overlayStoredTrackTx). Runs
@@ -483,7 +483,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if prior != nil {
 			known.id = prior.itemID
 		}
-		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, in.Track.Year, bookAdoptKey{}, now, in.PreferredItemPID, known)
+		itemID, itemPID, created, stateChanged, was, err := upsertItem(ctx, tx, s.log, in.Item, in.Track.Year, bookAdoptKey{}, now, in.PreferredItemPID, known)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -494,7 +494,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		var rederived []string
 		var prov map[string]rederivable
 		if !created {
-			rederived, prov, err = rederivedTrackTx(ctx, tx, itemID, priorTitle, in.Item.Title, in.Track, in.PreserveLocks, prior)
+			rederived, prov, err = rederivedTrackTx(ctx, tx, itemID, was, titleOf(in.Item), in.Track, in.PreserveLocks, prior)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -610,7 +610,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 		if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
-			fileTitle: fileTitle, title: in.Item.Title, fileTrack: fileTrack, track: in.Track,
+			fileTitle: fileTitle, title: titleOf(in.Item), fileTrack: fileTrack, track: in.Track,
 			preserveLocks: in.PreserveLocks, derived: in.Derived,
 			cover: cover, acquisitionRecorded: acqAdded,
 			fileTags: in.CustomTags, tagsReplaced: tagsReplaced,

@@ -223,6 +223,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"entity", "info", "artist", p(fx.artist)}},
 		{args: []string{"entity", "state", "artist", p(fx.artist)}},
 		{args: []string{"entity", "stars", "artist"}},
+		{args: []string{"entity", "ratings", "artist"}},
 		{args: []string{"playlist", "list"}},
 		{args: []string{"playlist", "show", p(fx.mix)}},
 		{args: []string{"playlist", "export", p(fx.mix)}},
