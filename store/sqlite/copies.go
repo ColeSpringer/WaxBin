@@ -195,6 +195,11 @@ func reachOf(path, root []byte, roots map[string]bool) reach {
 	return goneFromRoot
 }
 
+// essenceGoneQ lists the files in a library with one essence hash, those holding the given
+// content first.
+const essenceGoneQ = fileSelect + ` WHERE essence_hash = ? AND library_id = ?
+	ORDER BY content_hash = ? DESC, id`
+
 // fileByEssenceGoneTx returns the row a moved file relinks to: a file in the library with
 // the same essence whose path is gone from disk, one holding the same bytes first, then the
 // lowest id. A row still on disk under its own spelling is a copy, never a relink target;
@@ -208,8 +213,7 @@ func reachOf(path, root []byte, roots map[string]bool) reach {
 // the gone one. A file whose key no item holds yet (retagged and moved in one pass) takes
 // the only gone row of its audio, the row a retag in place and then a move would relink.
 func fileByEssenceGoneTx(ctx context.Context, tx *sql.Tx, essence, content string, libraryID int64, accept map[int64]bool) (*model.File, error) {
-	rows, err := tx.QueryContext(ctx, fileSelect+` WHERE essence_hash = ? AND library_id = ?
-		ORDER BY content_hash = ? DESC, id`, essence, libraryID, content)
+	rows, err := tx.QueryContext(ctx, essenceGoneQ, essence, libraryID, content)
 	if err != nil {
 		return nil, err
 	}
@@ -452,6 +456,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	affected := newAffectedRollups()
+	affected.deferred = in.DeferRollups
 	promoted, folded, _, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)

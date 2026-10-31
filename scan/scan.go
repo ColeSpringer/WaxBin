@@ -50,6 +50,38 @@ type Scanner struct {
 	// rather than by every scheduled rescan that meets it.
 	reachMu     sync.Mutex
 	unreachable map[string]bool
+
+	// RollupSettleEvery is how many of a scan's puts leave their rollups for a settle
+	// before the scan settles them (0 means 2,000). The scan settles once more as it ends,
+	// so this bounds what a crash can leave for the next open to settle.
+	RollupSettleEvery int
+}
+
+// rollupCadence settles what a scan's puts left pending (PutScannedTrackInput's
+// DeferRollups) each time every more puts have landed. A failed settle is only logged:
+// the next one, or the next read-write open, settles what it left.
+type rollupCadence struct {
+	cat   model.Catalog
+	log   *slog.Logger
+	every int
+	puts  int
+}
+
+// put counts one deferred put, settling when the count reaches every.
+func (c *rollupCadence) put(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	if c.puts++; c.puts >= c.every {
+		c.settle(ctx)
+	}
+}
+
+func (c *rollupCadence) settle(ctx context.Context) {
+	c.puts = 0
+	if _, err := c.cat.SettleRollups(ctx); err != nil {
+		c.log.Warn("scan: settling deferred rollups", "err", err)
+	}
 }
 
 // noteReach logs a library root's reachability when it changes: a warning when it goes
@@ -257,6 +289,13 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	if sc.adopt && sc.adoption == nil {
 		sc.adoption = &Adoption{}
 	}
+	every := s.RollupSettleEvery
+	if every <= 0 {
+		every = 2000
+	}
+	sc.rollups = &rollupCadence{cat: s.cat, log: s.log, every: every}
+	// A canceled or failed scan settles what it put too.
+	defer sc.rollups.settle(context.WithoutCancel(ctx))
 
 	// Preload the scope's file index once, so the walk fast-paths an unchanged file
 	// (size+mtime match) in memory and reconciles vanished ones at end-of-walk, with
@@ -396,6 +435,9 @@ type scanCtx struct {
 	// album and position are FileOptions', for a single-file scan.
 	album    string
 	position *int
+	// rollups is the walk's settle cadence, nil outside a walk, where a put recomputes the
+	// rollups it touches itself.
+	rollups *rollupCadence
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
@@ -476,7 +518,7 @@ func (s *Scanner) reconcileMissing(ctx context.Context, root, walkRoot string, s
 // result: each was counted on its own visit or belongs to another library, so they take
 // no outcome of their own.
 func (s *Scanner) rereadPromoted(ctx context.Context, sc *scanCtx, res *Result) {
-	res.Promoted += s.reread(ctx, sc.promoted, sc.preserveLocks)
+	res.Promoted += s.reread(ctx, sc.promoted, sc.preserveLocks, sc.rollups)
 	sc.promoted = nil
 }
 
@@ -486,10 +528,10 @@ func (s *Scanner) rereadPromoted(ctx context.Context, sc *scanCtx, res *Result) 
 // skipped (a later action took it too), and a failure is logged; the promotion cleared
 // each file's stamp, so the next scan reads it in full either way.
 func (s *Scanner) RereadPromoted(ctx context.Context, promoted []model.PromotedFile) int {
-	return s.reread(ctx, promoted, true)
+	return s.reread(ctx, promoted, true, nil)
 }
 
-func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, preserveLocks bool) int {
+func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, preserveLocks bool, rollups *rollupCadence) int {
 	seen := map[string]bool{}
 	var files []model.PromotedFile
 	for _, p := range promoted {
@@ -516,7 +558,7 @@ func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, pre
 			continue
 		}
 		lib := libs[i]
-		reread := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: preserveLocks}
+		reread := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: preserveLocks, rollups: rollups}
 		if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, &Result{}, reread, ""); err != nil {
 			s.log.Warn("re-reading a promoted file", "path", path, "err", err)
 		}
@@ -875,6 +917,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		out, err = s.cat.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
 			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, AuxObservations: aux,
 			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
+			DeferRollups: sc.rollups != nil,
 		})
 	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover, partPlace(&tags, root, path, lib.Mode == model.ModeManaged, sc.position))
@@ -895,6 +938,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.PreserveLocks = sc.preserveLocks
 		bin.Derived = derived
 		bin.LockKind, bin.KindForced = lockKind, forceKind != ""
+		bin.DeferRollups = sc.rollups != nil
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
@@ -919,11 +963,13 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			Derived:          derived,
 			LockKind:         lockKind,
 			KindForced:       forceKind != "",
+			DeferRollups:     sc.rollups != nil,
 		})
 	}
 	if err != nil {
 		return err
 	}
+	sc.rollups.put(ctx)
 	if sc.adopt && len(rip) == 0 {
 		if err := s.settleAdoption(ctx, sc, out, adoptedPID(sc, fm)); err != nil {
 			return err

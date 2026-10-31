@@ -32,27 +32,33 @@ func (s *Store) DuplicateArtists(ctx context.Context) ([]model.DuplicateSet, err
 	return append(byMBID, bySort...), nil
 }
 
+// The duplicate sets count their members' tracks live rather than reading the rollups,
+// which trail a running scan until its next settle, so the member backing the most
+// tracks leads its set (the survivor a merge keeps) whatever a scan has left pending.
+const (
+	artistLiveTracks = `(SELECT COUNT(DISTINCT t.item_id) FROM track t WHERE t.artist_id = e.id)`
+	genreLiveTracks  = `(SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = e.id)`
+)
+
 func (s *Store) artistDupSets(ctx context.Context, col, reason string) ([]model.DuplicateSet, error) {
-	q := `SELECT e.` + col + `, e.pid, e.name, COALESCE(r.track_count,0)
+	q := `SELECT e.` + col + `, e.pid, e.name, ` + artistLiveTracks + ` AS n
 		FROM artist e
-		LEFT JOIN artist_rollup r ON r.artist_id = e.id
 		WHERE e.` + col + ` IN (
 			SELECT ` + col + ` FROM artist
 			WHERE ` + col + ` IS NOT NULL AND ` + col + ` <> ''
 			GROUP BY ` + col + ` HAVING COUNT(*) > 1)
-		ORDER BY e.` + col + `, COALESCE(r.track_count,0) DESC, e.pid`
+		ORDER BY e.` + col + `, n DESC, e.pid`
 	return s.scanDupSets(ctx, q, model.MergeArtist, reason)
 }
 
 // DuplicateGenres finds genre/mood entities within one facet that share a
 // collation sort key but were kept apart by a differing match key.
 func (s *Store) DuplicateGenres(ctx context.Context) ([]model.DuplicateSet, error) {
-	q := `SELECT e.facet || char(31) || e.sort_key, e.pid, e.name, COALESCE(r.track_count,0)
+	q := `SELECT e.facet || char(31) || e.sort_key, e.pid, e.name, ` + genreLiveTracks + ` AS n
 		FROM genre e
-		LEFT JOIN genre_rollup r ON r.genre_id = e.id
 		WHERE e.facet || char(31) || e.sort_key IN (
 			SELECT facet || char(31) || sort_key FROM genre GROUP BY 1 HAVING COUNT(*) > 1)
-		ORDER BY 1, COALESCE(r.track_count,0) DESC, e.pid`
+		ORDER BY 1, n DESC, e.pid`
 	return s.scanDupSets(ctx, q, model.MergeGenre, "same collation key")
 }
 

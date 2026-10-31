@@ -9,11 +9,14 @@ import (
 )
 
 // stmtCacheMax bounds the statements kept prepared: a query's text varies with the
-// shape of its filter, so the set a long-running server sees is open-ended. An item-view
-// statement holds 50 to 60 KB of SQLite's memory on each pool connection that has run it,
-// so the bound keeps the cache near 2 MB a connection, an eighth of the page cache each
-// connection keeps by default.
-const stmtCacheMax = 32
+// shape of its filter and the page size written into it, so the set a long-running
+// server sees is open-ended. The item and entity reads, single and batched, take 31
+// texts at one page size, and each browse list, query shape and search a few more, so a
+// host with a handful of views open keeps 70 or so hot. An item-view statement holds 15
+// to 45 KB of SQLite's memory on each pool connection that has run it and most others 1
+// to 2 KB, so a full cache of a usual mix is under 1 MB a connection, and of item views
+// alone under 6 MB, well inside the page cache each connection may keep by default.
+const stmtCacheMax = 128
 
 // stmtCache holds prepared statements on the read pool, keyed by their SQL text, so a hot
 // read skips parsing and planning its statement on every call. Preparing allocates
@@ -33,6 +36,17 @@ type stmtCache struct {
 	db    *sql.DB
 	byKey map[string]*cachedStmt
 	lru   list.List // *cachedStmt, most recently used first
+	// prepares and hits count the texts prepared and served from the cache, for tests.
+	prepares, hits int
+}
+
+// stmtCacheStats is what a stmtCache has done since it was made.
+type stmtCacheStats struct{ prepares, hits int }
+
+func (c *stmtCache) stats() stmtCacheStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return stmtCacheStats{c.prepares, c.hits}
 }
 
 type cachedStmt struct {
@@ -82,10 +96,12 @@ func (c *stmtCache) acquire(ctx context.Context, db *sql.DB, query string) (*cac
 	}
 	if e, ok := c.byKey[query]; ok {
 		e.users++
+		c.hits++
 		c.lru.MoveToFront(e.elem)
 		c.mu.Unlock()
 		return e, nil
 	}
+	c.prepares++
 	c.mu.Unlock()
 
 	st, err := db.PrepareContext(ctx, query)

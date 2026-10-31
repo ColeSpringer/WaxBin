@@ -27,8 +27,19 @@ type DerivedReport struct {
 	// Static playlists whose positions are not 0..n-1. Informational: an index resolves
 	// by rank, so such a gap changes nothing a reader sees; --fix renumbers it.
 	PlaylistPositionDrift int
-	OrphanArtSources      int // art_source images with no live art_map references
-	OrphanThumbnails      int // thumb_cache rows whose source is unreferenced
+	// Entities a scan's deferred puts left for its next settle (SettleRollups). Their
+	// rollups and album years lag by design until it runs, so while a scan holds the
+	// filesystem lease the drift checks leave them out. With none running they are a
+	// settle that failed, or a crash the next read-write open settles, and they read as
+	// drift.
+	RollupsPending   int
+	OrphanArtSources int // art_source images with no live art_map references
+	OrphanThumbnails int // thumbnails whose source is unreferenced
+	// ThumbnailsDamaged says the thumbnail file could not be read whole, so
+	// OrphanThumbnails is not counted. A read-write store marks such a file, and its
+	// next open replaces it. A damaged cache is no fault of the catalog, so it is in
+	// neither Consistent nor Reclaimable.
+	ThumbnailsDamaged bool
 	// field_provenance rows under a "tag.<KEY>" whose key WaxBin has since reserved.
 	// Nothing can read, edit, or unlock one, and the scan's own sweep cannot reach the
 	// row on an item that holds no custom tags at all.
@@ -63,11 +74,29 @@ func (r DerivedReport) Reclaimable() bool {
 
 // VerifyDerived checks FTS coverage, the maintained rollups, and the generated
 // sort keys against the source rows. FTS field content is not diffed, only
-// coverage; RebuildSearchIndex rewrites stale content. It never writes: `db verify`
-// surfaces the report and the operator runs the matching repair.
+// coverage; RebuildSearchIndex rewrites stale content. While a scan runs, an entity its
+// deferred puts left for the next settle is counted as pending rather than checked. It
+// never writes the catalog: `db verify` surfaces the report and the operator runs the
+// matching repair.
 func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 	const op = "store.VerifyDerived"
 	rep := &DerivedReport{}
+	var scanning bool
+	if err := s.rdb().QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM lease WHERE scope = ?)",
+		model.FSMutateScope).Scan(&scanning); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	// While a scan runs, what it has yet to settle is no drift.
+	unsettled := func(kind, idExpr string) string {
+		if !scanning {
+			return ""
+		}
+		return " AND NOT " + settlePending(kind, idExpr)
+	}
+	albumYears := strings.Replace(albumYearDriftQ, "/*FILTER*/", "", 1)
+	if scanning {
+		albumYears = strings.Replace(albumYearDriftQ, "/*FILTER*/", "WHERE NOT "+settlePending("album", "al.id"), 1)
+	}
 
 	checks := []struct {
 		dst  *int
@@ -77,27 +106,35 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 			WHERE pi.state = 'present' AND NOT EXISTS (SELECT 1 FROM search_fts WHERE rowid = pi.id)`},
 		{&rep.OrphanFTSRows, `SELECT COUNT(*) FROM search_fts s
 			WHERE NOT EXISTS (SELECT 1 FROM playable_item pi WHERE pi.id = s.rowid)`},
-		{&rep.ArtistRollupDrift, artistRollupDriftQ},
-		{&rep.GenreRollupDrift, genreRollupDriftQ},
-		{&rep.ReleaseGroupRollupDrift, releaseGroupRollupDriftQ},
-		// A book's denormalized total duration must equal the sum of its parts'
-		// effective durations (the same definition refreshBookDuration writes).
-		{&rep.BookDurationDrift, "SELECT COUNT(*) FROM book b WHERE b.total_duration_ms <> " +
-			fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")},
+		{&rep.RollupsPending, "SELECT COUNT(*) FROM rollup_dirty"},
+		{&rep.ArtistRollupDrift, artistRollupDriftQ + unsettled("artist", "a.id")},
+		{&rep.GenreRollupDrift, genreRollupDriftQ + unsettled("genre", "g.id")},
+		{&rep.ReleaseGroupRollupDrift, releaseGroupRollupDriftQ + unsettled("release_group", "rg.id")},
+		{&rep.BookDurationDrift, bookDurationDriftQ},
 		// The same query refreshAlbumYearsTx repairs from, so the check and the repair
 		// cannot disagree.
-		{&rep.AlbumYearDrift, "SELECT COUNT(*) FROM (" + strings.Replace(albumYearDriftQ, "/*FILTER*/", "", 1) + ")"},
+		{&rep.AlbumYearDrift, "SELECT COUNT(*) FROM (" + albumYears + ")"},
 		{&rep.ReleaseYearDrift, releaseYearDriftQ},
 		{&rep.PlaylistPositionDrift, "SELECT COUNT(*) FROM (" + playlistPositionDriftQ + ")"},
 		// A map row pointing at a deleted entity does not count as a reference here,
 		// matching GCArt, which removes the stale map before deleting the source.
 		{&rep.OrphanArtSources, "SELECT COUNT(*) FROM art_source WHERE hash NOT IN (" + liveArtSourceQ + ")"},
-		{&rep.OrphanThumbnails, "SELECT COUNT(*) FROM thumb_cache WHERE source_hash NOT IN (" + liveArtSourceQ + ")"},
 	}
 	for _, c := range checks {
 		if err := s.rdb().QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+	}
+	// Apart from the table above, since a damaged thumbnail file is the cache's fault, not
+	// the catalog's.
+	if s.thumbsDamaged.Load() {
+		rep.ThumbnailsDamaged = true
+	} else if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM thumbs.thumb WHERE source_hash NOT IN ("+
+		liveArtSourceQ+")").Scan(&rep.OrphanThumbnails); err != nil {
+		if !s.noteThumbsDamage(ctx, err) {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		rep.ThumbnailsDamaged = true
 	}
 	// Stands apart from the table above because it is the one check with bound
 	// arguments: the reserved key set lives in Go, not in the schema.
@@ -179,13 +216,24 @@ func countSortKeyDrift(rows *sql.Rows) (int, error) {
 	return drift, rows.Err()
 }
 
+// bookDurationDriftQ counts the books whose denormalized total duration is not the sum of
+// their parts' effective durations (the same definition refreshBookDuration writes).
+var bookDurationDriftQ = "SELECT COUNT(*) FROM book b WHERE b.total_duration_ms <> " +
+	fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")
+
+// settlePending is the condition that the entity of kind idExpr names is in rollup_dirty.
+func settlePending(kind, idExpr string) string {
+	return "EXISTS (SELECT 1 FROM rollup_dirty d WHERE d.kind = '" + kind + "' AND d.entity_id = " + idExpr + ")"
+}
+
 // Each rollup-drift query counts entities whose stored rollup row disagrees with
 // a recompute from the base tables (a missing rollup row counts as drift via the
-// COALESCE(...,-1) sentinel, which never equals a real non-negative count).
+// COALESCE(...,-1) sentinel, which never equals a real non-negative count). The condition
+// is parenthesized whole, so a caller can AND another onto it.
 const artistRollupDriftQ = `
 SELECT COUNT(*) FROM artist a
 LEFT JOIN artist_rollup ar ON ar.artist_id = a.id
-WHERE COALESCE(ar.track_count, -1) <>
+WHERE (COALESCE(ar.track_count, -1) <>
         (SELECT COUNT(DISTINCT t.item_id) FROM track t WHERE t.artist_id = a.id)
    OR COALESCE(ar.release_group_count, -1) <>
         (SELECT COUNT(*) FROM release_group rg WHERE rg.primary_artist_id = a.id)
@@ -193,18 +241,18 @@ WHERE COALESCE(ar.track_count, -1) <>
         (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM track t
            LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id
-         WHERE t.artist_id = a.id)`
+         WHERE t.artist_id = a.id))`
 
 const genreRollupDriftQ = `
 SELECT COUNT(*) FROM genre g
 LEFT JOIN genre_rollup gr ON gr.genre_id = g.id
-WHERE COALESCE(gr.track_count, -1) <>
+WHERE (COALESCE(gr.track_count, -1) <>
         (SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = g.id)
    OR COALESCE(gr.total_duration_ms, -1) <>
         (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM item_genre ig
            LEFT JOIN item_file pf ON pf.item_id = ig.item_id AND pf.role IN ('primary', 'part')
            LEFT JOIN file f ON f.id = pf.file_id
-         WHERE ig.genre_id = g.id)`
+         WHERE ig.genre_id = g.id))`
 
 // liveArtSourceQ selects the source hashes still reachable from a live entity: an
 // art_map row whose (entity_type, entity_id) exists in its table. A source not in
@@ -224,7 +272,7 @@ const liveArtSourceQ = `SELECT source_hash FROM art_map m WHERE
 const releaseGroupRollupDriftQ = `
 SELECT COUNT(*) FROM release_group rg
 LEFT JOIN release_group_rollup rr ON rr.release_group_id = rg.id
-WHERE COALESCE(rr.track_count, -1) <>
+WHERE (COALESCE(rr.track_count, -1) <>
         (SELECT COUNT(DISTINCT t.item_id) FROM track t
            JOIN album al ON al.id = t.album_id WHERE al.release_group_id = rg.id)
    OR COALESCE(rr.total_duration_ms, -1) <>
@@ -232,4 +280,4 @@ WHERE COALESCE(rr.track_count, -1) <>
            JOIN album al ON al.id = t.album_id
            LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id
-         WHERE al.release_group_id = rg.id)`
+         WHERE al.release_group_id = rg.id))`

@@ -174,3 +174,32 @@ func TestCensusCountsPlaySessions(t *testing.T) {
 		t.Errorf("play sessions = %d, want 2 (the recorded one and the open one)", c.PlaySessions)
 	}
 }
+
+// TestCensusReportsTheThumbFileAsKept: the census measures the thumbnail file beside the
+// catalog, which a reset leaves where it is.
+func TestCensusReportsTheThumbFileAsKept(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	st := coveredCatalog(t, ctx, db)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(sqlite.ThumbFile(db))
+	if err != nil {
+		t.Fatalf("thumbnail file: %v", err)
+	}
+	c, err := port.ReadCensus(ctx, db)
+	if err != nil {
+		t.Fatalf("ReadCensus: %v", err)
+	}
+	if c.ThumbBytes != fi.Size() {
+		t.Errorf("ThumbBytes = %d, want the file's %d", c.ThumbBytes, fi.Size())
+	}
+	if err := os.Remove(sqlite.ThumbFile(db)); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := port.ReadCensus(ctx, db); err != nil || c.ThumbBytes != 0 {
+		t.Errorf("census with no thumbnail file = %+v (err %v), want ThumbBytes 0", c, err)
+	}
+}

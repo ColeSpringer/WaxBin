@@ -15,7 +15,9 @@ CREATE TABLE track (
   artist_sort  TEXT    NOT NULL DEFAULT '',
   artist_sort_key TEXT NOT NULL DEFAULT '',
   album        TEXT    NOT NULL DEFAULT '',
+  album_sort   TEXT    NOT NULL DEFAULT '',  -- the album's sort spelling as stated, '' when none
   album_artist TEXT    NOT NULL DEFAULT '',
+  album_artist_sort TEXT NOT NULL DEFAULT '', -- the album artist's, likewise
   composer     TEXT    NOT NULL DEFAULT '',
   composer_sort TEXT   NOT NULL DEFAULT '',
   composer_sort_key TEXT NOT NULL DEFAULT '',

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,5 +131,53 @@ func TestEnsureNoCatalogOwnerRefusesALiveOwner(t *testing.T) {
 	// An absent catalog is nothing to own.
 	if err := ensureNoCatalogOwner(filepath.Join(t.TempDir(), "absent.db")); err != nil {
 		t.Errorf("absent catalog: %v", err)
+	}
+}
+
+// TestDBResetKeepsTheThumbFile: a reset moves the catalog aside but leaves the thumbnail
+// file beside it, which serves the rebuilt catalog's covers, and says what it kept.
+func TestDBResetKeepsTheThumbFile(t *testing.T) {
+	db, root, _ := creditCLIFixture(t)
+	thumbs := sqlite.ThumbFile(db)
+	raw, err := sql.Open("sqlite", "file:"+thumbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`INSERT INTO thumb(source_hash, size, format, width, height, data, created_at)
+		VALUES ('h1', 128, 'jpeg', 128, 128, x'0405', 1)`)
+	_ = raw.Close()
+	if err != nil {
+		t.Fatalf("seed a thumbnail: %v", err)
+	}
+	fi, err := os.Stat(thumbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCLIJSON(t, db, root, "db", "reset", "--yes")
+	if err != nil {
+		t.Fatalf("db reset: %v (%s)", err, out)
+	}
+	var env struct {
+		Data struct {
+			Kept struct {
+				ThumbnailBytes int64 `json:"thumbnailBytes"`
+			} `json:"kept"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("db reset printed %q: %v", out, err)
+	}
+	if env.Data.Kept.ThumbnailBytes != fi.Size() {
+		t.Errorf("kept %d thumbnail bytes, want the file's %d", env.Data.Kept.ThumbnailBytes, fi.Size())
+	}
+	check, err := sql.Open("sqlite", "file:"+thumbs+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var n int
+	if err := check.QueryRow("SELECT COUNT(*) FROM thumb").Scan(&n); err != nil || n != 1 {
+		t.Errorf("thumbnails after the reset = %d (err %v), want the one kept", n, err)
 	}
 }

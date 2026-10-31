@@ -21,6 +21,14 @@ CREATE TABLE genre_rollup (
   updated_at        INTEGER NOT NULL
 );
 
+-- The entities a deferred scan put touched (kind: artist|release_group|genre|album), whose
+-- rollups and album years wait for the scan's next settle (Store.SettleRollups).
+CREATE TABLE rollup_dirty (
+  kind      TEXT    NOT NULL,
+  entity_id INTEGER NOT NULL,
+  PRIMARY KEY (kind, entity_id)
+);
+
 -- Writer-maintained metadata FTS (no triggers): rowid == playable_item.id, kept
 -- in sync inside the same write transaction that mutates the item. Each column
 -- holds its NFC text followed by the alternate forms of its words (searchtext.go),

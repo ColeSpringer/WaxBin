@@ -11,6 +11,10 @@ const (
 	JobCanceled JobState = "canceled"
 )
 
+// FSMutateScope is the lease scope every job that scans a library or moves its files runs
+// under, so a reader of the lease table can tell whether one is running.
+const FSMutateScope = "fs-mutate"
+
 // Job is a unit of mutating background work, such as scan, organize, or
 // analysis.
 // Heartbeats prove liveness; flock-based reclaim on Open turns orphaned running

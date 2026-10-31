@@ -158,8 +158,8 @@ func TestFeedChaptersOutrankEmbeddedAfterADownload(t *testing.T) {
 }
 
 // TestItemKeptChapterRowsSeekTheirItem: the statements that read, replace and measure an
-// item's own chapter rows seek that item's rows, not every item-kept row in the catalog,
-// which a NULL bound to "file_id IS ?" would have the chapter_file index walk.
+// item's own chapter rows, or its rows of one file, seek exactly those rows rather than
+// walking every item-kept row in the catalog.
 func TestItemKeptChapterRowsSeekTheirItem(t *testing.T) {
 	t.Parallel()
 	st, _, _ := episodeFixture(t, 0)
@@ -169,13 +169,15 @@ func TestItemKeptChapterRowsSeekTheirItem(t *testing.T) {
 	}
 	stmts := []stmt{{itemChaptersQ, []any{1, "podcast_url"}}}
 	for _, prefix := range []string{chapterRowsSelect, chapterRowsDelete, chapterExtentSelect} {
-		q, args := chapterRowsOf(prefix, 1, sql.NullInt64{})
-		stmts = append(stmts, stmt{q, args})
+		for _, file := range []sql.NullInt64{{}, fileKey(1)} {
+			q, args := chapterRowsOf(prefix, 1, file)
+			stmts = append(stmts, stmt{q, args})
+		}
 	}
 	for _, s := range stmts {
 		plan := queryPlan(t, st, s.q, s.args...)
-		if strings.Contains(plan, "chapter_file") || !strings.Contains(plan, "chapter_book") {
-			t.Errorf("%s\nplan:\n%s\nwant a seek on chapter_book alone", s.q, plan)
+		if !strings.Contains(plan, "chapter_book_file (book_item_id=? AND file_id=?)") {
+			t.Errorf("%s\nplan:\n%s\nwant a seek on the item and the file together", s.q, plan)
 		}
 	}
 }

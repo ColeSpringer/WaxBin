@@ -43,8 +43,8 @@ const (
 )
 
 // thumbCache is a bounded in-process LRU of generated thumbnails keyed by (source
-// hash, ladder rung). It sits in front of the thumb_cache table: it serves a read-only
-// store, which cannot persist to the table and would otherwise regenerate on every
+// hash, ladder rung). It sits in front of the thumbnail file: it serves a read-only
+// store, which cannot persist to the file and would otherwise regenerate on every
 // request, and it saves a read-write store a SQL round-trip and re-decode for a hot
 // cover. It is safe for concurrent use.
 type thumbCache struct {
@@ -1035,8 +1035,8 @@ func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, box in
 		return source(ctx)
 	}
 	// Check the in-process cache next. This serves a read-only store, which cannot
-	// persist to thumb_cache and would otherwise regenerate on every request, and it
-	// saves a read-write store the SQL round-trip and re-decode for a hot cover.
+	// persist to the thumbnail file and would otherwise regenerate on every request, and
+	// it saves a read-write store the SQL round-trip and re-decode for a hot cover.
 	if blob, ok := s.thumbMem.get(hash, box); ok {
 		b := blob
 		return &b, nil
@@ -1048,26 +1048,32 @@ func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, box in
 	})
 }
 
-// generateThumb answers a cold (source, rung) from the thumb_cache table, or generates and
+// generateThumb answers a cold (source, rung) from the thumbnail file, or generates and
 // stores it. It runs under thumbFlight, so exactly one caller per rung is inside it and the
 // table read doubles as the check for a leader that finished a moment ago.
 func (s *Store) generateThumb(ctx context.Context, hash string, box int,
 	source func(context.Context) (*model.ArtBlob, error)) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
-	var data []byte
-	var format string
-	var w, h int
-	err := s.rdb().QueryRowContext(ctx,
-		"SELECT data, format, width, height FROM thumb_cache WHERE source_hash = ? AND size = ?",
-		hash, box).Scan(&data, &format, &w, &h)
-	if err == nil {
-		blob := model.ArtBlob{Bytes: data, Format: format, Width: w, Height: h, SourceHash: hash, Thumbnail: true}
-		s.thumbMem.put(hash, box, blob)
-		b := blob
-		return &b, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	if !s.thumbsDamaged.Load() {
+		var data []byte
+		var format string
+		var w, h int
+		err := s.rdb().QueryRowContext(ctx,
+			"SELECT data, format, width, height FROM thumbs.thumb WHERE source_hash = ? AND size = ?",
+			hash, box).Scan(&data, &format, &w, &h)
+		if err == nil {
+			blob := model.ArtBlob{Bytes: data, Format: format, Width: w, Height: h, SourceHash: hash, Thumbnail: true}
+			s.thumbMem.put(hash, box, blob)
+			b := blob
+			return &b, nil
+		}
+		if ctx.Err() != nil {
+			return nil, waxerr.FromContext(op, ctx.Err(), waxerr.CodeIO)
+		}
+		// The thumbnail file is a cache, so a row it cannot give back is generated again.
+		if !errors.Is(err, sql.ErrNoRows) && !s.noteThumbsDamage(ctx, err) {
+			s.log.Warn("reading a cached thumbnail; generating it again", "hash", hash, "box", box, "err", err)
+		}
 	}
 
 	src, err := source(ctx)
@@ -1091,15 +1097,16 @@ func (s *Store) generateThumb(ctx context.Context, hash string, box int,
 	blob := model.ArtBlob{Bytes: thumb, Format: tFormat, Width: tw, Height: th, SourceHash: hash, Thumbnail: true}
 	s.thumbMem.put(hash, box, blob)
 
-	// Best-effort cache write: a read-only library still serves the generated thumbnail
-	// from the in-process cache above, just without persisting it to disk.
-	if !s.readOnly {
+	// Best-effort cache write: a read-only library, or one whose thumbnail file cannot be
+	// used, still serves the generated thumbnail from the in-process cache above, just
+	// without persisting it.
+	if s.reattachThumbs(ctx, false) {
 		if err := s.writeTx(ctx, func(tx *sql.Tx) error {
 			_, e := tx.ExecContext(ctx,
-				`INSERT OR REPLACE INTO thumb_cache(source_hash, size, format, width, height, data, created_at)
+				`INSERT OR REPLACE INTO thumbs.thumb(source_hash, size, format, width, height, data, created_at)
 				 VALUES (?,?,?,?,?,?,?)`, hash, box, tFormat, tw, th, thumb, nowNS())
 			return e
-		}); err != nil {
+		}); err != nil && !s.noteThumbsDamage(ctx, err) {
 			s.log.Warn("caching thumbnail", "hash", hash, "box", box, "err", err)
 		}
 	}
@@ -1444,9 +1451,9 @@ func deleteEntityArtLockTx(ctx context.Context, tx *sql.Tx, entityType string, e
 	return err
 }
 
-// GCArt reclaims orphaned art: map rows whose entity is gone, then source images
-// no longer referenced by any map, cascading to their cached thumbnails. It
-// returns the number of source images and thumbnails removed. It is the repair for
+// GCArt reclaims orphaned art: map rows whose entity is gone, source images no longer
+// referenced by any map, and the thumbnails of every source the catalog no longer holds.
+// It returns the number of source images and thumbnails removed. It is the repair for
 // the orphan counts VerifyDerived reports.
 func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) {
 	const op = "store.GCArt"
@@ -1469,12 +1476,6 @@ func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) 
 				return e
 			}
 		}
-		// Count thumbnails about to be cascaded, then drop unreferenced sources.
-		if e := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM thumb_cache WHERE source_hash NOT IN (SELECT source_hash FROM art_map)`).
-			Scan(&thumbnails); e != nil {
-			return e
-		}
 		r, e := tx.ExecContext(ctx,
 			"DELETE FROM art_source WHERE hash NOT IN (SELECT source_hash FROM art_map)")
 		if e != nil {
@@ -1487,5 +1488,46 @@ func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) 
 	if err != nil {
 		return 0, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	if thumbnails, err = s.gcThumbs(ctx); err != nil {
+		return sources, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	return sources, thumbnails, nil
+}
+
+// gcThumbs deletes the thumbnails of every source the catalog no longer holds, in a
+// transaction of its own after the catalog's: no foreign key reaches across into the
+// thumbnail file, so this also takes those of sources removed some other way, and a
+// damaged file is reported damaged (noteThumbsDamage) instead of failing the catalog's
+// GC. A file the writer does not hold is left for a later GC.
+func (s *Store) gcThumbs(ctx context.Context) (int, error) {
+	if s.thumbsDamaged.Load() || !s.reattachThumbs(ctx, true) {
+		return 0, nil
+	}
+	var n int64
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		r, e := tx.ExecContext(ctx, "DELETE FROM thumbs.thumb WHERE source_hash NOT IN (SELECT hash FROM art_source)")
+		if e != nil {
+			return e
+		}
+		n, _ = r.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		if s.noteThumbsDamage(ctx, err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if n > 0 {
+		s.reclaimAfterDelete(ctx)
+	}
+	return int(n), nil
+}
+
+// reclaimAfterDelete gives back the pages a delete from the thumbnail file freed; a failure
+// leaves them free for later thumbnails, so it only warns.
+func (s *Store) reclaimAfterDelete(ctx context.Context) {
+	if _, err := s.reclaimThumbPages(ctx, thumbReclaimStep); err != nil && !s.noteThumbsDamage(ctx, err) {
+		s.log.Warn("giving freed thumbnail pages back", "path", ThumbFile(s.path), "err", err)
+	}
 }

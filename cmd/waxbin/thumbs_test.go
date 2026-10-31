@@ -177,3 +177,28 @@ func TestThumbCacheViewJSON(t *testing.T) {
 		t.Errorf("empty json = %s\nwant %s", b, want)
 	}
 }
+
+// TestThumbReportOnADamagedFile: a census that could not read the thumbnail file says so,
+// in both forms, rather than reporting an empty cache.
+func TestThumbReportOnADamagedFile(t *testing.T) {
+	t.Parallel()
+	rep := &model.ThumbCacheReport{ArtSources: 700, ArtSourceBytes: 1_100_000_000, Damaged: true}
+	var buf bytes.Buffer
+	printThumbReport(&buf, rep, time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC))
+	got := buf.String()
+	for _, want := range []string{"damaged", "`db verify --fix` replaces it", "1.1 GB"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "thumbnails:    0 rows") {
+		t.Errorf("a damaged cache read as an empty one:\n%s", got)
+	}
+	b, err := json.Marshal(toThumbCacheView(rep, false, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"damaged":true`) {
+		t.Errorf("json = %s, want the damage in it", b)
+	}
+}

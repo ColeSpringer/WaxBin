@@ -44,9 +44,9 @@ func TestSizedResolveCollapsesNearbyBoxesOntoOneRung(t *testing.T) {
 		}
 	}
 
-	db := roConn(t, dbPath)
+	db := thumbConn(t, dbPath)
 	if n := scalarInt64(t, db, thumbRows); n != 1 {
-		t.Errorf("thumb_cache rows = %d, want 1 for four requests on one rung", n)
+		t.Errorf("thumbnail rows = %d, want 1 for four requests on one rung", n)
 	}
 	if n := scalarInt64(t, db, thumbSizes); n != 192 {
 		t.Errorf("cached at size %d, want the rung 192 rather than a requested width", n)
@@ -77,8 +77,8 @@ func TestSizedResolveSeparatesDistinctRungs(t *testing.T) {
 			t.Errorf("resolve at %d reported box %d, want %d", box, blob.Box, want)
 		}
 	}
-	if n := scalarInt64(t, roConn(t, dbPath), thumbRows); n != 2 {
-		t.Errorf("thumb_cache rows = %d, want 2, one per rung", n)
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbRows); n != 2 {
+		t.Errorf("thumbnail rows = %d, want 2, one per rung", n)
 	}
 }
 
@@ -129,7 +129,7 @@ func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
 		t.Errorf("above the ladder = %dx%d thumbnail=%v, want the stored %d-wide source",
 			above.Width, above.Height, above.Thumbnail, top+352)
 	}
-	if n := scalarInt64(t, roConn(t, dbPath), thumbSizes); n != int64(top) {
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbSizes); n != int64(top) {
 		t.Errorf("cached rungs = %d, want only the top rung %d", n, top)
 	}
 }
@@ -185,7 +185,7 @@ func TestResolveAtTheTopRungServesABoundedSourceWhole(t *testing.T) {
 				box, got.Width, got.Height, got.Thumbnail, got.Box, art.MaxSourceDim)
 		}
 	}
-	if n := scalarInt64(t, roConn(t, dbPath), "SELECT COUNT(*) FROM thumb_cache"); n != 0 {
+	if n := scalarInt64(t, thumbConn(t, dbPath), "SELECT COUNT(*) FROM thumb"); n != 0 {
 		t.Errorf("cached thumbnails = %d, want none generated", n)
 	}
 }

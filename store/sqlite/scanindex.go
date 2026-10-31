@@ -19,32 +19,7 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	const op = "store.LoadScopedFileIndex"
 	lo, hi := scopePrefix, prefixUpperBound(scopePrefix)
 
-	// Files (with the item each backs). A file normally has exactly one item_file
-	// edge; the LEFT JOIN keeps a rare edge-less file in the index so reconciliation
-	// still sees it. A file whose item is missing/archived is EXCLUDED so it is not
-	// fast-pathed: a restored file with the same size+mtime must go through the full
-	// path to flip its item back to present (a fast-path skip would leave it missing).
-	// Such a file, if still gone, simply is not re-reconciled (it is already missing).
-	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid, ''), COALESCE(pi.kind, ''),
-			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1)
-		FROM file f
-		LEFT JOIN item_file itf ON itf.file_id = f.id
-		LEFT JOIN playable_item pi ON pi.id = itf.item_id
-		WHERE f.library_id = ? AND f.kind = ? AND (pi.state IS NULL OR pi.state = 'present')`
-	args := []any{libraryID, string(model.FileAudio)}
-	if len(lo) > 0 {
-		fq += " AND f.path >= ?"
-		args = append(args, lo)
-		if hi != nil {
-			fq += " AND f.path < ?"
-			args = append(args, hi)
-		}
-	}
-	// One row per file. A single-file rip backs N virtual tracks through N item_file
-	// edges, so without the GROUP BY that file would return N identical rows. A normal
-	// track or book part has one edge, so the grouping is a no-op for them.
-	fq += " GROUP BY f.id"
-
+	fq, args, aq, aargs := scopedFileIndexQueries(libraryID, lo, hi)
 	rows, err := s.rdb().QueryContext(ctx, fq, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -61,6 +36,12 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 			rows.Close()
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		// A single-file rip backs N virtual tracks through N item_file edges and so comes
+		// back N times; the first row stands for the file. A GROUP BY in the statement
+		// would cost a sort of the scope's files, or pull the planner off its index.
+		if _, ok := byID[id]; ok {
+			continue
+		}
 		byID[id] = &model.ScopedFile{FilePID: model.PID(fpid), Size: size, MTimeNS: mtime,
 			ItemPID: model.PID(ipid), Kind: model.Kind(kind), KindLocked: locked}
 		pathByID[id] = string(path)
@@ -71,21 +52,6 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	}
 	rows.Close()
 
-	// Sidecar observations for the same scope, attached to their file entries. Build
-	// this query's args independently of the files query so the two cannot drift if
-	// either query's filters change later.
-	aq := `SELECT fa.file_id, fa.kind, fa.path, fa.size, fa.mtime_ns, fa.hash, fa.missing
-		FROM file_aux_state fa JOIN file f ON f.id = fa.file_id
-		WHERE f.library_id = ? AND f.kind = ?`
-	aargs := []any{libraryID, string(model.FileAudio)}
-	if len(lo) > 0 {
-		aq += " AND f.path >= ?"
-		aargs = append(aargs, lo)
-		if hi != nil {
-			aq += " AND f.path < ?"
-			aargs = append(aargs, hi)
-		}
-	}
 	arows, err := s.rdb().QueryContext(ctx, aq, aargs...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -114,6 +80,45 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 		out[pathByID[id]] = *e
 	}
 	return out, nil
+}
+
+// scopedFileIndexQueries builds LoadScopedFileIndex's two statements: the files with the
+// item each backs, and their sidecar observations. Each builds its own arguments, so the
+// two cannot drift if either filter changes. Under a sub-path the library filter is
+// written +f.library_id, which keeps the statistics-free planner off file_library so it
+// seeks the path range instead of walking the library.
+func scopedFileIndexQueries(libraryID int64, lo, hi []byte) (files string, fargs []any, aux string, aargs []any) {
+	lib := "f.library_id = ?"
+	if len(lo) > 0 {
+		lib = "+f.library_id = ?"
+	}
+	scope := func(q string, args []any) (string, []any) {
+		if len(lo) > 0 {
+			q += " AND f.path >= ?"
+			args = append(args, lo)
+			if hi != nil {
+				q += " AND f.path < ?"
+				args = append(args, hi)
+			}
+		}
+		return q, args
+	}
+	// A file normally has exactly one item_file edge; the LEFT JOIN keeps a rare edge-less
+	// file in the index so reconciliation still sees it. A file whose item is missing or
+	// archived is left out so it is not fast-pathed: a restored file with the same size and
+	// mtime must take the full path to flip its item back to present. Such a file, if still
+	// gone, is simply not reconciled again (it is already missing).
+	files, fargs = scope(`SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid, ''), COALESCE(pi.kind, ''),
+			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1)
+		FROM file f
+		LEFT JOIN item_file itf ON itf.file_id = f.id
+		LEFT JOIN playable_item pi ON pi.id = itf.item_id
+		WHERE `+lib+` AND f.kind = ? AND (pi.state IS NULL OR pi.state = 'present')`,
+		[]any{libraryID, string(model.FileAudio)})
+	aux, aargs = scope(`SELECT fa.file_id, fa.kind, fa.path, fa.size, fa.mtime_ns, fa.hash, fa.missing
+		FROM file_aux_state fa JOIN file f ON f.id = fa.file_id
+		WHERE `+lib+` AND f.kind = ?`, []any{libraryID, string(model.FileAudio)})
+	return files, fargs, aux, aargs
 }
 
 // prefixUpperBound returns the smallest byte string strictly greater than every

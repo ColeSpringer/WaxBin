@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -12,10 +13,16 @@ import (
 	"github.com/colespringer/waxbin/store/sqlite"
 )
 
+// thumbConn opens the thumbnail file beside the catalog at dbPath read-only.
+func thumbConn(t *testing.T, dbPath string) *sql.DB {
+	t.Helper()
+	return roConn(t, sqlite.ThumbFile(dbPath))
+}
+
 const (
-	thumbRows = "SELECT COUNT(*) FROM thumb_cache"
+	thumbRows = "SELECT COUNT(*) FROM thumb"
 	// One row's rung, for the tests that seed exactly one.
-	thumbSizes = "SELECT size FROM thumb_cache"
+	thumbSizes = "SELECT size FROM thumb"
 )
 
 // TestSizedResolveReencodesUndisplayableSource is the gap WaxDeck reported. A TIFF
@@ -47,9 +54,9 @@ func TestSizedResolveReencodesUndisplayableSource(t *testing.T) {
 		t.Error("the bytes are the stored TIFF unchanged")
 	}
 
-	db := roConn(t, dbPath)
+	db := thumbConn(t, dbPath)
 	if n := scalarInt64(t, db, thumbRows); n != 1 {
-		t.Errorf("thumb_cache rows = %d, want 1", n)
+		t.Errorf("thumbnail rows = %d, want 1", n)
 	}
 	if n := scalarInt64(t, db, thumbSizes); n != 256 {
 		t.Errorf("cached at size %d, want the rung 200 rounds up to (256)", n)
@@ -90,8 +97,8 @@ func TestSizedResolveKeepsShortCircuitForDisplayable(t *testing.T) {
 			if !bytes.Equal(blob.Bytes, raw) {
 				t.Error("the stored bytes were not handed back verbatim")
 			}
-			if n := scalarInt64(t, roConn(t, dbPath), thumbRows); n != 0 {
-				t.Errorf("thumb_cache rows = %d, want 0 (nothing was generated)", n)
+			if n := scalarInt64(t, thumbConn(t, dbPath), thumbRows); n != 0 {
+				t.Errorf("thumbnail rows = %d, want 0 (nothing was generated)", n)
 			}
 		})
 	}
@@ -206,8 +213,8 @@ func TestSizedResolveFallsBackWhenGenerationFails(t *testing.T) {
 	if !bytes.Equal(blob.Bytes, junk) {
 		t.Error("the stored bytes were not handed back verbatim")
 	}
-	if n := scalarInt64(t, db, thumbRows); n != 0 {
-		t.Errorf("thumb_cache rows = %d, want 0 (nothing was generated)", n)
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbRows); n != 0 {
+		t.Errorf("thumbnail rows = %d, want 0 (nothing was generated)", n)
 	}
 }
 
@@ -242,8 +249,8 @@ func TestSizedResolveOnReadOnlyStore(t *testing.T) {
 				i, blob.Format, blob.Width, blob.Height, blob.Thumbnail)
 		}
 	}
-	if n := scalarInt64(t, roConn(t, dbPath), thumbRows); n != 0 {
-		t.Errorf("thumb_cache rows = %d, want 0; a read-only store must not persist", n)
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbRows); n != 0 {
+		t.Errorf("thumbnail rows = %d, want 0; a read-only store must not persist", n)
 	}
 }
 

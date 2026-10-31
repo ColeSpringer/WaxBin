@@ -111,8 +111,8 @@ CREATE TABLE lyrics (
 -- by hash, so the one album cover embedded in every track is stored once). A source is
 -- kept as it arrived unless its longest side exceeded art.MaxSourceDim and a copy scaled
 -- to fit was smaller, in which case the stored bytes are that copy and art_resized below
--- remembers which arriving bytes they stand for. The bytes come last here and in
--- thumb_cache, so a read of the columns before them stops short of the row's overflow
+-- remembers which arriving bytes they stand for. The bytes come last, here as in the
+-- thumbnail file, so a read of the columns before them stops short of the row's overflow
 -- pages.
 CREATE TABLE art_source (
   hash       TEXT    PRIMARY KEY,         -- content hash of the stored bytes
@@ -144,7 +144,7 @@ CREATE INDEX art_resized_hash ON art_resized(hash);
 -- genre); the other roles resolve at their own level, as does every role on a
 -- playlist (a playlist has no ancestry to inherit from). Orphan rows left by an
 -- entity deletion are cleaned by the art GC, which then drops the
--- now-unreferenced source images and (by cascade) their thumbnails.
+-- now-unreferenced source images and their thumbnails.
 --
 -- The provenance columns live here rather than on art_source because that store is
 -- content-addressed: one JPEG both scraped from the Cover Art Archive and embedded in
@@ -172,16 +172,6 @@ CREATE TABLE art_map (
 -- Named for the column it indexes, so it is not read as an index on source.
 CREATE INDEX art_map_source_hash ON art_map(source_hash);
 
--- Size-negotiated thumbnails generated on demand, keyed by (source hash, ladder
--- rung); derived data, reference-counted against art_source and garbage-collected
--- when its source is unreferenced.
-CREATE TABLE thumb_cache (
-  source_hash TEXT    NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE,
-  size        INTEGER NOT NULL,           -- ladder rung in px (art.Rung)
-  format      TEXT    NOT NULL,           -- jpeg|png
-  width       INTEGER NOT NULL,
-  height      INTEGER NOT NULL,
-  created_at  INTEGER NOT NULL,
-  data        BLOB    NOT NULL,
-  PRIMARY KEY (source_hash, size)
-);
+-- The thumbnails generated from these sources live in a file of their own beside the
+-- catalog (store/sqlite/thumbdb.go), so a backup or a vacuum of the catalog never copies
+-- them.

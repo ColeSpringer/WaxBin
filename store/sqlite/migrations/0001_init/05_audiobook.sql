@@ -73,7 +73,8 @@ CREATE INDEX book_isbn_key ON book(isbn_key);
 -- chapters within their file; the read path orders by the file's
 -- item_file.position then chapter.position and accumulates a book-timeline
 -- offset, so chapters need no cross-file knowledge at write time. end_ms 0
--- means "until the next chapter or end of file".
+-- means "until the next chapter or end of file". file_id is NULL for the rows an
+-- episode keeps on its item (its feed chapters), whose offsets are the episode's own.
 --
 -- source is the origin of a chapter row: embedded (audio tags), cue (external
 -- .cue/chapter file), podcast_url (Podcasting-2.0 chapters JSON), or synthetic
@@ -92,5 +93,7 @@ CREATE TABLE chapter (
   end_ms       INTEGER NOT NULL DEFAULT 0,
   source       TEXT    NOT NULL              -- embedded|cue|podcast_url|synthetic
 );
-CREATE INDEX chapter_book ON chapter(book_item_id);
+-- One seek finds an item's rows of one file, or its own rows (file_id IS NULL); the item
+-- alone is its prefix.
+CREATE INDEX chapter_book_file ON chapter(book_item_id, file_id);
 CREATE INDEX chapter_file ON chapter(file_id);

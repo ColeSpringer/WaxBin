@@ -48,7 +48,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// A track whose file this is, now read as a book, becomes one in place.
 		rekinded := false
 		if key.id == 0 {
-			id, err := rekindItemForFileTx(ctx, tx, fileID, model.KindBook, in.Item.IdentityKey, in.PreserveLocks && !in.KindForced, now)
+			id, err := rekindItemForFileTx(ctx, tx, fileID, model.KindBook, in.Item.IdentityKey, in.PreserveLocks && !in.KindForced, in.DeferRollups, now)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -100,6 +100,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		res.ItemPID, res.ItemCreated = itemPID, created
 
 		affected := newAffectedRollups()
+		affected.deferred = in.DeferRollups
 
 		position, err := keptPositionTx(ctx, tx, itemID, fileID, in)
 		if err != nil {
@@ -993,11 +994,17 @@ func refreshBookDuration(ctx context.Context, tx *sql.Tx, itemID int64) error {
 // per-write refreshes keep the column current; this whole-catalog pass is the repair
 // for drift `db verify` reports, and it is the only way back for a book that lost its
 // last part before the detach path shed the total, since a rescan cannot help when
-// the file it would re-read is gone.
-func refreshAllBookDurations(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx,
-		"UPDATE book SET total_duration_ms = "+fmt.Sprintf(bookEffectiveDurationSum, "book.item_id"))
-	return err
+// the file it would re-read is gone. It writes only the books whose total moved, each
+// sum computed once, and returns how many.
+func refreshAllBookDurations(ctx context.Context, tx *sql.Tx) (int, error) {
+	r, err := tx.ExecContext(ctx, `UPDATE book SET total_duration_ms = s.total
+		FROM (SELECT b.item_id AS id, `+fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")+` AS total FROM book b) s
+		WHERE book.item_id = s.id AND book.total_duration_ms <> s.total`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	return int(n), nil
 }
 
 // isbnKeyMove is a book whose stored isbn_key is not the key its ISBN folds to, with the
@@ -1035,17 +1042,17 @@ func bookISBNKeyMoves(ctx context.Context, q queryer) ([]isbnKeyMove, error) {
 // the repair for the drift VerifyDerived reports. A rescan rewrites the key only for a
 // book whose file changed. Nothing an item view shows reads the key, so no delta is
 // emitted.
-func refreshAllISBNKeysTx(ctx context.Context, tx *sql.Tx) error {
+func refreshAllISBNKeysTx(ctx context.Context, tx *sql.Tx) (int, error) {
 	moves, err := bookISBNKeyMoves(ctx, tx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, m := range moves {
 		if _, err := tx.ExecContext(ctx, "UPDATE book SET isbn_key = ? WHERE item_id = ?", m.key, m.id); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(moves), nil
 }
 
 // chapterSourceRank orders chapter sources by precedence (lower wins). A remote
@@ -1130,8 +1137,7 @@ const (
 )
 
 // chapterRowsOf completes prefix to the chapter rows of file on the item, or the item's own
-// rows for a null file. The item's own are matched with a literal IS NULL: a NULL bound
-// to "file_id IS ?" has the planner walk chapter_file over every item's own rows.
+// rows for a null file, either one seek on chapter_book_file.
 func chapterRowsOf(prefix string, itemID int64, file sql.NullInt64) (string, []any) {
 	if !file.Valid {
 		return prefix + " WHERE book_item_id = ? AND file_id IS NULL", []any{itemID}

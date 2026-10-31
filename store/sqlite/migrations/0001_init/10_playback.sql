@@ -117,6 +117,7 @@ CREATE TABLE playlist (
   id            INTEGER PRIMARY KEY,
   pid           TEXT    NOT NULL UNIQUE,
   name          TEXT    NOT NULL,
+  description   TEXT    NOT NULL DEFAULT '',  -- the owner's note on the list
   owner_user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
   kind          TEXT    NOT NULL,                    -- static|smart
   visibility    TEXT    NOT NULL DEFAULT 'private',  -- private|shared

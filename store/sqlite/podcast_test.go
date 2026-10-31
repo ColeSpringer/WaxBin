@@ -592,12 +592,16 @@ func TestMovePodcastFeedKeepsAnAddressAnotherShowHolds(t *testing.T) {
 	if _, err := st.UpsertFeed(ctx, feedInput("http://feed.example/b", "Two")); err != nil {
 		t.Fatal(err)
 	}
-	for to, want := range map[string]string{"http://feed.example/b": "http://feed.example/a", "http://feed.example/c": "http://feed.example/c"} {
-		if err := st.MovePodcastFeed(ctx, a.PodcastPID, to); err != nil {
-			t.Fatalf("move to %s: %v", to, err)
+	// In order: the first move is refused and the second, to a free address, lands.
+	for _, step := range []struct{ to, want string }{
+		{"http://feed.example/b", "http://feed.example/a"},
+		{"http://feed.example/c", "http://feed.example/c"},
+	} {
+		if err := st.MovePodcastFeed(ctx, a.PodcastPID, step.to); err != nil {
+			t.Fatalf("move to %s: %v", step.to, err)
 		}
-		if p, err := st.PodcastByPID(ctx, a.PodcastPID); err != nil || p.FeedURL != want {
-			t.Fatalf("after a move to %s the show is at %s (err %v), want %s", to, p.FeedURL, err, want)
+		if p, err := st.PodcastByPID(ctx, a.PodcastPID); err != nil || p.FeedURL != step.want {
+			t.Fatalf("after a move to %s the show is at %s (err %v), want %s", step.to, p.FeedURL, err, step.want)
 		}
 	}
 }

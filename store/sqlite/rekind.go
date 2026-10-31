@@ -319,8 +319,8 @@ func (s *Store) FolderStanding(ctx context.Context, libraryID int64, root, folde
 // kind not forced) a kind lock on the item refuses the change with CodeLocked and
 // model.ReasonKindLocked, as a kind change's own check does: the scan read the item before
 // the lock was set, and its next read follows the lock. It returns the item's id, 0 when it
-// re-kinded nothing.
-func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind model.Kind, key string, held bool, now int64) (int64, error) {
+// re-kinded nothing. deferred is the put's DeferRollups.
+func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind model.Kind, key string, held, deferred bool, now int64) (int64, error) {
 	var itemID int64
 	var from string
 	err := tx.QueryRowContext(ctx, `SELECT pi.id, pi.kind FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
@@ -344,6 +344,7 @@ func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind mod
 		}
 	}
 	affected := newAffectedRollups()
+	affected.deferred = deferred
 	if err := affected.collect(ctx, tx, itemID); err != nil {
 		return 0, err
 	}

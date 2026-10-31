@@ -2267,20 +2267,6 @@ func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) 
 	return " AND (" + strings.Join(parts, " OR ") + ")", args
 }
 
-// idArray renders ids as a JSON array, for json_each.
-func idArray(ids []int64) string {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i, id := range ids {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.FormatInt(id, 10))
-	}
-	b.WriteByte(']')
-	return b.String()
-}
-
 // enrichedTagFieldOrder is the field each scanned value column belongs to, per kind. It
 // is the one place the select's column order and the field names are tied together.
 var enrichedTagFieldOrder = map[model.Kind][]string{

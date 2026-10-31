@@ -18,6 +18,8 @@ CREATE TABLE job (
   progress     REAL    NOT NULL DEFAULT 0,
   message      TEXT    NOT NULL DEFAULT '',
   error        TEXT    NOT NULL DEFAULT '',
+  error_code   TEXT    NOT NULL DEFAULT '',  -- the failing error's waxerr code and reason, '' when none
+  error_reason TEXT    NOT NULL DEFAULT '',
   result       TEXT    NOT NULL DEFAULT '',  -- JSON result summary of a completed job, for a tailer
   target_type  TEXT    NOT NULL DEFAULT '',  -- what a targeted job ran on (model.Job.TargetType), '' for a whole-catalog pass
   target_pid   TEXT    NOT NULL DEFAULT '',
@@ -87,6 +89,25 @@ CREATE INDEX trash_item   ON trash(item_pid);
 CREATE INDEX trash_orig    ON trash(orig_path) WHERE restored_at IS NULL;
 CREATE INDEX trash_essence ON trash(essence_hash) WHERE restored_at IS NULL;
 
+-- A trash move written before the file is moved, holding everything its trash row needs,
+-- so an open after a crash between the move and the catalog write can finish or drop it.
+CREATE TABLE trash_pending (
+  pid           TEXT    PRIMARY KEY,          -- the trash row's pid once it lands
+  file_id       INTEGER REFERENCES file(id) ON DELETE SET NULL,
+  item_pid      TEXT    NOT NULL,
+  item_kind     TEXT    NOT NULL,
+  library_id    INTEGER NOT NULL REFERENCES library(id) ON DELETE CASCADE,
+  orig_path     BLOB    NOT NULL,
+  orig_display  TEXT    NOT NULL,
+  essence_hash  TEXT    NOT NULL,
+  size          INTEGER NOT NULL,
+  trash_path    BLOB    NOT NULL,
+  trash_display TEXT    NOT NULL,
+  reason        TEXT    NOT NULL,
+  job_pid       TEXT,
+  created_at    INTEGER NOT NULL
+);
+
 -- Staging/inbox import batches. Each import of a staging folder into a managed
 -- library is recorded with its source attribution and a tally of imported/
 -- duplicate/quarantined/errored files, so an import is auditable and
@@ -145,6 +166,9 @@ CREATE TABLE file_diagnostic (
   -- The essence an analyze verdict describes, NULL for every other writer. A read hides
   -- the row once the file's essence has moved on, as it hides stale loudness and peaks.
   essence  TEXT,
+  -- Who set the value an owed tag write carries (an attribution's source and provider).
+  source   TEXT    NOT NULL DEFAULT '',
+  provider TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (file_id, origin, code, tag_key)
 );
 CREATE INDEX file_diagnostic_code ON file_diagnostic(code);

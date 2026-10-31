@@ -85,14 +85,14 @@ func TestResolveArtOriginalAndThumbnail(t *testing.T) {
 		t.Errorf("thumb = %+v, want a 48-wide thumbnail", thumb)
 	}
 
-	// A second request hits the cache; verify a thumb_cache row exists.
+	// A second request hits the cache; verify a thumbnail row exists.
 	var n int
 	if err := st.rdb().QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM thumb_cache WHERE source_hash = ? AND size = 48", cover.Hash).Scan(&n); err != nil {
+		"SELECT COUNT(*) FROM thumbs.thumb WHERE source_hash = ? AND size = 48", cover.Hash).Scan(&n); err != nil {
 		t.Fatalf("count thumbs: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("thumb_cache rows = %d, want 1 (generated thumbnail cached)", n)
+		t.Errorf("thumbnail rows = %d, want 1 (generated thumbnail cached)", n)
 	}
 }
 
@@ -283,7 +283,7 @@ func TestGCArtRemovesOrphans(t *testing.T) {
 	ctx := context.Background()
 	cover := testPNG(t, 50, 50)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", cover)
-	// Generate a thumbnail so a thumb_cache row also exists for the source.
+	// Generate a thumbnail so a thumbnail row also exists for the source.
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 25); err != nil {
 		t.Fatalf("thumb: %v", err)
 	}
@@ -558,14 +558,14 @@ func TestThumbFlightReleasesTheKeyOnPanic(t *testing.T) {
 func TestImageBytesComeLast(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
-	for _, table := range []string{"art_source", "thumb_cache"} {
+	for _, table := range [][2]string{{"art_source", "main"}, {"thumb", "thumbs"}} {
 		var last string
 		if err := st.rdb().QueryRowContext(context.Background(),
-			"SELECT name FROM pragma_table_info(?) ORDER BY cid DESC LIMIT 1", table).Scan(&last); err != nil {
-			t.Fatalf("%s columns: %v", table, err)
+			"SELECT name FROM pragma_table_info(?, ?) ORDER BY cid DESC LIMIT 1", table[0], table[1]).Scan(&last); err != nil {
+			t.Fatalf("%s columns: %v", table[0], err)
 		}
 		if last != "data" {
-			t.Errorf("%s ends with %q, want the image bytes (data) last", table, last)
+			t.Errorf("%s ends with %q, want the image bytes (data) last", table[0], last)
 		}
 	}
 }

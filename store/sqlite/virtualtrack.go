@@ -66,6 +66,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		}
 
 		affected := newAffectedRollups()
+		affected.deferred = in.DeferRollups
 		anyCreated := false
 		fresh := map[int64]model.PID{} // the tracks this put made, by row id
 		// setChanged tracks whether this scan changed the file's virtual-track set at all:

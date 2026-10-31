@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
@@ -37,7 +38,8 @@ func newDBResetCmd(g *globals) *cobra.Command {
 			"migrated. It discards every play position, rating, star, playlist, curation " +
 			"edit, podcast subscription and trash entry; only what is on disk comes back, " +
 			"and only through `waxbin rebuild`. The previous catalog is renamed rather than " +
-			"deleted, so a mis-fire is recoverable.",
+			"deleted, so a mis-fire is recoverable. The thumbnail file beside the catalog " +
+			"stays where it is: its thumbnails serve the rebuilt catalog's covers.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if g.readOnly {
 				return waxerr.New(waxerr.CodeInvalid, "db reset", "cannot reset in --read-only mode")
@@ -95,6 +97,7 @@ func newDBResetCmd(g *globals) *cobra.Command {
 						}
 					}
 					data["rootsNotInConfig"] = extraRoots
+					data["kept"] = map[string]int64{"thumbnailBytes": census.ThumbBytes}
 				}
 				return printJSON(cmd, data)
 			}
@@ -114,6 +117,10 @@ func newDBResetCmd(g *globals) *cobra.Command {
 			default:
 				fmt.Fprintf(w, "Discarded: %d items, %d play states, %d play sessions, %d playlists, %d podcasts, %d trash entries\n",
 					census.Items, census.PlayStates, census.PlaySessions, census.Playlists, census.Podcasts, census.TrashEntries)
+			}
+			if census != nil && census.ThumbBytes > 0 {
+				fmt.Fprintf(w, "Kept: the thumbnail file (%s), whose thumbnails serve the rebuilt catalog\n",
+					byteLabel(census.ThumbBytes))
 			}
 			if len(extraRoots) > 0 {
 				fmt.Fprintf(w, "Roots not in config (re-add with `waxbin library add`): %s\n",
@@ -382,6 +389,7 @@ func newDBMigrateCmd(g *globals) *cobra.Command {
 func newDBVerifyCmd(g *globals) *cobra.Command {
 	var fix bool
 	var resorted, reindexed int
+	var refreshed *model.RefreshReport
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Check derived data (FTS, rollups, sort keys, book durations and ISBN keys, album and release years, playlist positions) against the source rows",
@@ -390,8 +398,13 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			"years and playlist positions are compared against a fresh recompute from the " +
 			"source rows. Reports drift; --fix recomputes the maintained rollups, book " +
 			"durations and ISBN keys, and album and release years, renumbers playlist " +
-			"positions, refolds stale sort keys and rebuilds stale search rows first. Exits " +
-			"non-zero when any drift remains.",
+			"positions, refolds stale sort keys and rebuilds stale search rows first, reporting " +
+			"how many rows each rewrote. Rollups a running scan has yet to settle are reported " +
+			"as pending, not as drift, since the scan settles them as it goes. With no scan " +
+			"running they read as drift too: a settle that failed, which --fix recomputes, or " +
+			"a crashed scan's, which the next read-write open settles. A damaged thumbnail " +
+			"file is reported rather than failed, and --fix replaces it. Exits non-zero when " +
+			"any drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --fix recomputes rollups and reclaims orphaned art, so it needs the
 			// write lock; a plain verify is read-only and runs alongside a writer.
@@ -399,10 +412,14 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer func() {
+				if lib != nil {
+					_ = lib.Close()
+				}
+			}()
 
 			if fix {
-				if err := lib.RefreshRollups(ctx(cmd)); err != nil {
+				if refreshed, err = lib.RefreshRollups(ctx(cmd)); err != nil {
 					return err
 				}
 				// Rewrites the keys model.SortKey no longer generates, which no rescan
@@ -441,6 +458,23 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			var replaced bool
+			if fix && rep.ThumbnailsDamaged {
+				// A read-write store marks the damaged thumbnail file it meets, and a
+				// read-write open replaces a marked file.
+				err := lib.Close()
+				lib = nil
+				if err != nil {
+					return err
+				}
+				if lib, _, err = g.openLib(cmd, false); err != nil {
+					return err
+				}
+				if rep, err = lib.VerifyDerived(ctx(cmd)); err != nil {
+					return err
+				}
+				replaced = !rep.ThumbnailsDamaged
+			}
 
 			var verdict error
 			if !rep.Consistent() {
@@ -451,6 +485,8 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				view := toDerivedView(rep)
 				view.SortKeysRewritten = resorted
 				view.SearchRowsRebuilt = reindexed
+				view.ThumbnailsReplaced = replaced
+				view.Refreshed = toRefreshView(refreshed)
 				view.Error = errText(verdict)
 				if err := printJSON(cmd, view); err != nil {
 					return err
@@ -468,17 +504,33 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "album-year drift:         %d\n", rep.AlbumYearDrift)
 				fmt.Fprintf(w, "release-year drift:       %d\n", rep.ReleaseYearDrift)
 				fmt.Fprintf(w, "playlist-position drift:  %d\n", rep.PlaylistPositionDrift)
+				fmt.Fprintf(w, "rollups pending:          %d\n", rep.RollupsPending)
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
-				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
+				if rep.ThumbnailsDamaged {
+					fmt.Fprintln(w, "orphan thumbnails:        not counted, the thumbnail file is damaged")
+				} else {
+					fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
+				}
 				fmt.Fprintf(w, "orphan tag provenance:    %d\n", rep.OrphanReservedTagProvenance)
 				fmt.Fprintf(w, "stranded tag keys:        %d\n", rep.StrandedTagKeyRows)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())
-				// A refold moves the keys page cursors resume against.
-				if resorted > 0 {
-					fmt.Fprintf(w, "sort keys rewritten:      %d (re-page any open cursors)\n", resorted)
-				}
 				if fix {
+					r := refreshed
+					fmt.Fprintf(w, "rollups rewritten:        %d artists, %d release groups, %d genres\n",
+						r.Artists, r.ReleaseGroups, r.Genres)
+					fmt.Fprintf(w, "books rewritten:          %d durations, %d ISBN keys\n", r.BookDurations, r.ISBNKeys)
+					fmt.Fprintf(w, "years rewritten:          %d albums, %d items\n", r.AlbumYears, r.ReleaseYears)
+					fmt.Fprintf(w, "playlists renumbered:     %d\n", r.PlaylistsCompacted)
+					fmt.Fprintf(w, "sort keys rewritten:      %d\n", resorted)
 					fmt.Fprintf(w, "search rows rebuilt:      %d\n", reindexed)
+					if replaced {
+						fmt.Fprintln(w, "thumbnail file:           replaced, it was damaged")
+					}
+					// A refold moves the keys page cursors resume against, and a moved
+					// release year the newest list's.
+					if resorted > 0 || r.ReleaseYears > 0 {
+						fmt.Fprintln(w, "note: sort keys or release years moved; re-page any open cursors")
+					}
 				}
 				// Orphaned art and stranded tag provenance are reclaimable garbage,
 				// not corruption, so they do not fail the check; point the operator
@@ -488,6 +540,12 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				}
 				if rep.PlaylistPositionDrift > 0 && !fix {
 					fmt.Fprintln(w, "note: playlist positions can be renumbered with `db verify --fix` (indexes read the same either way)")
+				}
+				switch {
+				case rep.ThumbnailsDamaged && fix:
+					fmt.Fprintln(w, "note: the damaged thumbnail file could not be replaced; the warning above says why")
+				case rep.ThumbnailsDamaged:
+					fmt.Fprintln(w, "note: the thumbnail file is damaged; `db verify --fix` replaces it")
 				}
 			}
 			return verdict

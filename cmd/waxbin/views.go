@@ -595,19 +595,46 @@ type derivedView struct {
 	AlbumYearDrift          int `json:"albumYearDrift"`
 	ReleaseYearDrift        int `json:"releaseYearDrift"`
 	PlaylistPositionDrift   int `json:"playlistPositionDrift"`
+	RollupsPending          int `json:"rollupsPending"`
 	OrphanArtSources        int `json:"orphanArtSources"`
 	OrphanThumbnails        int `json:"orphanThumbnails"`
+	// The thumbnail file could not be read whole, so orphanThumbnails is not counted.
+	ThumbnailsDamaged bool `json:"thumbnailsDamaged"`
 	// Custom-tag provenance rows under a key WaxBin has since reserved.
 	OrphanReservedTagProvenance int `json:"orphanReservedTagProvenance"`
 	// Custom-tag rows and locks under a key the key rule no longer accepts.
 	StrandedTagKeyRows int  `json:"strandedTagKeyRows"`
 	Consistent         bool `json:"consistent"`
+	// Present only under --fix: what each repair rewrote.
+	Refreshed *refreshView `json:"refreshed,omitempty"`
 	// Present only when --fix rewrote sort keys, which invalidates open page cursors.
 	SortKeysRewritten int `json:"sortKeysRewritten,omitempty"`
 	// Present only when --fix rewrote, wrote or dropped search rows.
 	SearchRowsRebuilt int `json:"searchRowsRebuilt,omitempty"`
+	// Present only when --fix replaced a damaged thumbnail file.
+	ThumbnailsReplaced bool `json:"thumbnailsReplaced,omitempty"`
 	// Why the check failed, when it did.
 	Error string `json:"error,omitempty"`
+}
+
+// refreshView is what `db verify --fix` rewrote (model.RefreshReport).
+type refreshView struct {
+	Artists            int `json:"artists"`
+	ReleaseGroups      int `json:"releaseGroups"`
+	Genres             int `json:"genres"`
+	BookDurations      int `json:"bookDurations"`
+	ISBNKeys           int `json:"isbnKeys"`
+	AlbumYears         int `json:"albumYears"`
+	ReleaseYears       int `json:"releaseYears"`
+	PlaylistsCompacted int `json:"playlistsCompacted"`
+}
+
+func toRefreshView(r *model.RefreshReport) *refreshView {
+	if r == nil {
+		return nil
+	}
+	v := refreshView(*r)
+	return &v
 }
 
 func toDerivedView(r *sqlite.DerivedReport) derivedView {
@@ -617,8 +644,10 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
 		AlbumYearDrift: r.AlbumYearDrift, ReleaseYearDrift: r.ReleaseYearDrift,
-		PlaylistPositionDrift: r.PlaylistPositionDrift, OrphanArtSources: r.OrphanArtSources,
+		PlaylistPositionDrift: r.PlaylistPositionDrift, RollupsPending: r.RollupsPending,
+		OrphanArtSources:            r.OrphanArtSources,
 		OrphanThumbnails:            r.OrphanThumbnails,
+		ThumbnailsDamaged:           r.ThumbnailsDamaged,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
 		StrandedTagKeyRows:          r.StrandedTagKeyRows,
 		Consistent:                  r.Consistent(),

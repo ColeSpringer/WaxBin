@@ -46,16 +46,17 @@ func (s *Store) UpdateImportBatch(ctx context.Context, b *model.ImportBatch) err
 	})
 }
 
+const displayPathFoldQ = "SELECT EXISTS(SELECT 1 FROM file WHERE display_path = ? COLLATE NOCASE)"
+
 // DisplayPathExistsFold reports whether any cataloged file's display path equals
 // displayPath case-insensitively. The importer uses it so a file that would land
 // at a path differing only by case from an existing one (which coexist on a
 // case-sensitive Linux filesystem but collide on Windows/macOS) is quarantined,
 // keeping the managed tree portable. NOCASE folds ASCII, covering typical
-// filenames; it scans the file table, which is fine for an import-sized batch.
+// filenames; file_display_nocase serves the lookup.
 func (s *Store) DisplayPathExistsFold(ctx context.Context, displayPath string) (bool, error) {
 	var exists int
-	err := s.rdb().QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM file WHERE display_path = ? COLLATE NOCASE)", displayPath).Scan(&exists)
+	err := s.rdb().QueryRowContext(ctx, displayPathFoldQ, displayPath).Scan(&exists)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, "store.DisplayPathExistsFold", err)
 	}

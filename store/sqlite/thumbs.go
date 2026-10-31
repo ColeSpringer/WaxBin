@@ -30,36 +30,47 @@ func (s *Store) ThumbCacheStats(ctx context.Context) (*model.ThumbCacheReport, e
 
 	var rep model.ThumbCacheReport
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0), COUNT(DISTINCT source_hash),
-		        COALESCE(MIN(created_at), 0), COALESCE(MAX(created_at), 0)
-		 FROM thumb_cache`).
-		Scan(&rep.Rows, &rep.Bytes, &rep.Sources, &rep.OldestAt, &rep.NewestAt); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	if err := tx.QueryRowContext(ctx,
 		"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM art_source").
 		Scan(&rep.ArtSources, &rep.ArtSourceBytes); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	if s.thumbsDamaged.Load() {
+		rep.Damaged = true
+		return &rep, nil
+	}
+	if err := thumbCensusTx(ctx, tx, &rep); err != nil {
+		if !s.noteThumbsDamage(ctx, err) {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return &model.ThumbCacheReport{ArtSources: rep.ArtSources, ArtSourceBytes: rep.ArtSourceBytes, Damaged: true}, nil
+	}
+	return &rep, nil
+}
 
+// thumbCensusTx fills the thumbnail file's half of a census.
+func thumbCensusTx(ctx context.Context, tx *sql.Tx, rep *model.ThumbCacheReport) error {
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0), COUNT(DISTINCT source_hash),
+		        COALESCE(MIN(created_at), 0), COALESCE(MAX(created_at), 0)
+		 FROM thumbs.thumb`).
+		Scan(&rep.Rows, &rep.Bytes, &rep.Sources, &rep.OldestAt, &rep.NewestAt); err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT size, COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM thumb_cache
+		`SELECT size, COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM thumbs.thumb
 		 GROUP BY size ORDER BY size DESC`)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r model.ThumbRung
 		if err := rows.Scan(&r.Size, &r.Rows, &r.Bytes); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return err
 		}
 		rep.Rungs = append(rep.Rungs, r)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	return &rep, nil
+	return rows.Err()
 }
 
 // PruneThumbnails drops cached thumbnails to fit a retention policy, returning how
@@ -83,6 +94,15 @@ func (s *Store) PruneThumbnails(ctx context.Context, olderThanNS, maxBytes int64
 	if olderThanNS < 0 && maxBytes < 0 {
 		return 0, 0, waxerr.New(waxerr.CodeInvalid, op, "prune needs an age or a byte budget")
 	}
+	if err := s.writable(); err != nil {
+		return 0, 0, err
+	}
+	if s.thumbsDamaged.Load() {
+		return 0, 0, errThumbsDamaged(op)
+	}
+	if !s.reattachThumbs(ctx, true) {
+		return 0, 0, waxerr.New(waxerr.CodeIO, op, "the thumbnail file cannot be attached; see the log for why")
+	}
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		if olderThanNS >= 0 {
 			// The cutoff is inclusive, which is what makes a zero age empty the cache: a
@@ -105,7 +125,7 @@ func (s *Store) PruneThumbnails(ctx context.Context, olderThanNS, maxBytes int64
 						SELECT source_hash, size, SUM(LENGTH(data)) OVER (
 							ORDER BY created_at DESC, source_hash, size
 							ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running
-						FROM thumb_cache)
+						FROM thumbs.thumb)
 					WHERE running > ?)`, maxBytes)
 			if e != nil {
 				return e
@@ -115,7 +135,13 @@ func (s *Store) PruneThumbnails(ctx context.Context, olderThanNS, maxBytes int64
 		return nil
 	})
 	if err != nil {
+		if s.noteThumbsDamage(ctx, err) {
+			return 0, 0, errThumbsDamaged(op)
+		}
 		return 0, 0, err
+	}
+	if removed > 0 {
+		s.reclaimAfterDelete(ctx)
 	}
 	return removed, freed, nil
 }
@@ -128,7 +154,7 @@ func (s *Store) PruneThumbnails(ctx context.Context, olderThanNS, maxBytes int64
 func deleteThumbsTx(ctx context.Context, tx *sql.Tx, where string, arg any) (int, int64, error) {
 	const op = "store.PruneThumbnails"
 	rows, err := tx.QueryContext(ctx,
-		"DELETE FROM thumb_cache WHERE "+where+" RETURNING LENGTH(data)", arg)
+		"DELETE FROM thumbs.thumb WHERE "+where+" RETURNING LENGTH(data)", arg)
 	if err != nil {
 		return 0, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

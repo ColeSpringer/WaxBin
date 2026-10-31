@@ -85,6 +85,52 @@ func BenchmarkPutScannedTrack(b *testing.B) {
 	}
 }
 
+// BenchmarkPutScannedTrackSharedEntities measures one more put into an artist and a genre
+// holding 20,000 tracks: recomputing their rollups in the put, as an edit does, and
+// deferring them to a settle every 2,000 puts, as a scan does, the settles' cost included.
+func BenchmarkPutScannedTrackSharedEntities(b *testing.B) {
+	st, lib := benchStore(b)
+	ctx := context.Background()
+	shared := func(i int, deferred bool) model.PutScannedTrackInput {
+		in := benchTrack(lib.ID, i)
+		in.Track.Artist, in.Track.AlbumArtist, in.Track.ArtistSort = "One Artist", "One Artist", ""
+		in.Track.Genre, in.Track.Genres = "Rock", []string{"Rock"}
+		in.Track.Album = fmt.Sprintf("Album %d", i/20)
+		in.DeferRollups = deferred
+		return in
+	}
+	put := func(in model.PutScannedTrackInput) {
+		if _, err := st.PutScannedTrack(ctx, in); err != nil {
+			b.Fatal(err)
+		}
+	}
+	settle := func() {
+		if _, err := st.SettleRollups(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+	const members = 20000
+	for i := range members {
+		put(shared(i, true))
+	}
+	settle()
+	next := members
+	for _, deferred := range []bool{false, true} {
+		b.Run(map[bool]string{false: "recompute", true: "deferred"}[deferred], func(b *testing.B) {
+			for n := range b.N {
+				put(shared(next, deferred))
+				next++
+				if deferred && (n+1)%2000 == 0 {
+					settle()
+				}
+			}
+			if deferred {
+				settle()
+			}
+		})
+	}
+}
+
 // BenchmarkQueryPageAtScale measures keyset pagination over a 5k-track catalog.
 // The browse hot path must stay cheap regardless of catalog size.
 func BenchmarkQueryPageAtScale(b *testing.B) {

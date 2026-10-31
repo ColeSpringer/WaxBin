@@ -423,7 +423,7 @@ func TestScanAlbumArtistRetagIntoEstablishedAlbumKeepsGroupPID(t *testing.T) {
 		"UPDATE release_group SET primary_artist_id=? WHERE id=?", gammaID, rgID); err != nil {
 		t.Fatalf("re-point primary artist: %v", err)
 	}
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh rollups: %v", err)
 	}
 	assertVerifyClean(t, st)

@@ -90,7 +90,8 @@ func (s *Store) DeleteSecret(ctx context.Context, key string) error {
 // VACUUM INTO (which captures committed state and works on a read-only source, so
 // a backup can run concurrently with a writer). The copy contains every table,
 // the secret table included; port.TrimBackupFile strips secrets from a copy meant
-// to leave the host, and thumbnails from one meant to be small.
+// to leave the host. VACUUM INTO copies the main schema alone, so the thumbnail file
+// attached beside it never reaches the copy.
 func (s *Store) BackupTo(ctx context.Context, dest string) error {
 	const op = "store.BackupTo"
 	if strings.TrimSpace(dest) == "" {

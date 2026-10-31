@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxbin/store/sqlite"
 )
 
 // TestDBVerifyReportsAndFixesAlbumYearDrift: an album year that is not its members' is
@@ -169,5 +174,142 @@ func TestDBVerifyFixRebuildsTheSearchIndex(t *testing.T) {
 		if len(res.Data.Tracks) != want {
 			t.Errorf("search %q = %d tracks, want %d", q, len(res.Data.Tracks), want)
 		}
+	}
+}
+
+// TestDBVerifyFixReportsWhatItRewrote: `db verify --fix` says how many rows each repair
+// rewrote, in its text and under "refreshed" in its JSON, which a plain verify leaves out.
+func TestDBVerifyFixReportsWhatItRewrote(t *testing.T) {
+	db, root, _ := creditCLIFixture(t)
+	raw, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec("UPDATE album SET year = 1900; UPDATE playable_item SET release_year = 1900"); err != nil {
+		t.Fatalf("break the years by hand: %v", err)
+	}
+	_ = raw.Close()
+
+	type refreshed struct {
+		Artists      int `json:"artists"`
+		AlbumYears   int `json:"albumYears"`
+		ReleaseYears int `json:"releaseYears"`
+	}
+	read := func(args ...string) (*refreshed, bool) {
+		t.Helper()
+		out, _ := runCLIJSON(t, db, root, append([]string{"db", "verify"}, args...)...)
+		var env struct {
+			Data struct {
+				RollupsPending *int       `json:"rollupsPending"`
+				Refreshed      *refreshed `json:"refreshed"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &env); err != nil {
+			t.Fatalf("db verify %v printed %q: %v", args, out, err)
+		}
+		return env.Data.Refreshed, env.Data.RollupsPending != nil
+	}
+	if got, pending := read(); got != nil || !pending {
+		t.Errorf("plain verify: refreshed %+v, rollupsPending present %t, want no refreshed and the pending count", got, pending)
+	}
+	if got, _ := read("--fix"); got == nil || *got != (refreshed{AlbumYears: 1, ReleaseYears: 1}) {
+		t.Errorf("verify --fix refreshed = %+v, want one album year and one release year", got)
+	}
+
+	text, err := runCLIText(t, db, root, "db", "verify", "--fix")
+	if err != nil {
+		t.Fatalf("db verify --fix: %v (%s)", err, text)
+	}
+	if !strings.Contains(text, "years rewritten:") || !strings.Contains(text, "0 albums, 0 items") {
+		t.Errorf("text = %q, want the years line reporting nothing left to rewrite", text)
+	}
+}
+
+// damageThumbsCLI seeds a thumbnail into the file beside db and writes garbage over its
+// pages past the schema page and the pointer map, which an attach never reads.
+func damageThumbsCLI(t *testing.T, db string) {
+	t.Helper()
+	thumbs := sqlite.ThumbFile(db)
+	raw, err := sql.Open("sqlite", "file:"+thumbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(`INSERT INTO thumb(source_hash, size, format, width, height, data, created_at)
+		VALUES ('h1', 128, 'jpeg', 128, 128, x'0405', 1)`); err != nil {
+		t.Fatalf("seed a thumbnail: %v", err)
+	}
+	_ = raw.Close()
+	f, err := os.OpenFile(thumbs, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var header [2]byte
+	if _, err := f.ReadAt(header[:], 16); err != nil {
+		t.Fatal(err)
+	}
+	page := int64(binary.BigEndian.Uint16(header[:]))
+	info, err := f.Stat()
+	if err != nil || info.Size() <= 2*page {
+		t.Fatalf("the thumbnail file: %v, want pages past the pointer map", err)
+	}
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, int(info.Size()-2*page)), 2*page); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// verifyData runs `db verify` with args and returns its JSON data.
+func verifyData(t *testing.T, db, root string, args ...string) map[string]any {
+	t.Helper()
+	out, err := runCLIJSON(t, db, root, append([]string{"db", "verify"}, args...)...)
+	if err != nil {
+		t.Fatalf("db verify %v: %v (%s)", args, err, out)
+	}
+	var env struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("db verify %v printed %q: %v", args, out, err)
+	}
+	return env.Data
+}
+
+// TestDBVerifyOverADamagedThumbFile: a thumbnail file whose table pages are garbage reads
+// as a damaged cache, not a failed check: `db verify` says so in both forms, counts no
+// orphans it could not read, passes, and points at --fix.
+func TestDBVerifyOverADamagedThumbFile(t *testing.T) {
+	db, root, _ := creditCLIFixture(t)
+	damageThumbsCLI(t, db)
+	data := verifyData(t, db, root)
+	if data["thumbnailsDamaged"] != true || data["orphanThumbnails"] != float64(0) || data["consistent"] != true {
+		t.Errorf("db verify = %v, want the damage reported, no orphans counted, and a consistent catalog", data)
+	}
+	text, err := runCLIText(t, db, root, "db", "verify")
+	if err != nil {
+		t.Fatalf("db verify (text): %v (%s)", err, text)
+	}
+	for _, want := range []string{"orphan thumbnails:        not counted", "`db verify --fix` replaces it"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("db verify text is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestDBVerifyFixReplacesADamagedThumbFile: --fix leaves a sound thumbnail file in place
+// of a damaged one, the damaged one set aside, and says it did.
+func TestDBVerifyFixReplacesADamagedThumbFile(t *testing.T) {
+	db, root, _ := creditCLIFixture(t)
+	damageThumbsCLI(t, db)
+	data := verifyData(t, db, root, "--fix")
+	if data["thumbnailsDamaged"] != false || data["thumbnailsReplaced"] != true {
+		t.Errorf("db verify --fix = %v, want a sound cache it replaced", data)
+	}
+	if _, err := os.Stat(sqlite.ThumbFile(db) + ".unusable"); err != nil {
+		t.Errorf("the damaged file was not set aside: %v", err)
+	}
+	if data := verifyData(t, db, root); data["thumbnailsDamaged"] != false {
+		t.Errorf("db verify after the fix = %v, want a sound cache", data)
 	}
 }

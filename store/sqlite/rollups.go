@@ -3,24 +3,31 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // Maintained rollups are catalog-structural counts and durations per artist,
-// release_group, and genre. PutScannedTrack recomputes the rollups for the
-// entities touched by a change inside the same transaction. Recomputing from the
-// base tables, instead of applying deltas, handles entities dropping to zero
-// tracks. A full-catalog rebuild remains available for repair and verification.
+// release_group, and genre. A write recomputes the rollups for the entities it touched
+// inside its own transaction, except a scan's put, which records them in rollup_dirty for
+// the scan's next SettleRollups: each recompute is linear in the entity's members, so a
+// scan paying one per file would be quadratic in its largest artist, genre or album.
+// Recomputing from the base tables, instead of applying deltas, handles entities dropping
+// to zero tracks. A full-catalog rebuild remains available for repair and verification.
 
 // affectedRollups accumulates the entity ids whose rollups a write must refresh, and
-// the albums whose maintained year it must (refreshAlbumYearsTx).
+// the albums whose maintained year it must (refreshAlbumYearsTx). deferred marks them
+// dirty instead (PutScannedTrackInput.DeferRollups).
 type affectedRollups struct {
-	artists map[int64]bool
-	rgs     map[int64]bool
-	genres  map[int64]bool
-	albums  map[int64]bool
+	artists  map[int64]bool
+	rgs      map[int64]bool
+	genres   map[int64]bool
+	albums   map[int64]bool
+	deferred bool
 }
 
 func newAffectedRollups() *affectedRollups {
@@ -84,89 +91,198 @@ func (a *affectedRollups) collectAlbumOf(ctx context.Context, tx *sql.Tx, itemID
 	return nil
 }
 
+// rollupKind is one kind rollup_dirty records: the set of its ids an affectedRollups holds,
+// its recompute, and the count it adds to a settle's report.
+type rollupKind struct {
+	kind      string
+	of        func(*affectedRollups) map[int64]bool
+	recompute func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error
+	count     func(*model.RollupSettle) *int
+}
+
+var rollupKinds = []rollupKind{
+	{"artist", func(a *affectedRollups) map[int64]bool { return a.artists },
+		func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error {
+			return refreshRollupSubset(ctx, tx, ids, artistRollupSelect, now)
+		}, func(r *model.RollupSettle) *int { return &r.Artists }},
+	{"release_group", func(a *affectedRollups) map[int64]bool { return a.rgs },
+		func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error {
+			return refreshRollupSubset(ctx, tx, ids, releaseGroupRollupSelect, now)
+		}, func(r *model.RollupSettle) *int { return &r.ReleaseGroups }},
+	{"genre", func(a *affectedRollups) map[int64]bool { return a.genres },
+		func(ctx context.Context, tx *sql.Tx, ids []int64, now int64) error {
+			return refreshRollupSubset(ctx, tx, ids, genreRollupSelect, now)
+		}, func(r *model.RollupSettle) *int { return &r.Genres }},
+	{"album", func(a *affectedRollups) map[int64]bool { return a.albums },
+		func(ctx context.Context, tx *sql.Tx, ids []int64, _ int64) error {
+			return refreshAlbumYearsTx(ctx, tx, ids)
+		},
+		func(r *model.RollupSettle) *int { return &r.Albums }},
+}
+
 // maintainRollupsTx recomputes rollups for the affected entities inside the
 // caller's transaction, and the affected albums' years. Each row is deleted and
 // reinserted from a base-table aggregation scoped to its id, so touched entities with
-// zero tracks still get the zero row expected by the consistency check.
+// zero tracks still get the zero row expected by the consistency check. A deferred set
+// is only recorded in rollup_dirty.
 func maintainRollupsTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, now int64) error {
-	if err := refreshRollupSubset(ctx, tx, ids(aff.artists), "artist_rollup", "artist_id", artistRollupSelect, now); err != nil {
-		return err
+	for _, k := range rollupKinds {
+		set := ids(k.of(aff))
+		var err error
+		if aff.deferred {
+			err = markRollupsDirtyTx(ctx, tx, k.kind, set)
+		} else {
+			err = k.recompute(ctx, tx, set, now)
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if err := refreshRollupSubset(ctx, tx, ids(aff.rgs), "release_group_rollup", "release_group_id", releaseGroupRollupSelect, now); err != nil {
-		return err
-	}
-	if err := refreshRollupSubset(ctx, tx, ids(aff.genres), "genre_rollup", "genre_id", genreRollupSelect, now); err != nil {
-		return err
-	}
-	return refreshAlbumYearsTx(ctx, tx, ids(aff.albums))
+	return nil
 }
 
-// refreshRollupSubset deletes and recomputes the rollup rows for a set of entity
-// ids. selectTmpl is the aggregation with a "%s" where an id filter is injected.
-func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, table, idCol, selectTmpl string, now int64) error {
-	if len(idList) == 0 {
-		return nil
-	}
-	ph := placeholders(len(idList))
-	args := make([]any, 0, len(idList)*2+1)
-	for _, id := range idList {
-		args = append(args, id)
-	}
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM "+table+" WHERE "+idCol+" IN "+ph, args...); err != nil {
+// markRollupsDirtyTx records ids of kind as owed a settle.
+func markRollupsDirtyTx(ctx context.Context, tx *sql.Tx, kind string, idList []int64) error {
+	return chunkSlice(idList, idBatchSize, func(chunk []int64) error {
+		args := make([]any, 0, 2*len(chunk))
+		for _, id := range chunk {
+			args = append(args, kind, id)
+		}
+		_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO rollup_dirty(kind, entity_id) VALUES "+
+			strings.TrimSuffix(strings.Repeat("(?,?),", len(chunk)), ","), args...)
 		return err
+	})
+}
+
+// SettleRollups recomputes what deferred puts left in rollup_dirty, idBatchSize ids at a
+// time, each batch selected, recomputed and cleared in one transaction, so a failure or a
+// crash between batches leaves only the rest pending. A recompute is idempotent, so an id
+// a later write recomputed meanwhile, or one whose entity is gone, settles harmlessly.
+func (s *Store) SettleRollups(ctx context.Context) (model.RollupSettle, error) {
+	const op = "store.SettleRollups"
+	var out model.RollupSettle
+	var pending bool
+	if err := s.rdb().QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM rollup_dirty)").Scan(&pending); err != nil {
+		return out, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	stmt := strings.Replace(selectTmpl, "/*FILTER*/", "IN "+ph, 1)
-	insertArgs := append([]any{now}, args...) // the SELECT's leading "?" is updated_at
-	_, err := tx.ExecContext(ctx, stmt, insertArgs...)
-	return err
+	if !pending {
+		return out, nil
+	}
+	for _, k := range rollupKinds {
+		for {
+			n, err := s.settleBatch(ctx, k, idBatchSize)
+			if err != nil {
+				return out, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			*k.count(&out) += n
+			if n < idBatchSize {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// settleBatch settles up to limit of kind's pending ids in one transaction, returning how
+// many it settled.
+func (s *Store) settleBatch(ctx context.Context, k rollupKind, limit int) (int, error) {
+	var n int
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		batch, err := queryInt64sTx(ctx, tx,
+			"SELECT entity_id FROM rollup_dirty WHERE kind = ? ORDER BY entity_id LIMIT ?", k.kind, limit)
+		if err != nil || len(batch) == 0 {
+			return err
+		}
+		if err := k.recompute(ctx, tx, batch, nowNS()); err != nil {
+			return err
+		}
+		args := []any{k.kind}
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM rollup_dirty WHERE kind = ? AND entity_id IN "+
+			placeholders(len(batch)), args...); err != nil {
+			return err
+		}
+		n = len(batch)
+		return nil
+	})
+	return n, err
+}
+
+// refreshRollupSubset recomputes the rollup rows for a set of entity ids, idBatchSize at a
+// time. selectTmpl is the aggregation with a "/*FILTER*/" where the id filter is injected.
+func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, selectTmpl string, now int64) error {
+	return chunkSlice(idList, idBatchSize, func(chunk []int64) error {
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, now) // the SELECT's leading "?" is updated_at
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		_, err := tx.ExecContext(ctx, strings.Replace(selectTmpl, "/*FILTER*/", "IN "+placeholders(len(chunk)), 1), args...)
+		return err
+	})
 }
 
 // RefreshRollups recomputes every rollup from the base tables in one transaction,
 // plus each book's denormalized total duration and ISBN key, each album's year and each
 // item's release year, and renumbers each static playlist whose positions are not its
-// listing indexes. Per-write maintenance keeps them current during normal operation;
-// this whole-catalog rebuild repairs drift reported by `db verify`. The book columns,
-// the two years and the playlist positions are not rollup tables, but they are the same
-// kind of maintained value, they are on the same drift report, and this is the verb
-// `db verify --fix` runs, so repairing them anywhere else would leave the fix
-// unreachable.
-func (s *Store) RefreshRollups(ctx context.Context) error {
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		if err := rebuildRollups(ctx, tx, nowNS()); err != nil {
+// listing indexes, reporting what it rewrote. Per-write maintenance keeps them current
+// during normal operation; this whole-catalog rebuild repairs drift reported by `db
+// verify`. The book columns, the two years and the playlist positions are not rollup
+// tables, but they are the same kind of maintained value, they are on the same drift
+// report, and this is the verb `db verify --fix` runs, so repairing them anywhere else
+// would leave the fix unreachable. It recomputes everything a settle would, so it clears
+// what deferred puts left pending too, and counts a pending entity when its stored value
+// was stale.
+func (s *Store) RefreshRollups(ctx context.Context) (*model.RefreshReport, error) {
+	rep := &model.RefreshReport{}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if rep.Artists, rep.ReleaseGroups, rep.Genres, err = rebuildRollups(ctx, tx, nowNS()); err != nil {
 			return err
 		}
-		if err := refreshAllBookDurations(ctx, tx); err != nil {
+		if rep.BookDurations, err = refreshAllBookDurations(ctx, tx); err != nil {
 			return err
 		}
-		if err := refreshAllISBNKeysTx(ctx, tx); err != nil {
+		if rep.ISBNKeys, err = refreshAllISBNKeysTx(ctx, tx); err != nil {
 			return err
 		}
-		if err := refreshAllAlbumYearsTx(ctx, tx); err != nil {
+		if rep.AlbumYears, err = refreshAllAlbumYearsTx(ctx, tx); err != nil {
 			return err
 		}
-		if err := refreshAllReleaseYearsTx(ctx, tx); err != nil {
+		if rep.ReleaseYears, err = refreshAllReleaseYearsTx(ctx, tx); err != nil {
 			return err
 		}
-		return compactAllPlaylistsTx(ctx, tx)
+		if rep.PlaylistsCompacted, err = compactAllPlaylistsTx(ctx, tx); err != nil {
+			return err
+		}
+		// A WHERE keeps SQLite off its truncate path, which rewrites the root page of an empty
+		// table too.
+		_, err = tx.ExecContext(ctx, "DELETE FROM rollup_dirty WHERE kind IS NOT NULL")
+		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return rep, nil
 }
 
-func rebuildRollups(ctx context.Context, tx *sql.Tx, now int64) error {
-	for _, q := range []string{
-		"DELETE FROM artist_rollup", "DELETE FROM release_group_rollup", "DELETE FROM genre_rollup",
-	} {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return err
-		}
-	}
-	for _, tmpl := range []string{artistRollupSelect, releaseGroupRollupSelect, genreRollupSelect} {
+// rebuildRollups recomputes every rollup row, returning how many it wrote per table, which
+// are the rows that were missing or wrong: every rollup row's entity exists, since an
+// entity's delete takes its row with it.
+func rebuildRollups(ctx context.Context, tx *sql.Tx, now int64) (artists, groups, genres int, err error) {
+	counts := [3]*int{&artists, &groups, &genres}
+	for i, tmpl := range []string{artistRollupSelect, releaseGroupRollupSelect, genreRollupSelect} {
 		// The whole-catalog rebuild drops the id filter (1=1 covers every entity).
-		if _, err := tx.ExecContext(ctx, strings.Replace(tmpl, "/*FILTER*/", "IS NOT NULL OR 1=1", 1), now); err != nil {
-			return err
+		r, err := tx.ExecContext(ctx, strings.Replace(tmpl, "/*FILTER*/", "IS NOT NULL OR 1=1", 1), now)
+		if err != nil {
+			return 0, 0, 0, err
 		}
+		n, _ := r.RowsAffected()
+		*counts[i] = int(n)
 	}
-	return nil
+	return artists, groups, genres, nil
 }
 
 func ids(set map[int64]bool) []int64 {
@@ -187,6 +303,30 @@ func placeholders(n int) string {
 // idBatchSize bounds an IN(...) / multi-row VALUES batch to stay well under the
 // SQLite bound-parameter limit, matching query's maxInValues cap.
 const idBatchSize = 500
+
+// inArray is the IN list of a cached batch read: the whole batch bound as one JSON array
+// (idArray, pidArray), so a list of any length runs the same statement.
+const inArray = "(SELECT value FROM json_each(?))"
+
+// idArray renders ids as a JSON array, for json_each.
+func idArray(ids []int64) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatInt(id, 10))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// pidArray renders pids as a JSON array, for json_each.
+func pidArray(pids []model.PID) string {
+	b, _ := json.Marshal(pids)
+	return string(b)
+}
 
 // uniquePIDs deduplicates pids preserving first-seen order, the shared front
 // half of the chunked IN(...) lookups (ItemsByPIDs and friends): a repeated pid
@@ -228,7 +368,9 @@ func chunkSlice[T any](s []T, size int, fn func([]T) error) error {
 // files so durations sum from the real audio rows. COUNT(DISTINCT item) tolerates
 // the LEFT JOINs (an entity with no tracks rolls up to zero, not one). The
 // "/*FILTER*/" marker is replaced with an id filter (subset) or a tautology
-// (whole catalog).
+// (whole catalog). Each is an upsert that writes a row only when it is missing or its
+// values differ, so a recompute of an unchanged entity writes nothing and the rows it
+// affected are the rows that drifted.
 const artistRollupSelect = `
 INSERT INTO artist_rollup(artist_id, release_group_count, track_count, total_duration_ms, updated_at)
 SELECT a.id,
@@ -241,7 +383,12 @@ LEFT JOIN track t      ON t.artist_id = a.id
 LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 LEFT JOIN file f       ON f.id = pf.file_id
 WHERE a.id /*FILTER*/
-GROUP BY a.id`
+GROUP BY a.id
+ON CONFLICT(artist_id) DO UPDATE SET release_group_count = excluded.release_group_count,
+	track_count = excluded.track_count, total_duration_ms = excluded.total_duration_ms,
+	updated_at = excluded.updated_at
+WHERE (release_group_count, track_count, total_duration_ms) <>
+	(excluded.release_group_count, excluded.track_count, excluded.total_duration_ms)`
 
 const releaseGroupRollupSelect = `
 INSERT INTO release_group_rollup(release_group_id, track_count, total_duration_ms, updated_at)
@@ -255,7 +402,10 @@ LEFT JOIN track t      ON t.album_id = al.id
 LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 LEFT JOIN file f       ON f.id = pf.file_id
 WHERE rg.id /*FILTER*/
-GROUP BY rg.id`
+GROUP BY rg.id
+ON CONFLICT(release_group_id) DO UPDATE SET track_count = excluded.track_count,
+	total_duration_ms = excluded.total_duration_ms, updated_at = excluded.updated_at
+WHERE (track_count, total_duration_ms) <> (excluded.track_count, excluded.total_duration_ms)`
 
 // The genre duration sums ALL of an item's parts, not just the primary, so a
 // multi-file audiobook contributes its whole running time, and none of its alternates,
@@ -275,4 +425,7 @@ LEFT JOIN item_genre ig ON ig.genre_id = g.id
 LEFT JOIN item_file pf  ON pf.item_id = ig.item_id AND pf.role IN ('primary', 'part')
 LEFT JOIN file f        ON f.id = pf.file_id
 WHERE g.id /*FILTER*/
-GROUP BY g.id`
+GROUP BY g.id
+ON CONFLICT(genre_id) DO UPDATE SET track_count = excluded.track_count,
+	total_duration_ms = excluded.total_duration_ms, updated_at = excluded.updated_at
+WHERE (track_count, total_duration_ms) <> (excluded.track_count, excluded.total_duration_ms)`

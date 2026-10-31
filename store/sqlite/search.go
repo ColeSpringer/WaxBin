@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
@@ -115,7 +116,9 @@ func checkItemStates(states []model.ItemState, op string) error {
 
 // searchStmt builds the grouped-search statement for one option set, returning
 // the statement, its bind args in clause order, and the ranked-row scan cap the
-// caller's loop enforces (one row past it sets Truncated).
+// caller's loop enforces (one row past it sets Truncated). Its limits are written into
+// the text, as every statement the cache keeps writes them: SQLite plans with a bound
+// LIMIT's value, so binding one has the statement prepared again on every run.
 //
 // With no candidate cap the statement is the flat FTS query, which with an empty
 // scope too is the option-free statement TestSearchStmtZeroPathGolden pins. With
@@ -134,10 +137,7 @@ func checkItemStates(states []model.ItemState, op string) error {
 // narrowing sits inside the wrap, so a match the caller excluded by library or by
 // state never consumes the pool.
 func searchStmt(match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState) (string, []any, int) {
-	scanCap := searchFetchCap(limit)
-	if maxCandidates > 0 && maxCandidates < scanCap {
-		scanCap = maxCandidates
-	}
+	scanCap := searchScanCap(limit, maxCandidates)
 	narrow, narrowArgs := searchNarrow(libIDs, states)
 
 	if maxCandidates <= 0 {
@@ -146,8 +146,8 @@ func searchStmt(match string, limit, maxCandidates int, libIDs []int64, states [
 		JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow + searchDisplayJoins + `
 		WHERE search_fts MATCH ?
 		ORDER BY score, pi.pid
-		LIMIT ?`
-		return stmt, append(narrowArgs, match, scanCap+1), scanCap
+		LIMIT ` + strconv.Itoa(scanCap+1)
+		return stmt, append(narrowArgs, match), scanCap
 	}
 
 	// Guarded rather than joined unconditionally: with nothing to narrow, the inner
@@ -165,11 +165,21 @@ func searchStmt(match string, limit, maxCandidates int, libIDs []int64, states [
 			FROM search_fts` + innerNarrow + `
 			WHERE search_fts MATCH ?
 			ORDER BY search_fts.rowid DESC
-			LIMIT ?) c
+			LIMIT ` + strconv.Itoa(maxCandidates+1) + `) c
 		JOIN playable_item pi ON pi.id = c.rid` + searchDisplayJoins + `
 		ORDER BY score, pi.pid
-		LIMIT ?`
-	return stmt, append(narrowArgs, match, maxCandidates+1, scanCap+1), scanCap
+		LIMIT ` + strconv.Itoa(scanCap+1)
+	return stmt, append(narrowArgs, match), scanCap
+}
+
+// searchScanCap is how many ranked rows a search reads before it reports truncation: the
+// fetch cap for its limit, or the candidate cap when that is smaller.
+func searchScanCap(limit, maxCandidates int) int {
+	scanCap := searchFetchCap(limit)
+	if maxCandidates > 0 && maxCandidates < scanCap {
+		scanCap = maxCandidates
+	}
+	return scanCap
 }
 
 // Search runs a grouped, BM25-ranked metadata search. It queries the metadata FTS
@@ -233,7 +243,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 // tie-broken by pid so equal-score rows come back in a stable, deterministic order.
 func (s *Store) searchMatches(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, g *searchGroups) error {
 	stmt, args, cap := searchStmt(match, limit, maxCandidates, libIDs, states)
-	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, args...)
 	if err != nil {
 		return err
 	}
@@ -395,11 +405,8 @@ func searchTier(name, q nameKeys) int {
 // search does, so a full result sets Truncated, and a smaller candidate cap is the cap.
 func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, g *searchGroups) error {
 	narrow, narrowArgs := searchNarrow(libIDs, states)
-	cap := searchFetchCap(limit)
-	if maxCandidates > 0 && maxCandidates < cap {
-		cap = maxCandidates
-	}
-	rows, err := s.rdb().QueryContext(ctx, itemsBySortKeyQ(narrow), append(append([]any{key}, narrowArgs...), cap+1)...)
+	cap := searchScanCap(limit, maxCandidates)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), itemsBySortKeyQ(narrow, cap+1), append([]any{key}, narrowArgs...)...)
 	if err != nil {
 		return err
 	}
@@ -417,17 +424,18 @@ func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, max
 }
 
 // itemsBySortKeyQ is the statement searchItemsBySortKey runs, binding the key once as
-// ?1. The lookups drive (CROSS JOIN keeps them outermost), so a library narrowing is a
-// residual test rather than a walk of every item in the library. The display has no
-// index, so that arm reads the track table, which only a query of symbols alone pays.
-func itemsBySortKeyQ(narrow string) string {
+// ?1 and reading at most fetch rows. The lookups drive (CROSS JOIN keeps them
+// outermost), so a library narrowing is a residual test rather than a walk of every item
+// in the library. The display has no index, so that arm reads the track table, which
+// only a query of symbols alone pays.
+func itemsBySortKeyQ(narrow string, fetch int) string {
 	return `SELECT ` + searchDisplayCols + `, 0.0
 		FROM (SELECT id FROM playable_item WHERE sort_key = ?1
 			UNION SELECT item_id FROM track WHERE artist_sort_key = ?1
 			UNION SELECT item_id FROM track WHERE instr(artist, ?1) > 0
 				AND instr(', ' || artist || ', ', ', ' || ?1 || ', ') > 0) m
 		CROSS JOIN playable_item pi ON pi.id = m.id` + narrow + searchDisplayJoins + `
-		ORDER BY pi.id DESC LIMIT ?`
+		ORDER BY pi.id DESC LIMIT ` + strconv.Itoa(fetch)
 }
 
 // searchEntitiesByName adds the artists and albums whose own name is the query to the
@@ -440,8 +448,8 @@ func (s *Store) searchEntitiesByName(ctx context.Context, query string, limit in
 	narrow, narrowArgs := searchNarrow(libIDs, states)
 	if keys := artistLookupKeys(query); len(keys) > 0 {
 		args := append(anySlice(keys), g.q.sort)
-		artists, err := s.searchEntities(ctx, artistByNameQ(narrow, len(keys)),
-			append(append(append(args, narrowArgs...), narrowArgs...), limit)...)
+		artists, err := s.searchEntities(ctx, artistByNameQ(narrow, len(keys), limit),
+			append(append(args, narrowArgs...), narrowArgs...)...)
 		if err != nil {
 			return err
 		}
@@ -453,8 +461,7 @@ func (s *Store) searchEntitiesByName(ctx context.Context, query string, limit in
 	if g.q.sort == "" {
 		return nil
 	}
-	albums, err := s.searchEntities(ctx, albumByNameQ(narrow),
-		append(append([]any{g.q.sort}, narrowArgs...), limit)...)
+	albums, err := s.searchEntities(ctx, albumByNameQ(narrow, limit), append([]any{g.q.sort}, narrowArgs...)...)
 	if err != nil {
 		return err
 	}
@@ -488,24 +495,25 @@ func artistLookupKeys(query string) []string {
 // artistByNameQ looks artists up by match key with the spaces dropped (the
 // artist_joined_key index), against keys bound values, which equal match keys also
 // pass, and by sort key, keeping one credited on, or the album artist of, a track the
-// narrowing keeps. narrow is spliced twice, so its args bind twice.
-func artistByNameQ(narrow string, keys int) string {
+// narrowing keeps, at most limit of them. narrow is spliced twice, so its args bind
+// twice.
+func artistByNameQ(narrow string, keys, limit int) string {
 	return `SELECT art.pid, art.name, '' FROM artist art
 		WHERE (replace(art.match_key, ' ', '') IN ` + placeholders(keys) + ` OR art.sort_key = ?)
 		AND (EXISTS (SELECT 1 FROM item_contributor ic JOIN track t ON t.item_id = ic.item_id
 			JOIN playable_item pi ON pi.id = ic.item_id` + narrow + ` WHERE ic.artist_id = art.id)
 		OR EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
 			WHERE t.album_artist_id = art.id))
-		ORDER BY art.pid LIMIT ?`
+		ORDER BY art.pid LIMIT ` + strconv.Itoa(limit)
 }
 
-// albumByNameQ looks albums up by sort key, keeping one that holds a track the
+// albumByNameQ looks albums up by sort key, keeping at most limit that hold a track the
 // narrowing keeps.
-func albumByNameQ(narrow string) string {
+func albumByNameQ(narrow string, limit int) string {
 	return `SELECT al.pid, al.title, ` + albumSubtitle + ` FROM album al
 		WHERE al.sort_key = ? AND EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
 			WHERE t.album_id = al.id)
-		ORDER BY al.pid LIMIT ?`
+		ORDER BY al.pid LIMIT ` + strconv.Itoa(limit)
 }
 
 // albumSubtitle renders an album's artist for a hit found by the album itself rather
@@ -515,7 +523,7 @@ const albumSubtitle = `COALESCE((SELECT COALESCE(NULLIF(t.album_artist,''), t.ar
 
 // searchEntities reads (pid, title, subtitle) entity hits.
 func (s *Store) searchEntities(ctx context.Context, q string, args ...any) ([]read.SearchHit, error) {
-	rows, err := s.rdb().QueryContext(ctx, q, args...)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -534,54 +542,22 @@ func (s *Store) searchEntities(ctx context.Context, q string, args ...any) ([]re
 }
 
 // searchTranscripts adds episodes whose stored transcript matches, ranked by the
-// transcript FTS, skipping episodes already in the Episodes group. It over-fetches
-// by the already-seen count so that when a term also matches many episode titles,
-// the top transcript rows being already-seen does not starve transcript-only hits
-// that have room in the group. It honors every search knob: a library scope keeps
-// a transcript hit from leaking an episode whose file lives outside the scope
-// (an undownloaded one included), a state narrowing does the same for an episode
-// the caller excluded, and a candidate cap bounds the ranked pool with the same
-// rowid-DESC recency bias (transcript_fts rowids follow transcript insertion
-// order). Exhausting the transcript pool does not set Truncated; the small
-// Episodes group cap already bounds what a fuller pool could add.
+// transcript FTS, skipping episodes already in the Episodes group. It runs only while
+// that group holds fewer than limit, which means every episode the metadata rows saw is
+// in it, and an episode has one transcript row, so limit rows always hold enough unseen
+// ones to fill the group; a fixed fetch also keeps the statement one text for the cache.
+// It honors every search knob:
+// a library scope keeps a transcript hit from leaking an episode whose file lives outside
+// the scope (an undownloaded one included), a state narrowing does the same for an
+// episode the caller excluded, and a candidate cap bounds the ranked pool with the same
+// rowid-DESC recency bias (transcript_fts rowids follow transcript insertion order).
+// Exhausting the transcript pool does not set Truncated; the small Episodes group cap
+// already bounds what a fuller pool could add.
 func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, seen map[model.PID]bool, res *read.SearchResult) error {
 	const op = "store.Search"
 	narrow, narrowArgs := searchNarrow(libIDs, states)
-	var stmt string
-	var args []any
-	if maxCandidates <= 0 {
-		stmt = `SELECT pi.pid, pi.title, p.title, bm25(transcript_fts) AS score
-		 FROM transcript_fts
-		 JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + narrow + `
-		 JOIN episode e ON e.item_id = pi.id
-		 JOIN podcast p ON p.id = e.podcast_id
-		 WHERE transcript_fts MATCH ?
-		 ORDER BY score, pi.pid
-		 LIMIT ?`
-		args = append(narrowArgs, match, limit+len(seen))
-	} else {
-		innerNarrow := ""
-		if narrow != "" {
-			innerNarrow = `
-			JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + narrow
-		}
-		// The inner LIMIT is maxCandidates, not maxCandidates+1, unlike the metadata
-		// rung: this rung never reports pool exhaustion, so it has no probe row to
-		// fetch. The asymmetry is deliberate rather than an oversight.
-		stmt = `SELECT pi.pid, pi.title, p.title, c.score AS score
-		 FROM (SELECT transcript_fts.episode_id AS eid, bm25(transcript_fts) AS score
-			FROM transcript_fts` + innerNarrow + `
-			WHERE transcript_fts MATCH ?
-			ORDER BY transcript_fts.rowid DESC
-			LIMIT ?) c
-		 JOIN playable_item pi ON pi.id = c.eid
-		 JOIN episode e ON e.item_id = pi.id
-		 JOIN podcast p ON p.id = e.podcast_id
-		 ORDER BY score, pi.pid
-		 LIMIT ?`
-		args = append(narrowArgs, match, maxCandidates, limit+len(seen))
-	}
-	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
+	stmt := transcriptsStmt(narrow, maxCandidates, limit)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, append(narrowArgs, match)...)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -604,6 +580,39 @@ func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxC
 		})
 	}
 	return rows.Err()
+}
+
+// transcriptsStmt is the statement searchTranscripts runs, reading at most fetch rows.
+func transcriptsStmt(narrow string, maxCandidates, fetch int) string {
+	if maxCandidates <= 0 {
+		return `SELECT pi.pid, pi.title, p.title, bm25(transcript_fts) AS score
+		 FROM transcript_fts
+		 JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + narrow + `
+		 JOIN episode e ON e.item_id = pi.id
+		 JOIN podcast p ON p.id = e.podcast_id
+		 WHERE transcript_fts MATCH ?
+		 ORDER BY score, pi.pid
+		 LIMIT ` + strconv.Itoa(fetch)
+	}
+	innerNarrow := ""
+	if narrow != "" {
+		innerNarrow = `
+			JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + narrow
+	}
+	// The inner LIMIT is maxCandidates, not maxCandidates+1, unlike the metadata
+	// rung: this rung never reports pool exhaustion, so it has no probe row to
+	// fetch. The asymmetry is deliberate rather than an oversight.
+	return `SELECT pi.pid, pi.title, p.title, c.score AS score
+		 FROM (SELECT transcript_fts.episode_id AS eid, bm25(transcript_fts) AS score
+			FROM transcript_fts` + innerNarrow + `
+			WHERE transcript_fts MATCH ?
+			ORDER BY transcript_fts.rowid DESC
+			LIMIT ` + strconv.Itoa(maxCandidates) + `) c
+		 JOIN playable_item pi ON pi.id = c.eid
+		 JOIN episode e ON e.item_id = pi.id
+		 JOIN podcast p ON p.id = e.podcast_id
+		 ORDER BY score, pi.pid
+		 LIMIT ` + strconv.Itoa(fetch)
 }
 
 // ftsMatchQuery turns a user search string into a safe FTS5 MATCH expression. The

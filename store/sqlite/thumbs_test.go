@@ -12,7 +12,7 @@ import (
 )
 
 // seedRungs resolves one covered track at each of the given boxes, leaving a
-// thumb_cache row per rung. It returns the track's pid and the source bytes.
+// thumbnail row per rung. It returns the track's pid and the source bytes.
 //
 // It checks that it delivered what it promises. Its fixture is 400x400, so a box at or
 // above 512 rounds to a rung the source already fits and writes no row at all, and two
@@ -61,7 +61,7 @@ func writeConn(t *testing.T, dbPath string) *sql.DB {
 // something to act on without the test sleeping.
 func backdate(t *testing.T, db *sql.DB, size int, age time.Duration) {
 	t.Helper()
-	if _, err := db.Exec("UPDATE thumb_cache SET created_at = ? WHERE size = ?",
+	if _, err := db.Exec("UPDATE thumb SET created_at = ? WHERE size = ?",
 		time.Now().Add(-age).UnixNano(), size); err != nil {
 		t.Fatalf("backdate rung %d: %v", size, err)
 	}
@@ -109,8 +109,8 @@ func TestThumbCacheStatsCountsEachRungSeparately(t *testing.T) {
 		t.Errorf("Bytes = %d, want %d (the sum of the rungs)", rep.Bytes, total)
 	}
 
-	db := roConn(t, dbPath)
-	if n := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb_cache"); n != rep.Bytes {
+	db := thumbConn(t, dbPath)
+	if n := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb"); n != rep.Bytes {
 		t.Errorf("Bytes = %d, want %d (what the table actually holds)", rep.Bytes, n)
 	}
 	if rep.OldestAt == 0 || rep.OldestAt > rep.NewestAt {
@@ -149,8 +149,7 @@ func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
 	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 192)
-	db := roConn(t, dbPath)
-	backdate(t, writeConn(t, dbPath), 192, 72*time.Hour)
+	backdate(t, writeConn(t, sqlite.ThumbFile(dbPath)), 192, 72*time.Hour)
 
 	removed, freed, err := st.PruneThumbnails(context.Background(), int64(24*time.Hour), -1)
 	if err != nil {
@@ -162,7 +161,7 @@ func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
 	if freed <= 0 {
 		t.Errorf("freed = %d, want the removed rung's bytes", freed)
 	}
-	if n := scalarInt64(t, db, thumbSizes); n != 48 {
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbSizes); n != 48 {
 		t.Errorf("surviving rung = %d, want 48 (the one inside the window)", n)
 	}
 }
@@ -173,13 +172,13 @@ func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
 	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 96, 192)
-	w := writeConn(t, dbPath)
+	w := writeConn(t, sqlite.ThumbFile(dbPath))
 	backdate(t, w, 192, 72*time.Hour)
 	backdate(t, w, 96, 48*time.Hour)
 	backdate(t, w, 48, 24*time.Hour)
 
-	db := roConn(t, dbPath)
-	keep := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb_cache WHERE size IN (48, 96)")
+	db := thumbConn(t, dbPath)
+	keep := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb WHERE size IN (48, 96)")
 
 	removed, freed, err := st.PruneThumbnails(context.Background(), -1, keep)
 	if err != nil {
@@ -188,13 +187,13 @@ func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
 	if removed != 1 {
 		t.Errorf("removed = %d, want 1 (the oldest rung alone overflows the budget)", removed)
 	}
-	if got := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb_cache"); got != keep {
+	if got := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb"); got != keep {
 		t.Errorf("cache holds %d bytes, want %d (exactly the budget)", got, keep)
 	}
 	if freed <= 0 {
 		t.Errorf("freed = %d, want the evicted rung's bytes", freed)
 	}
-	if n := scalarInt64(t, db, "SELECT COUNT(*) FROM thumb_cache WHERE size = 192"); n != 0 {
+	if n := scalarInt64(t, db, "SELECT COUNT(*) FROM thumb WHERE size = 192"); n != 0 {
 		t.Error("the oldest rung survived a budget it does not fit in")
 	}
 }
@@ -214,8 +213,8 @@ func TestPruneThumbnailsZeroBudgetEmptiesTheCache(t *testing.T) {
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2 (nothing fits in a zero budget)", removed)
 	}
-	if n := scalarInt64(t, roConn(t, dbPath), thumbRows); n != 0 {
-		t.Errorf("thumb_cache rows = %d, want 0", n)
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbRows); n != 0 {
+		t.Errorf("thumbnail rows = %d, want 0", n)
 	}
 }
 
@@ -249,8 +248,8 @@ func TestPruneThumbnailsZeroAgeEmptiesTheCache(t *testing.T) {
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2 (nothing is newer than now)", removed)
 	}
-	if n := scalarInt64(t, roConn(t, dbPath), thumbRows); n != 0 {
-		t.Errorf("thumb_cache rows = %d, want 0", n)
+	if n := scalarInt64(t, thumbConn(t, dbPath), thumbRows); n != 0 {
+		t.Errorf("thumbnail rows = %d, want 0", n)
 	}
 }
 

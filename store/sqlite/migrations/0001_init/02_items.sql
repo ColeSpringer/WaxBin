@@ -5,6 +5,7 @@ CREATE TABLE playable_item (
   kind         TEXT    NOT NULL,         -- track|book|episode
   state        TEXT    NOT NULL,         -- present|archived|remote|missing (model.ItemStates)
   title        TEXT    NOT NULL,
+  title_sort   TEXT    NOT NULL DEFAULT '',  -- the sort spelling the file states (a book's ALBUMSORT), '' when none
   sort_key     TEXT    NOT NULL,
   identity_key TEXT,                     -- entity-identity key (package identity)
   -- The track's or book's year, 0 when it has none and for an episode, kept here so the

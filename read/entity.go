@@ -41,7 +41,9 @@ func EntityKinds() []EntityKind {
 // Counts come from the maintained rollups for artist, release group, and genre
 // (track-based for the first two, so a book credits its author's LibraryPIDs
 // membership but not the artist's ItemCount; item-based for genre), and from
-// live indexed aggregates for album and series, which have no rollup rows.
+// live indexed aggregates for album and series, which have no rollup rows. While a scan
+// runs, the rollup counts and an album's Year trail its writes until its next settle,
+// every few thousand files and at its end.
 type EntityInfo struct {
 	Kind    EntityKind
 	PID     model.PID

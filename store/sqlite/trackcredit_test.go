@@ -628,7 +628,7 @@ func TestReleaseGroupAdoptsANewPrimaryArtist(t *testing.T) {
 		"UPDATE release_group SET primary_artist_id = (SELECT id FROM artist WHERE pid='OLD')"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh rollups: %v", err)
 	}
 

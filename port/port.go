@@ -350,13 +350,12 @@ func ReadSnapshot(r io.Reader) (*Snapshot, error) {
 	return &snap, nil
 }
 
-// BackupOptions says what a backup copy leaves out; the zero value copies everything.
+// BackupOptions says what a backup copy leaves out; the zero value copies everything. A
+// backup never holds the generated thumbnails, which live in a file of their own beside
+// the catalog (sqlite.ThumbFile) that the copy does not include.
 type BackupOptions struct {
 	// RedactSecrets strips the secret table, for a copy that will leave the host.
 	RedactSecrets bool
-	// OmitThumbnails drops the generated thumbnails, which a restored catalog makes
-	// again on demand, so the copy carries the original images alone.
-	OmitThumbnails bool
 }
 
 // TrimBackupFile strips what opts leaves out from a backup copy, then VACUUMs once so
@@ -368,9 +367,6 @@ func TrimBackupFile(ctx context.Context, path string, opts BackupOptions) (err e
 	var tables []string
 	if opts.RedactSecrets {
 		tables = append(tables, "secret")
-	}
-	if opts.OmitThumbnails {
-		tables = append(tables, "thumb_cache")
 	}
 	if len(tables) == 0 {
 		return nil
@@ -468,6 +464,10 @@ type Census struct {
 	// connection, and reporting those zeros as the contents would tell the operator
 	// a full catalog is empty.
 	Partial bool
+	// ThumbBytes is the size of the thumbnail file beside the catalog, its WAL included,
+	// which a reset leaves where it is: its thumbnails serve the rebuilt catalog's
+	// covers, and GCArt sweeps the ones nothing holds.
+	ThumbBytes int64
 }
 
 // ReadCensus opens a catalog file read-only and counts what it holds. It reads only
@@ -487,6 +487,11 @@ func ReadCensus(ctx context.Context, path string) (*Census, error) {
 	defer db.Close()
 
 	c := &Census{}
+	for _, p := range []string{sqlite.ThumbFile(path), sqlite.ThumbFile(path) + "-wal"} {
+		if fi, err := os.Stat(p); err == nil {
+			c.ThumbBytes += fi.Size()
+		}
+	}
 	for _, t := range []struct {
 		query string
 		into  *int

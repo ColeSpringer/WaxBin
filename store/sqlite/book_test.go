@@ -697,7 +697,7 @@ func TestRefreshRollupsRepairsBookDuration(t *testing.T) {
 		t.Fatalf("staged drift = %d, want 1", rep.BookDurationDrift)
 	}
 
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("RefreshRollups: %v", err)
 	}
 	if rep, err = st.VerifyDerived(ctx); err != nil {

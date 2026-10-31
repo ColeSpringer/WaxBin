@@ -21,9 +21,10 @@ func newBackupCmd(g *globals) *cobra.Command {
 		Short: "Write a full byte-copy backup of the catalog",
 		Long: "Writes a self-contained copy of the catalog (the disaster-recovery " +
 			"artifact). The copy contains the secret table; pass --redact-secrets to strip " +
-			"credentials from a copy that will leave the host. --no-thumbnails leaves out the " +
-			"generated thumbnails, which the catalog makes again on demand, so the copy is " +
-			"smaller. Runs read-only, so it is safe alongside a writer.",
+			"credentials from a copy that will leave the host. It holds the original images " +
+			"but not the thumbnails generated from them, which live in a file of their own " +
+			"beside the catalog and are made again on demand. Runs read-only, so it is safe " +
+			"alongside a writer.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.openRead(cmd)
@@ -36,29 +37,23 @@ func newBackupCmd(g *globals) *cobra.Command {
 			}
 			if g.jsonOut {
 				return printJSON(cmd, struct {
-					Dest              string `json:"dest"`
-					Redacted          bool   `json:"redacted"`
-					ThumbnailsOmitted bool   `json:"thumbnailsOmitted"`
-				}{args[0], opts.RedactSecrets, opts.OmitThumbnails})
+					Dest     string `json:"dest"`
+					Redacted bool   `json:"redacted"`
+				}{args[0], opts.RedactSecrets})
 			}
 			fmt.Fprintf(out(cmd), "Backed up catalog to %s%s\n", args[0], backupNote(opts))
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&opts.RedactSecrets, "redact-secrets", false, "strip the secret table from the backup copy")
-	cmd.Flags().BoolVar(&opts.OmitThumbnails, "no-thumbnails", false, "leave the generated thumbnails out of the backup copy")
 	return cmd
 }
 
 func backupNote(opts port.BackupOptions) string {
-	note := " (contains secrets; protect like the catalog"
 	if opts.RedactSecrets {
-		note = " (secrets redacted"
+		return " (secrets redacted)"
 	}
-	if opts.OmitThumbnails {
-		note += "; thumbnails left out"
-	}
-	return note + ")"
+	return " (contains secrets; protect like the catalog)"
 }
 
 func newRestoreCmd(g *globals) *cobra.Command {

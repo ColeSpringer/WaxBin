@@ -342,7 +342,7 @@ func TestSearchStmtZeroPathGolden(t *testing.T) {
 		LEFT JOIN album al ON al.id = t.album_id
 		WHERE search_fts MATCH ?
 		ORDER BY score, pi.pid
-		LIMIT ?`
+		LIMIT 501`
 	stmt, args, cap := searchStmt("beatles*", 20, 0, nil, nil)
 	if stmt != want {
 		t.Errorf("zero-option statement drifted:\ngot:\n%s\nwant:\n%s", stmt, want)
@@ -350,8 +350,8 @@ func TestSearchStmtZeroPathGolden(t *testing.T) {
 	if cap != searchFetchCap(20) {
 		t.Errorf("scan cap = %d, want %d", cap, searchFetchCap(20))
 	}
-	if len(args) != 2 || args[0] != "beatles*" || args[1] != cap+1 {
-		t.Errorf("args = %v, want [beatles* %d]", args, cap+1)
+	if len(args) != 1 || args[0] != "beatles*" {
+		t.Errorf("args = %v, want [beatles*]", args)
 	}
 }
 
@@ -863,8 +863,8 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 	const (
 		limit = 20
 		maxC  = 600
-		outer = 501 // searchFetchCap(20) + 1
-		inner = 601 // maxCandidates + 1
+		outer = "LIMIT 501" // searchFetchCap(20) + 1
+		inner = "LIMIT 601" // maxCandidates + 1
 	)
 	libs := []int64{7, 9}
 	states := []model.ItemState{model.StatePresent, model.StateRemote}
@@ -874,15 +874,16 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 		libIDs []int64
 		states []model.ItemState
 		want   []any
+		limits []string
 	}{
-		{"flat/none", 0, nil, nil, []any{"x*", outer}},
-		{"flat/scope", 0, libs, nil, []any{int64(7), int64(9), "x*", outer}},
-		{"flat/states", 0, nil, states, []any{"present", "remote", "x*", outer}},
-		{"flat/both", 0, libs, states, []any{"present", "remote", int64(7), int64(9), "x*", outer}},
-		{"capped/none", maxC, nil, nil, []any{"x*", inner, outer}},
-		{"capped/scope", maxC, libs, nil, []any{int64(7), int64(9), "x*", inner, outer}},
-		{"capped/states", maxC, nil, states, []any{"present", "remote", "x*", inner, outer}},
-		{"capped/both", maxC, libs, states, []any{"present", "remote", int64(7), int64(9), "x*", inner, outer}},
+		{"flat/none", 0, nil, nil, []any{"x*"}, []string{outer}},
+		{"flat/scope", 0, libs, nil, []any{int64(7), int64(9), "x*"}, []string{outer}},
+		{"flat/states", 0, nil, states, []any{"present", "remote", "x*"}, []string{outer}},
+		{"flat/both", 0, libs, states, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{outer}},
+		{"capped/none", maxC, nil, nil, []any{"x*"}, []string{inner, outer}},
+		{"capped/scope", maxC, libs, nil, []any{int64(7), int64(9), "x*"}, []string{inner, outer}},
+		{"capped/states", maxC, nil, states, []any{"present", "remote", "x*"}, []string{inner, outer}},
+		{"capped/both", maxC, libs, states, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{inner, outer}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -892,6 +893,11 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 			}
 			if !reflect.DeepEqual(args, tc.want) {
 				t.Errorf("args = %#v, want %#v", args, tc.want)
+			}
+			for _, l := range tc.limits {
+				if !strings.Contains(stmt, l) {
+					t.Errorf("statement lacks %s:\n%s", l, stmt)
+				}
 			}
 		})
 	}
@@ -954,8 +960,8 @@ func TestSearchByNamePlans(t *testing.T) {
 	st, _ := entityFixture(t)
 	for _, states := range [][]model.ItemState{nil, {model.StatePresent}} {
 		narrow, args := searchNarrow([]int64{1}, states)
-		artists := strings.Join(explainPlanLines(t, st, artistByNameQ(narrow, 2),
-			append(append(append([]any{"a", "b", "a"}, args...), args...), 5)...), "\n")
+		artists := strings.Join(explainPlanLines(t, st, artistByNameQ(narrow, 2, 5),
+			append(append([]any{"a", "b", "a"}, args...), args...)...), "\n")
 		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_sort"} {
 			if !strings.Contains(artists, want) {
 				t.Errorf("artist lookup plan lacks %q:\n%s", want, artists)
@@ -964,11 +970,11 @@ func TestSearchByNamePlans(t *testing.T) {
 		if strings.Contains(artists, "SCAN art") {
 			t.Errorf("artist lookup scans the table:\n%s", artists)
 		}
-		albums := strings.Join(explainPlanLines(t, st, albumByNameQ(narrow), append(append([]any{"a"}, args...), 5)...), "\n")
+		albums := strings.Join(explainPlanLines(t, st, albumByNameQ(narrow, 5), append([]any{"a"}, args...)...), "\n")
 		if !strings.Contains(albums, "SEARCH al USING INDEX album_sort") {
 			t.Errorf("album lookup does not seek album_sort:\n%s", albums)
 		}
-		items := strings.Join(explainPlanLines(t, st, itemsBySortKeyQ(narrow), append(append([]any{"a"}, args...), 5)...), "\n")
+		items := strings.Join(explainPlanLines(t, st, itemsBySortKeyQ(narrow, 5), append([]any{"a"}, args...)...), "\n")
 		for _, want := range []string{"item_sort", "track_artist", "SCAN track", "SCAN m", "SEARCH pi USING INTEGER PRIMARY KEY"} {
 			if !strings.Contains(items, want) {
 				t.Errorf("sort-key item lookup plan lacks %q:\n%s", want, items)
@@ -1352,5 +1358,36 @@ func TestSearchAlbumsRankOnTheirOwnTitles(t *testing.T) {
 	}
 	if len(res.Albums) == 0 || res.Albums[0].Title != "Love" || res.Albums[0].Subtitle != "The Beatles" {
 		t.Errorf("capped albums = %+v, want Love by The Beatles first", res.Albums)
+	}
+}
+
+// TestTranscriptHitsFillTheGroupPastSeenEpisodes: an episode found by its title whose
+// transcript also ranks first is skipped in the transcript pass, and the episodes behind
+// it still fill the group to its limit.
+func TestTranscriptHitsFillTheGroupPastSeenEpisodes(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	res := putFeedSpec(t, st, "http://feed.example/z", false,
+		epSpec{title: "Zanzibar Notes"}, epSpec{title: "Second"}, epSpec{title: "Third"})
+	eps, err := st.EpisodesByPodcast(ctx, res.PodcastPID, 0)
+	if err != nil || len(eps) != 3 {
+		t.Fatalf("episodes = %d (err %v), want 3", len(eps), err)
+	}
+	for _, ep := range eps {
+		body := "a long talk about many places and many other things that mentions zanzibar once"
+		if ep.Title == "Zanzibar Notes" {
+			body = "zanzibar zanzibar zanzibar"
+		}
+		if err := st.PutTranscript(ctx, model.PutTranscriptInput{EpisodePID: ep.PID, Format: "text", Body: body}); err != nil {
+			t.Fatalf("transcript: %v", err)
+		}
+	}
+	got, err := st.Search(ctx, "zanzibar", read.SearchOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got.Episodes) != 2 || got.Episodes[0].Title != "Zanzibar Notes" {
+		t.Errorf("episodes = %+v, want the title hit and one transcript hit", got.Episodes)
 	}
 }

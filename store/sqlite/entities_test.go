@@ -57,6 +57,7 @@ type trackSpec struct {
 	isrc                     string
 	barcode, label, catNo    string
 	media, country           string
+	deferRollups             bool
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
@@ -82,6 +83,7 @@ func trackSpecInput(libID int64, s trackSpec) model.PutScannedTrackInput {
 	return model.PutScannedTrackInput{
 		LibraryID:     libID,
 		PreserveLocks: s.preserveLocks,
+		DeferRollups:  s.deferRollups,
 		File: model.File{
 			Path: []byte(s.path), DisplayPath: s.path, RelPath: []byte(rel),
 			Kind: model.FileAudio, Size: int64(len(s.content)), MTimeNS: 1,
@@ -395,7 +397,7 @@ func TestRefreshRollups(t *testing.T) {
 		path: "/lib/r/2.flac", essence: "e2", content: "c2", title: "T2",
 		artist: "Radiohead", album: "OK Computer", genre: "Rock", durationMS: 250,
 	})
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 

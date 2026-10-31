@@ -40,6 +40,9 @@ CREATE TABLE file (
   library_id   INTEGER NOT NULL REFERENCES library(id) ON DELETE CASCADE,
   path         BLOB    NOT NULL UNIQUE,
   display_path TEXT    NOT NULL,
+  -- The last segment of display_path after either separator, for a lookup by file name.
+  name         TEXT    GENERATED ALWAYS AS (substr(display_path,
+                 length(rtrim(display_path, replace(replace(display_path, '/', ''), '\', ''))) + 1)) VIRTUAL,
   rel_path     BLOB    NOT NULL,
   kind         TEXT    NOT NULL,         -- audio|image|lyrics|transcript|cue|chapters|peaks|nfo|foreign
   size         INTEGER NOT NULL,
@@ -66,8 +69,12 @@ CREATE TABLE file (
   last_seen    INTEGER NOT NULL
 );
 CREATE INDEX file_library ON file(library_id);
-CREATE INDEX file_essence ON file(essence_hash);
+-- The library rides the essence so a lookup scoped to one library seeks both.
+CREATE INDEX file_essence ON file(essence_hash, library_id);
 CREATE INDEX file_content ON file(content_hash);
+-- A playlist line naming a file only, and an import's case-folded collision check.
+CREATE INDEX file_name_nocase ON file(name COLLATE NOCASE);
+CREATE INDEX file_display_nocase ON file(display_path COLLATE NOCASE);
 -- FilesNeedingAnalysis filters to audio files and pages by (rel_path, id); this
 -- partial index lets the planner seek and scan in order instead of full-scanning
 -- and filesorting the whole file table on every analyze run. The index

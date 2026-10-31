@@ -348,7 +348,9 @@ func (s *Store) libraryIDsByPIDs(ctx context.Context, pids []model.PID, op strin
 // PutScannedTrack persists one scanned track atomically: resolve/insert the
 // file (preserving pid on a path or essence match), resolve/insert the logical
 // item by (kind, identity_key), upsert the track subtype, and link them, writing
-// the matching change_log rows. The store owns all pid assignment.
+// the matching change_log rows. The store owns all pid assignment. The rollups and
+// album years of the entities it touches are recomputed in the same transaction, or
+// with in.DeferRollups left in rollup_dirty for SettleRollups.
 func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInput) (*model.ScanItemResult, error) {
 	const op = "store.PutScannedTrack"
 	res := &model.ScanItemResult{}
@@ -374,7 +376,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// A book whose sole file this is, now read as a track, becomes one in place.
 		rekinded := false
 		if key.id == 0 {
-			id, err := rekindItemForFileTx(ctx, tx, fileID, model.KindTrack, in.Item.IdentityKey, in.PreserveLocks && !in.KindForced, now)
+			id, err := rekindItemForFileTx(ctx, tx, fileID, model.KindTrack, in.Item.IdentityKey, in.PreserveLocks && !in.KindForced, in.DeferRollups, now)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -513,8 +515,9 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		}
 
 		// Track the entities whose maintained rollups this write touches, then
-		// recompute only those rows inside this transaction.
+		// recompute only those rows inside this transaction, or mark them for a settle.
 		affected := newAffectedRollups()
+		affected.deferred = in.DeferRollups
 
 		retiredEnrichment, err := settleRederivedTx(ctx, tx, itemID, rederived, prov, in.PreserveLocks, affected)
 		if err != nil {
@@ -1020,8 +1023,8 @@ func (s *Store) ItemByPID(ctx context.Context, pid model.PID) (*model.ItemView, 
 
 // ItemsByPIDs returns item views for the given pids in input order, skipping any
 // pid with no matching item and collapsing a repeated pid to its first position.
-// The lookup is chunked to stay well under SQLite's bound-parameter limit, so a
-// pid array longer than idBatchSize spans multiple SELECTs and is NOT an atomic
+// Each statement reads at most idBatchSize pids, which bounds the list SQLite builds
+// for it, so a longer pid array spans multiple SELECTs and is NOT an atomic
 // snapshot: a concurrent write between chunks can produce a mixed view. A
 // UI-feeding read can tolerate that; a caller that needs a consistent snapshot
 // cannot.
@@ -1033,11 +1036,7 @@ func (s *Store) ItemsByPIDs(ctx context.Context, pids []model.PID) ([]*model.Ite
 	unique := uniquePIDs(pids)
 	byPID := make(map[model.PID]*model.ItemView, len(unique))
 	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
-		args := make([]any, len(chunk))
-		for i, pid := range chunk {
-			args[i] = string(pid)
-		}
-		rows, err := s.rdb().QueryContext(ctx, itemSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
+		rows, err := s.rstmts.queryContext(ctx, s.rdb(), itemSelect+" WHERE pi.pid IN "+inArray, pidArray(chunk))
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

@@ -156,7 +156,7 @@ func TestAlbumYearFromEnrichmentStays(t *testing.T) {
 	again := yearTrack(2, 0, "/lib/AP/Venice", "Venice")
 	again.content += "-retag"
 	putTrack(t, st, lib.ID, again)
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if got := albumYearOf(t, st, "Venice"); got != "2014" {
@@ -196,7 +196,7 @@ func TestVerifyReportsAlbumYearDrift(t *testing.T) {
 	if rep.AlbumYearDrift != 1 || rep.Consistent() {
 		t.Fatalf("drift = %d (consistent %t), want 1 and inconsistent", rep.AlbumYearDrift, rep.Consistent())
 	}
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if got := albumYearOf(t, st, "Malibu"); got != "2015" {

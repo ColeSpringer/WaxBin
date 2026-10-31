@@ -77,17 +77,18 @@ func refreshAlbumYearsTx(ctx context.Context, tx *sql.Tx, albumIDs []int64) erro
 		for i, id := range chunk {
 			args[i] = id
 		}
-		return refreshAlbumYearsWhereTx(ctx, tx, "WHERE al.id IN "+placeholders(len(chunk)), args...)
+		_, err := refreshAlbumYearsWhereTx(ctx, tx, "WHERE al.id IN "+placeholders(len(chunk)), args...)
+		return err
 	})
 }
 
 // refreshAllAlbumYearsTx is refreshAlbumYearsTx over every album, the repair for the
-// drift VerifyDerived reports.
-func refreshAllAlbumYearsTx(ctx context.Context, tx *sql.Tx) error {
+// drift VerifyDerived reports. It returns how many albums it moved.
+func refreshAllAlbumYearsTx(ctx context.Context, tx *sql.Tx) (int, error) {
 	return refreshAlbumYearsWhereTx(ctx, tx, "")
 }
 
-func refreshAlbumYearsWhereTx(ctx context.Context, tx *sql.Tx, filter string, args ...any) error {
+func refreshAlbumYearsWhereTx(ctx context.Context, tx *sql.Tx, filter string, args ...any) (int, error) {
 	type move struct {
 		id   int64
 		pid  model.PID
@@ -95,28 +96,28 @@ func refreshAlbumYearsWhereTx(ctx context.Context, tx *sql.Tx, filter string, ar
 	}
 	rows, err := tx.QueryContext(ctx, strings.Replace(albumYearDriftQ, "/*FILTER*/", filter, 1), args...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var moves []move
 	for rows.Next() {
 		var m move
 		if err := rows.Scan(&m.id, &m.pid, &m.year); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		moves = append(moves, m)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	for _, m := range moves {
 		if _, err := tx.ExecContext(ctx, "UPDATE album SET year = ? WHERE id = ?", m.year, m.id); err != nil {
-			return err
+			return 0, err
 		}
 		if err := appendChange(ctx, tx, "album", m.pid, model.OpUpdate); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(moves), nil
 }

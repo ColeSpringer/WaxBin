@@ -1532,10 +1532,10 @@ func TestBackupRedactAndRestore(t *testing.T) {
 	}
 }
 
-// TestBackupWithoutThumbnails: a backup can leave out the generated thumbnails, which a
-// restored catalog makes again on demand. With secrets redacted as well, the copy holds
-// neither, nor any of the secret's bytes.
-func TestBackupWithoutThumbnails(t *testing.T) {
+// TestBackupHoldsNoThumbnails: a backup holds the original images and none of the
+// thumbnails generated from them, which a restored catalog makes again in its own file.
+// With secrets redacted the copy holds none of the secret's bytes either.
+func TestBackupHoldsNoThumbnails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1568,7 +1568,7 @@ func TestBackupWithoutThumbnails(t *testing.T) {
 	if err := lib.Backup(ctx, full, port.BackupOptions{}); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
-	if err := lib.Backup(ctx, lean, port.BackupOptions{RedactSecrets: true, OmitThumbnails: true}); err != nil {
+	if err := lib.Backup(ctx, lean, port.BackupOptions{RedactSecrets: true}); err != nil {
 		t.Fatalf("lean backup: %v", err)
 	}
 	count := func(path, q string) int {
@@ -1588,9 +1588,9 @@ func TestBackupWithoutThumbnails(t *testing.T) {
 		path, q string
 		want    int
 	}{
-		{full, "SELECT COUNT(*) FROM thumb_cache", 1},
+		{full, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'thumb%'", 0},
+		{full, "SELECT COUNT(*) FROM art_source", 1},
 		{full, "SELECT COUNT(*) FROM secret", 1},
-		{lean, "SELECT COUNT(*) FROM thumb_cache", 0},
 		{lean, "SELECT COUNT(*) FROM secret", 0},
 		{lean, "SELECT COUNT(*) FROM art_source", 1},
 	} {

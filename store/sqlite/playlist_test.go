@@ -593,7 +593,7 @@ func TestPlaylistPositionDriftIsReportedAndCompacted(t *testing.T) {
 		t.Fatalf("report = %+v, want one playlist drifting and the catalog consistent", rep)
 	}
 	seq := latestSeq(t, st)
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	assertListing(t, st, sparse, "A", "B", "C")

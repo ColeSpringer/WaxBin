@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 )
@@ -168,22 +169,130 @@ func TestHotReadsWriteTheirLimit(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	stmts := map[string]string{}
+	type limited struct{ stmt, limit string }
+	stmts := map[string]limited{}
 	for _, list := range []read.DiscoveryList{read.ListAlphabetical, read.ListRandom} {
 		stmt, _, err := st.browseStmt(ctx, list, read.BrowseOptions{Seed: 1}, 10, "test")
 		if err != nil {
 			t.Fatal(err)
 		}
-		stmts[string(list)] = stmt
+		stmts[string(list)] = limited{stmt, "LIMIT 11"}
 	}
 	stmt, _, err := st.queryPageStmt(ctx, query.New(query.EntityItems).Build(), "", 10, false, "", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	stmts["query page"] = stmt
-	for name, stmt := range stmts {
-		if strings.Contains(stmt, "LIMIT ?") || !strings.Contains(stmt, "LIMIT 11") {
-			t.Errorf("%s does not write its limit of 10 (and one more): %s", name, stmt)
+	stmts["query page"] = limited{stmt, "LIMIT 11"}
+	stmts["entity page"] = limited{entityPageStmt("album", false, 10), "LIMIT 11"}
+	// A limit of 10 fetches 500 rows (searchFetchCap) and one more; 25 candidates cap that.
+	flat, _, _ := searchStmt("a", 10, 0, nil, nil)
+	stmts["search"] = limited{flat, "LIMIT 501"}
+	capped, _, _ := searchStmt("a", 10, 25, nil, nil)
+	stmts["search candidates"] = limited{capped, "LIMIT 26"}
+	stmts["search by sort key"] = limited{itemsBySortKeyQ("", 11), "LIMIT 11"}
+	stmts["search artists"] = limited{artistByNameQ("", 1, 10), "LIMIT 10"}
+	stmts["search albums"] = limited{albumByNameQ("", 10), "LIMIT 10"}
+	stmts["search transcripts"] = limited{transcriptsStmt("", 0, 30), "LIMIT 30"}
+	for name, l := range stmts {
+		if strings.Contains(l.stmt, "LIMIT ?") || !strings.Contains(l.stmt, l.limit) {
+			t.Errorf("%s does not write its limit (%s): %s", name, l.limit, l.stmt)
 		}
+	}
+}
+
+// TestSearchRunsCachedStatements: a search prepares its statements once, and a later one
+// of the same shape, whatever its words, prepares nothing more.
+func TestSearchRunsCachedStatements(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "Alpha Song", artist: "Alpha", album: "Al"})
+	search := func(q string) {
+		t.Helper()
+		if _, err := st.Search(ctx, q, read.SearchOptions{Limit: 20}); err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+	}
+	search("alpha")
+	// The match, the artists and albums by name, and the transcripts.
+	prepared := st.rstmts.stats().prepares
+	if prepared != 4 {
+		t.Fatalf("the search prepared %d statements through the cache, want its 4", prepared)
+	}
+	for _, q := range []string{"alpha", "song", "beta"} {
+		search(q)
+	}
+	if got := st.rstmts.stats().prepares; got != prepared {
+		t.Errorf("prepares after three more searches = %d, want the first search's %d", got, prepared)
+	}
+}
+
+// TestBatchReadsPrepareOneStatementForAnyLength: a batch read binds its whole list as one
+// value, so lists of every length run the same statement.
+func TestBatchReadsPrepareOneStatementForAnyLength(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	var items, albums []model.PID
+	for i := range 5 {
+		ref := putTrack(t, st, lib.ID, trackSpec{path: fmt.Sprintf("/lib/%d.flac", i),
+			essence: fmt.Sprintf("e%d", i), content: fmt.Sprintf("c%d", i), title: fmt.Sprint(i),
+			artist: "X", album: fmt.Sprintf("Al%d", i)})
+		items = append(items, ref.ItemPID)
+		v, err := st.ItemByPID(ctx, ref.ItemPID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		albums = append(albums, v.AlbumPID)
+	}
+	reads := func(n int) {
+		t.Helper()
+		if got, err := st.ItemsByPIDs(ctx, items[:n]); err != nil || len(got) != n {
+			t.Fatalf("items of %d pids = %d (err %v)", n, len(got), err)
+		}
+		if got, err := st.EntityByPIDs(ctx, read.EntityAlbum, albums[:n]); err != nil || len(got) != n {
+			t.Fatalf("albums of %d pids = %d (err %v)", n, len(got), err)
+		}
+	}
+	reads(1)
+	base := st.rstmts.stats().prepares
+	for _, n := range []int{2, 3, 5, 4} {
+		reads(n)
+	}
+	if got := st.rstmts.stats().prepares; got != base {
+		t.Errorf("lists of 2 to 5 after a list of 1 prepared %d more statements, want none", got-base)
+	}
+}
+
+// TestEntityReadsRunCachedStatements: an entity's lookup and a page of entities prepare
+// their statements once.
+func TestEntityReadsRunCachedStatements(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", album: "Al"})
+	var album model.PID
+	reads := func() {
+		t.Helper()
+		page, err := st.EntityPage(ctx, read.EntityAlbum, "", 10)
+		if err != nil || len(page.Entities) != 1 {
+			t.Fatalf("page = %+v (err %v)", page, err)
+		}
+		album = page.Entities[0].PID
+		if _, err := st.EntityByPID(ctx, read.EntityAlbum, album); err != nil {
+			t.Fatalf("album: %v", err)
+		}
+	}
+	reads()
+	// The page's walk, its batch of albums, their live counts and their libraries; the
+	// lookup's album, count and libraries.
+	if got := st.rstmts.stats().prepares; got != 7 {
+		t.Fatalf("the reads prepared %d statements through the cache, want their 7", got)
+	}
+	reads()
+	if got := st.rstmts.stats().prepares; got != 7 {
+		t.Errorf("prepares after the same reads again = %d, want 7", got)
 	}
 }

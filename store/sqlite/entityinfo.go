@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"maps"
+	"strconv"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
@@ -36,13 +37,13 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 	var err error
 	switch kind {
 	case read.EntityArtist:
-		err = s.rdb().QueryRowContext(ctx, `SELECT a.id, a.name, a.sort_key, COALESCE(a.mbid,''),
+		err = s.rstmts.queryRowContext(ctx, s.rdb(), `SELECT a.id, a.name, a.sort_key, COALESCE(a.mbid,''),
 			COALESCE(ar.track_count,0), COALESCE(ar.release_group_count,0), COALESCE(ar.total_duration_ms,0)
 			FROM artist a LEFT JOIN artist_rollup ar ON ar.artist_id = a.id
 			WHERE a.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.ItemCount, &info.ReleaseGroupCount, &info.TotalDurationMS)
 	case read.EntityReleaseGroup:
-		err = s.rdb().QueryRowContext(ctx, `SELECT rg.id, rg.title, rg.sort_key, COALESCE(rg.mbid,''),
+		err = s.rstmts.queryRowContext(ctx, s.rdb(), `SELECT rg.id, rg.title, rg.sort_key, COALESCE(rg.mbid,''),
 			COALESCE(rg.type,''), COALESCE(pa.pid,''),
 			COALESCE(rr.track_count,0), COALESCE(rr.total_duration_ms,0)
 			FROM release_group rg
@@ -51,7 +52,7 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 			WHERE rg.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.Type, &artistPID, &info.ItemCount, &info.TotalDurationMS)
 	case read.EntityAlbum:
-		err = s.rdb().QueryRowContext(ctx, `SELECT al.id, al.title, al.sort_key, COALESCE(al.mbid,''),
+		err = s.rstmts.queryRowContext(ctx, s.rdb(), `SELECT al.id, al.title, al.sort_key, COALESCE(al.mbid,''),
 			COALESCE(al.year,0), COALESCE(rg.pid,''),
 			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,''),
 			COALESCE(al.media,''), COALESCE(al.country,'')
@@ -60,13 +61,13 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.Year, &rgPID,
 				&info.Barcode, &info.Label, &info.CatalogNumber, &info.Media, &info.Country)
 	case read.EntityGenre:
-		err = s.rdb().QueryRowContext(ctx, `SELECT g.id, g.name, g.sort_key,
+		err = s.rstmts.queryRowContext(ctx, s.rdb(), `SELECT g.id, g.name, g.sort_key,
 			COALESCE(gr.track_count,0), COALESCE(gr.total_duration_ms,0)
 			FROM genre g LEFT JOIN genre_rollup gr ON gr.genre_id = g.id
 			WHERE g.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.ItemCount, &info.TotalDurationMS)
 	case read.EntitySeries:
-		err = s.rdb().QueryRowContext(ctx,
+		err = s.rstmts.queryRowContext(ctx, s.rdb(),
 			"SELECT srs.id, srs.name, srs.sort_key FROM series srs WHERE srs.pid = ?",
 			string(pid)).
 			Scan(&id, &info.Name, &info.SortKey)
@@ -81,14 +82,14 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 
 	switch kind {
 	case read.EntityAlbum:
-		err = s.rdb().QueryRowContext(ctx, `SELECT COUNT(DISTINCT t.item_id), COALESCE(SUM(`+itemEffectiveDurationExpr+`),0)
+		err = s.rstmts.queryRowContext(ctx, s.rdb(), `SELECT COUNT(DISTINCT t.item_id), COALESCE(SUM(`+itemEffectiveDurationExpr+`),0)
 			FROM track t
 			LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 			LEFT JOIN file f ON f.id = pf.file_id
 			WHERE t.album_id = ?`, id).
 			Scan(&info.ItemCount, &info.TotalDurationMS)
 	case read.EntitySeries:
-		err = s.rdb().QueryRowContext(ctx,
+		err = s.rstmts.queryRowContext(ctx, s.rdb(),
 			"SELECT COUNT(*), COALESCE(SUM(bk.total_duration_ms),0) FROM book bk WHERE bk.series_id = ?", id).
 			Scan(&info.ItemCount, &info.TotalDurationMS)
 	}
@@ -158,22 +159,15 @@ func (s *Store) EntityPage(ctx context.Context, kind read.EntityKind, cursor rea
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "no table for entity kind: "+string(kind))
 	}
 
-	stmt := "SELECT pid, sort_key FROM " + table
 	var args []any
 	if cursor != "" {
 		sk, pid, ok := cursor.Decode()
 		if !ok {
 			return nil, waxerr.New(waxerr.CodeInvalid, op, "malformed page cursor")
 		}
-		// SQLite row-value comparison, the same shape QueryPage uses: the planner
-		// drives it off the sort_key index directly and it needs only two binds.
-		stmt += " WHERE (sort_key, pid) > (?, ?)"
 		args = append(args, sk, string(pid))
 	}
-	stmt += " ORDER BY sort_key, pid LIMIT ?"
-	args = append(args, limit+1) // one extra to detect a further page
-
-	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), entityPageStmt(table, cursor != "", limit), args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -216,6 +210,19 @@ func (s *Store) EntityPage(ctx context.Context, kind read.EntityKind, cursor rea
 	return page, nil
 }
 
+// entityPageStmt walks table's sort_key index for one page of limit entities and one more,
+// which only signals a further page, after a cursor's (sort_key, pid) when afterCursor is
+// set. The row-value comparison is the shape QueryPage uses: the planner drives it off the
+// sort_key index directly and it needs only two binds. The limit is written into the text
+// for the statement cache (searchStmt says why).
+func entityPageStmt(table string, afterCursor bool, limit int) string {
+	stmt := "SELECT pid, sort_key FROM " + table
+	if afterCursor {
+		stmt += " WHERE (sort_key, pid) > (?, ?)"
+	}
+	return stmt + " ORDER BY sort_key, pid LIMIT " + strconv.Itoa(limit+1)
+}
+
 // entityMemberSource returns the FROM/JOIN clause reaching every file of an entity's
 // member items, alternates included the way the library query field reaches them, and
 // the expression selecting each member's entity id. It is shared by the single and batched library-pid lookups so the two can
@@ -256,7 +263,7 @@ func entityMemberSource(kind read.EntityKind) (from, idExpr string) {
 // items' primary backing files, in library order.
 func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id int64, op string) ([]model.PID, error) {
 	from, idExpr := entityMemberSource(kind)
-	rows, err := s.rdb().QueryContext(ctx,
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(),
 		"SELECT l.pid"+from+" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" = ? GROUP BY l.id ORDER BY l.id", id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -415,9 +422,9 @@ func (s *Store) namesByKey(ctx context.Context, op, stmt string, keys []string) 
 // cost a consumer pays hydrating a page of entity pids, such as a restricted-user
 // entity search that scopes each hit to the user's libraries through
 // EntityInfo.LibraryPIDs. An unknown or repeated pid is dropped (a repeat collapses
-// to one entry). The caller batches within a single kind. Like ItemsByPIDs it chunks
-// to stay under the bound-parameter limit, so a set larger than a chunk spans several
-// statements and is NOT an atomic snapshot. It runs the same three reads EntityByPID
+// to one entry). The caller batches within a single kind. Like ItemsByPIDs it reads
+// at most idBatchSize pids a statement, so a larger set spans several statements and
+// is NOT an atomic snapshot. It runs the same three reads EntityByPID
 // does, each batched: the base identity/rollup row, the live album/series aggregate,
 // and the member libraries. Field-for-field it matches EntityByPID (an
 // entities-by-pids parity test pins that).
@@ -475,12 +482,6 @@ func (s *Store) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []m
 // EntityByPID's base switch column for column, adding the entity's own pid so the
 // result can be keyed without a second lookup.
 func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk []model.PID, out map[model.PID]*read.EntityInfo, op string) (map[int64]*read.EntityInfo, []int64, error) {
-	args := make([]any, len(chunk))
-	for i, pid := range chunk {
-		args[i] = string(pid)
-	}
-	ph := placeholders(len(chunk))
-
 	var stmt string
 	var scan func(*sql.Rows) (int64, *read.EntityInfo, error)
 	switch kind {
@@ -488,7 +489,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 		stmt = `SELECT a.id, a.pid, a.name, a.sort_key, COALESCE(a.mbid,''),
 			COALESCE(ar.track_count,0), COALESCE(ar.release_group_count,0), COALESCE(ar.total_duration_ms,0)
 			FROM artist a LEFT JOIN artist_rollup ar ON ar.artist_id = a.id
-			WHERE a.pid IN ` + ph
+			WHERE a.pid IN ` + inArray
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
 			var id int64
 			info := &read.EntityInfo{}
@@ -503,7 +504,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 			FROM release_group rg
 			LEFT JOIN artist pa ON pa.id = rg.primary_artist_id
 			LEFT JOIN release_group_rollup rr ON rr.release_group_id = rg.id
-			WHERE rg.pid IN ` + ph
+			WHERE rg.pid IN ` + inArray
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
 			var id int64
 			var artistPID string
@@ -519,7 +520,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,''),
 			COALESCE(al.media,''), COALESCE(al.country,'')
 			FROM album al LEFT JOIN release_group rg ON rg.id = al.release_group_id
-			WHERE al.pid IN ` + ph
+			WHERE al.pid IN ` + inArray
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
 			var id int64
 			var rgPID string
@@ -533,7 +534,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 		stmt = `SELECT g.id, g.pid, g.name, g.sort_key,
 			COALESCE(gr.track_count,0), COALESCE(gr.total_duration_ms,0)
 			FROM genre g LEFT JOIN genre_rollup gr ON gr.genre_id = g.id
-			WHERE g.pid IN ` + ph
+			WHERE g.pid IN ` + inArray
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
 			var id int64
 			info := &read.EntityInfo{}
@@ -542,7 +543,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 		}
 	case read.EntitySeries:
 		stmt = `SELECT srs.id, srs.pid, srs.name, srs.sort_key
-			FROM series srs WHERE srs.pid IN ` + ph
+			FROM series srs WHERE srs.pid IN ` + inArray
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
 			var id int64
 			info := &read.EntityInfo{}
@@ -551,7 +552,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 		}
 	}
 
-	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, pidArray(chunk))
 	if err != nil {
 		return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -593,18 +594,14 @@ func (s *Store) entityLiveCountsBatch(ctx context.Context, kind read.EntityKind,
 			FROM track t
 			LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 			LEFT JOIN file f ON f.id = pf.file_id
-			WHERE t.album_id IN ` + placeholders(len(ids)) + ` GROUP BY t.album_id`
+			WHERE t.album_id IN ` + inArray + ` GROUP BY t.album_id`
 	case read.EntitySeries:
 		stmt = `SELECT bk.series_id, COUNT(*), COALESCE(SUM(bk.total_duration_ms),0)
-			FROM book bk WHERE bk.series_id IN ` + placeholders(len(ids)) + ` GROUP BY bk.series_id`
+			FROM book bk WHERE bk.series_id IN ` + inArray + ` GROUP BY bk.series_id`
 	default:
 		return nil, nil
 	}
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, idArray(ids))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -630,14 +627,10 @@ func (s *Store) entityLiveCountsBatch(ctx context.Context, kind read.EntityKind,
 // grouping by the member's entity id so one query serves the whole chunk.
 func (s *Store) entityLibraryPIDsBatch(ctx context.Context, kind read.EntityKind, ids []int64, op string) (map[int64][]model.PID, error) {
 	from, idExpr := entityMemberSource(kind)
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	rows, err := s.rdb().QueryContext(ctx,
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(),
 		"SELECT "+idExpr+" AS eid, l.pid"+from+
-			" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" IN "+placeholders(len(ids))+
-			" GROUP BY eid, l.id ORDER BY eid, l.id", args...)
+			" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" IN "+inArray+
+			" GROUP BY eid, l.id ORDER BY eid, l.id", idArray(ids))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

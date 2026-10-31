@@ -14,6 +14,7 @@ CREATE TABLE artist (
   id        INTEGER PRIMARY KEY,
   pid       TEXT    NOT NULL UNIQUE,
   name      TEXT    NOT NULL,            -- canonical display casing
+  name_sort TEXT    NOT NULL DEFAULT '', -- derived from the sort spellings its credits state, '' when none
   sort_key  TEXT    NOT NULL,            -- WaxBin-generated, BINARY-sortable
   match_key TEXT    NOT NULL UNIQUE,     -- normalized dedup key
   mbid      TEXT                         -- not unique, not indexed; see above
@@ -50,6 +51,7 @@ CREATE TABLE release_group (
   id                INTEGER PRIMARY KEY,
   pid               TEXT    NOT NULL UNIQUE,
   title             TEXT    NOT NULL,
+  title_sort        TEXT    NOT NULL DEFAULT '',  -- derived from its albums' members' spellings, '' when none
   sort_key          TEXT    NOT NULL,
   primary_artist_id INTEGER REFERENCES artist(id) ON DELETE SET NULL,
   mbid              TEXT,
@@ -80,6 +82,7 @@ CREATE TABLE album (
   pid              TEXT    NOT NULL UNIQUE,
   release_group_id INTEGER REFERENCES release_group(id) ON DELETE SET NULL,
   title            TEXT    NOT NULL,
+  title_sort       TEXT    NOT NULL DEFAULT '',  -- derived from the album sort spellings its members state, '' when none
   sort_key         TEXT    NOT NULL,
   year             INTEGER,
   disc_total       INTEGER,
@@ -135,11 +138,16 @@ CREATE INDEX item_contributor_artist ON item_contributor(artist_id);
 -- its facet before it ("genre:hip hop"). The target is a pid rather than a row id, since
 -- entity rowids are reused and a fold must never reach a stranger; every delete of an
 -- entity takes its folds with it, and a merge carries the loser's onto the survivor.
+-- name, folder and library_id are the spelling the folded key was read from, for a person
+-- to recognize: the name, and for an album the folder and library it was found in.
 CREATE TABLE entity_fold (
   entity_type TEXT    NOT NULL,
   key         TEXT    NOT NULL,
   entity_pid  TEXT    NOT NULL,
   created_at  INTEGER NOT NULL,
+  name        TEXT    NOT NULL DEFAULT '',
+  folder      BLOB,
+  library_id  INTEGER REFERENCES library(id) ON DELETE SET NULL,
   PRIMARY KEY (entity_type, key)
 );
 CREATE INDEX entity_fold_entity ON entity_fold(entity_type, entity_pid);

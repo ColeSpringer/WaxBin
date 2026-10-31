@@ -765,3 +765,33 @@ func TestDuplicateFindersIgnoreDistinctIDs(t *testing.T) {
 		t.Errorf("unenriched rows reported as duplicates: albums=%+v groups=%+v", albums, groups)
 	}
 }
+
+// TestDuplicateSurvivorsCountLive: a duplicate set's members are counted from their
+// tracks, not the rollups a running scan has yet to settle, so the member backing the
+// most tracks leads the set whatever is pending.
+func TestDuplicateSurvivorsCountLive(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Beatles", album: "A", genre: "Blues"})
+	for i := range 3 {
+		putTrack(t, st, lib.ID, trackSpec{path: fmt.Sprintf("/lib/b/%d.flac", i), essence: fmt.Sprintf("eb%d", i),
+			content: fmt.Sprintf("cb%d", i), title: "T", artist: "The Beatles", album: "B", genre: "The Blues",
+			deferRollups: true})
+	}
+	artists, err := st.DuplicateArtists(ctx)
+	if err != nil || len(artists) != 1 {
+		t.Fatalf("artist sets = %+v (err %v), want one", artists, err)
+	}
+	if m := artists[0].Members[0]; m.Name != "The Beatles" || m.TrackCount != 3 {
+		t.Errorf("artist set leads with %+v, want The Beatles with 3 tracks", m)
+	}
+	genres, err := st.DuplicateGenres(ctx)
+	if err != nil || len(genres) != 1 {
+		t.Fatalf("genre sets = %+v (err %v), want one", genres, err)
+	}
+	if m := genres[0].Members[0]; m.Name != "The Blues" || m.TrackCount != 3 {
+		t.Errorf("genre set leads with %+v, want The Blues with 3 tracks", m)
+	}
+}

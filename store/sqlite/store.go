@@ -21,7 +21,7 @@ import (
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
-	_ "modernc.org/sqlite"
+	msqlite "modernc.org/sqlite"
 )
 
 const driverName = "sqlite"
@@ -90,9 +90,16 @@ type Store struct {
 
 	examined examinedMem // the oversized pictures examined lately, see art.go
 
-	thumbMem    *thumbCache  // in-process cache of generated thumbnails (see art.go)
-	thumbFail   *thumbCache  // in-process record of sources that failed to generate
-	thumbFlight *thumbFlight // one generation per (source, rung), however many callers want it
+	thumbMem *thumbCache // in-process cache of generated thumbnails (see art.go)
+	// thumbsStored says the write connection holds the thumbnail file, so a generated
+	// thumbnail is worth writing; thumbsDamaged that a statement found the file damaged,
+	// so nothing reads or writes it until a reopen; thumbsReattached when a thumbnail write
+	// last tried a file the writer could not attach (thumbdb.go).
+	thumbsStored     atomic.Bool
+	thumbsDamaged    atomic.Bool
+	thumbsReattached atomic.Int64
+	thumbFail        *thumbCache  // in-process record of sources that failed to generate
+	thumbFlight      *thumbFlight // one generation per (source, rung), however many callers want it
 
 	subMu sync.Mutex                     // guards subs
 	subs  map[chan model.Change]struct{} // in-process change_log listeners
@@ -118,9 +125,10 @@ type Store struct {
 // generation is one set of connections an open or a reopen took together: the pools and
 // the write lock. A suspend or close takes the set down as a whole.
 type generation struct {
-	read  *sql.DB
-	write *sql.DB    // nil when read-only
-	lock  *writeLock // nil when read-only
+	read   *sql.DB
+	write  *sql.DB         // nil when read-only
+	lock   *writeLock      // nil when read-only
+	thumbs thumbsConnector // the write pool's, which reattachThumbs runs again
 }
 
 func (g *generation) closePools() error {
@@ -175,18 +183,22 @@ func (g *generation) settle(bound time.Duration) int {
 // openPools opens the write connection and the read pool over lock, releasing the lock
 // when either fails.
 func (s *Store) openPools(ctx context.Context, op string, lock *writeLock) (*generation, error) {
-	w, err := openDB(ctx, rwDSN(s.opt), 1)
+	// The writer first: its connection lays out a new thumbnail file, or replaces a damaged
+	// one, before a reader attaches it. A file damaged under the last generation was marked
+	// so, and is replaced now.
+	s.thumbsDamaged.Store(false)
+	w, wthumbs, err := s.openDB(ctx, rwDSN(s.opt), 1, thumbsWriter)
 	if err != nil {
 		_ = lock.release()
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	r, err := openDB(ctx, readDSN(s.opt), s.opt.ReadPoolSize)
+	r, _, err := s.openDB(ctx, readDSN(s.opt), s.opt.ReadPoolSize, thumbsReader)
 	if err != nil {
 		_ = w.Close()
 		_ = lock.release()
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return &generation{read: r, write: w, lock: lock}, nil
+	return &generation{read: r, write: w, lock: lock, thumbs: wthumbs}, nil
 }
 
 // suspendMark records the catalog a suspend closed: its file, and the change feed's
@@ -252,7 +264,7 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		// the file at the path is the one being opened.
 		_ = os.SameFile(fi, fi)
 		s.roFile = fi
-		r, err := openDB(ctx, roDSN(opt), opt.ReadPoolSize)
+		r, _, err := s.openDB(ctx, roDSN(opt), opt.ReadPoolSize, thumbsReadOnly)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -296,6 +308,7 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 	} else if n > 0 {
 		log.Info("recovered interrupted organize moves on open", "count", n)
 	}
+	s.settleOnOpen(ctx, "open")
 
 	// Seed the default playback user so single-user setups need no configuration.
 	if err := s.ensureDefaultUser(ctx); err != nil {
@@ -378,7 +391,9 @@ func (s *Store) teardown(closeSubs bool) error {
 		if !closeSubs && s.mark == nil {
 			s.mark = s.markLocked(g.write)
 		}
-		_, _ = g.write.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)")
+		_, _ = g.write.ExecContext(context.Background(), "PRAGMA main.wal_checkpoint(TRUNCATE)")
+		// The thumbnail file's is passive: a cache need not wait out a reader's snapshot.
+		_, _ = g.write.ExecContext(context.Background(), "PRAGMA thumbs.wal_checkpoint(PASSIVE)")
 	}
 	s.wmu.Unlock()
 
@@ -484,6 +499,7 @@ func (s *Store) Reopen(ctx context.Context) (_ ReopenResult, err error) {
 	} else if n > 0 {
 		s.log.Info("recovered interrupted organize moves on reopen", "count", n)
 	}
+	s.settleOnOpen(ctx, "reopen")
 	if err := s.ensureDefaultUser(ctx); err != nil {
 		_ = s.teardown(false)
 		return ReopenResult{}, err
@@ -492,6 +508,21 @@ func (s *Store) Reopen(ctx context.Context) (_ ReopenResult, err error) {
 	s.mark = nil
 	s.wmu.Unlock()
 	return ReopenResult{Reopened: true, Replaced: replaced}, nil
+}
+
+// settleOnOpen settles what a scan's deferred puts left when its process went away, which
+// the scan's cadence keeps to about one settle interval's worth. A failure only warns: the
+// rollups lag, verify reports them pending, and the next scan's settle or `db verify
+// --fix` catches them up.
+func (s *Store) settleOnOpen(ctx context.Context, when string) {
+	n, err := s.SettleRollups(ctx)
+	if err != nil {
+		s.log.Warn("could not settle deferred rollups on "+when, "err", err)
+		return
+	}
+	if total := n.Artists + n.ReleaseGroups + n.Genres + n.Albums; total > 0 {
+		s.log.Info("settled deferred rollups on "+when, "entities", total)
+	}
 }
 
 // markLocked records the catalog a suspend is about to close, read over its write
@@ -631,19 +662,27 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
-func openDB(ctx context.Context, dsn string, maxConns int) (*sql.DB, error) {
-	db, err := sql.Open(driverName, dsn)
+// openDB opens a pool over dsn whose connections attach the thumbnail file in role
+// (thumbdb.go), and returns the connector it opens them through.
+func (s *Store) openDB(ctx context.Context, dsn string, maxConns int, role thumbsRole) (*sql.DB, thumbsConnector, error) {
+	base, err := msqlite.NewConnector(dsn)
 	if err != nil {
-		return nil, err
+		return nil, thumbsConnector{}, err
 	}
+	var stored *atomic.Bool
+	if role == thumbsWriter {
+		stored = &s.thumbsStored
+	}
+	conn := newThumbsConnector(base, ThumbFile(s.path), role, stored, s.log.Warn)
+	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns)
 	db.SetConnMaxLifetime(0)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, thumbsConnector{}, err
 	}
-	return db, nil
+	return db, conn, nil
 }
 
 // commonPragmas are the per-connection pragmas shared by every DSN (the writer
@@ -658,11 +697,17 @@ func commonPragmas(opt OpenOptions) []string {
 	}
 }
 
-// rwDSN is the DSN for the single write connection: full pragma set including
-// WAL and NORMAL synchronous.
+// rwDSN is the DSN for the single write connection: full pragma set including WAL and
+// NORMAL synchronous, and transactions begun IMMEDIATE. A deferred transaction that reads
+// before it writes is refused the write lock at once when another connection holds it a
+// moment (a reader rereading a torn WAL header takes it), since SQLite will not wait on a
+// lock upgrade; taken at the BEGIN, the lock is waited for under the busy timeout. BEGIN
+// IMMEDIATE takes the write lock of every attached database, so another process holding
+// a write transaction on the thumbnail file holds up catalog writes as one on the catalog
+// does; nothing but this connection writes that file.
 func rwDSN(opt OpenOptions) string {
 	p := append([]string{pragma("journal_mode", "WAL"), pragma("synchronous", "NORMAL")}, commonPragmas(opt)...)
-	return "file:" + opt.Path + "?" + strings.Join(p, "&")
+	return "file:" + opt.Path + "?_txlock=immediate&" + strings.Join(p, "&")
 }
 
 // readDSN is the DSN for the read pool against a writable DB file (same process

@@ -22,7 +22,7 @@ func TestVerifyDerivedCleanAfterRefresh(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	rep, err := st.VerifyDerived(ctx)
@@ -64,7 +64,7 @@ func TestVerifyDetectsStaleRollups(t *testing.T) {
 	}
 
 	// Refreshing repairs it.
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if rep, _ := st.VerifyDerived(ctx); !rep.Consistent() {
@@ -77,7 +77,7 @@ func TestVerifyDetectsCorruptedRollup(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	// Corrupt a stored rollup directly; the recompute no longer agrees.
@@ -98,7 +98,7 @@ func TestVerifyDetectsSortKeyDrift(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
-	_ = st.RefreshRollups(ctx)
+	_, _ = st.RefreshRollups(ctx)
 	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG' WHERE name='Radiohead'"); err != nil {
 		t.Fatalf("corrupt sort key: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestVerifyDetectsFTSGap(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
-	_ = st.RefreshRollups(ctx)
+	_, _ = st.RefreshRollups(ctx)
 	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = (SELECT MIN(id) FROM playable_item)"); err != nil {
 		t.Fatalf("delete fts: %v", err)
 	}

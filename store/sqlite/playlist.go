@@ -789,19 +789,19 @@ func compactPlaylistTx(ctx context.Context, tx *sql.Tx, plID int64) (bool, error
 const playlistPositionDriftQ = `SELECT playlist_id FROM playlist_item GROUP BY playlist_id
 	HAVING MIN(position) <> 0 OR MAX(position) <> COUNT(*) - 1`
 
-// compactAllPlaylistsTx renumbers every playlist with drifted positions. The listings
-// keep their order, so nothing is touched and no delta is emitted.
-func compactAllPlaylistsTx(ctx context.Context, tx *sql.Tx) error {
+// compactAllPlaylistsTx renumbers every playlist with drifted positions, returning how
+// many. The listings keep their order, so nothing is touched and no delta is emitted.
+func compactAllPlaylistsTx(ctx context.Context, tx *sql.Tx) (int, error) {
 	drifted, err := queryInt64sTx(ctx, tx, playlistPositionDriftQ)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, id := range drifted {
 		if _, err := compactPlaylistTx(ctx, tx, id); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(drifted), nil
 }
 
 // staticPlaylistIDTx resolves a playlist pid to its rowid, requiring it be static

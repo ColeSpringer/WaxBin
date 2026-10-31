@@ -166,7 +166,7 @@ func TestVerifyReportsAndRepairsReleaseYearDrift(t *testing.T) {
 	if err != nil || drift.ReleaseYearDrift != 2 || drift.Consistent() {
 		t.Fatalf("audit drift = %+v (err %v), want 2 release-year", drift, err)
 	}
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
 	if got := releaseYearOf(t, st, pid); got != 1997 {
@@ -191,11 +191,120 @@ func TestRefreshRollupsRepairsISBNKeys(t *testing.T) {
 	if rep, err := st.VerifyDerived(ctx); err != nil || rep.BookISBNKeyDrift != 1 {
 		t.Fatalf("isbn-key drift = %+v (err %v), want 1", rep, err)
 	}
-	if err := st.RefreshRollups(ctx); err != nil {
+	if _, err := st.RefreshRollups(ctx); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
 	if got := scalarStr(t, st, "SELECT isbn_key FROM book"); got != "9780306406157" {
 		t.Errorf("isbn_key after the repair = %q, want 9780306406157", got)
 	}
 	assertVerifyClean(t, st)
+}
+
+// TestRefreshRollupsEmitsADeltaPerMovedReleaseYear: the repair of a drifted release year
+// moves what the newest list shows, so each moved item gets one update delta and an item
+// already right gets none.
+func TestRefreshRollupsEmitsADeltaPerMovedReleaseYear(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A",
+		artist: "X", album: "Al", year: 1997}).ItemPID
+	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B",
+		artist: "X", album: "Al", year: 1997}).ItemPID
+	right := putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "C",
+		artist: "X", album: "Al", year: 1997}).ItemPID
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE playable_item SET release_year = 1900 WHERE pid IN (?, ?)",
+		string(a), string(b)); err != nil {
+		t.Fatalf("break the years by hand: %v", err)
+	}
+	seq := latestSeq(t, st)
+	rep, err := st.RefreshRollups(ctx)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if rep.ReleaseYears != 2 {
+		t.Errorf("release years moved = %d, want 2", rep.ReleaseYears)
+	}
+	for pid, want := range map[model.PID]int{a: 1, b: 1, right: 0} {
+		if all, updates := itemChanges(t, st, seq, pid); all != want || updates != want {
+			t.Errorf("deltas for %s = %d (%d updates), want %d", pid, all, updates, want)
+		}
+	}
+	assertReleaseYearsHold(t, st)
+}
+
+// TestRefreshReportCountsOnlyWhatMoved: each count is the rows its repair rewrote, taken
+// from the check that reports the drift, so a second run over a repaired catalog reports
+// nothing.
+func TestRefreshReportCountsOnlyWhatMoved(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	p := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A",
+		artist: "X", album: "Al", genre: "Rock", year: 1997, durationMS: 1000}).ItemPID
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B",
+		artist: "Y", album: "Bl", genre: "Jazz", year: 2001, durationMS: 1000})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/bk.m4b", essence: "eb", content: "cb", title: "Book",
+		author: "Author", isbn: "978-0-306-40615-7", durationMS: 5000})
+	list := staticPlaylist(t, st, "Mix", p)
+	for _, q := range []string{
+		"UPDATE artist_rollup SET track_count = 99 WHERE artist_id = (SELECT id FROM artist WHERE name = 'X')",
+		"UPDATE release_group_rollup SET track_count = 99 WHERE release_group_id = (SELECT id FROM release_group WHERE title = 'Al')",
+		"UPDATE genre_rollup SET total_duration_ms = 5 WHERE genre_id = (SELECT id FROM genre WHERE name = 'Rock')",
+		"UPDATE book SET total_duration_ms = 1, isbn_key = 'stale'",
+		"UPDATE album SET year = 1900 WHERE title = 'Al'",
+		"UPDATE playable_item SET release_year = 1900 WHERE pid = '" + string(p) + "'",
+		"UPDATE playlist_item SET position = 5 WHERE playlist_id = (SELECT id FROM playlist WHERE pid = '" + string(list) + "')",
+	} {
+		if _, err := st.wdb().ExecContext(ctx, q); err != nil {
+			t.Fatalf("break by hand (%s): %v", q, err)
+		}
+	}
+	rep, err := st.RefreshRollups(ctx)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	want := model.RefreshReport{Artists: 1, ReleaseGroups: 1, Genres: 1, BookDurations: 1, ISBNKeys: 1,
+		AlbumYears: 1, ReleaseYears: 1, PlaylistsCompacted: 1}
+	if *rep != want {
+		t.Errorf("report = %+v, want %+v", *rep, want)
+	}
+	if rep, err := st.RefreshRollups(ctx); err != nil || *rep != (model.RefreshReport{}) {
+		t.Errorf("second report = %+v (err %v), want nothing rewritten", rep, err)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestRefreshRollupsOverAConsistentCatalogWritesNothing: the repair rewrites only the rows
+// that drifted, so over a consistent catalog it commits no change another connection
+// would see.
+func TestRefreshRollupsOverAConsistentCatalogWritesNothing(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A",
+		artist: "X", album: "Al", genre: "Rock", year: 1997, durationMS: 1000})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/bk.m4b", essence: "eb", content: "cb", title: "Book",
+		author: "Author", isbn: "978-0-306-40615-7", durationMS: 5000})
+	conn, err := st.rdb().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	version := func() int64 {
+		t.Helper()
+		var v int64
+		if err := conn.QueryRowContext(ctx, "PRAGMA data_version").Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	before := version()
+	rep, err := st.RefreshRollups(ctx)
+	if err != nil || *rep != (model.RefreshReport{}) {
+		t.Fatalf("refresh = %+v (err %v), want nothing to rewrite", rep, err)
+	}
+	if after := version(); after != before {
+		t.Errorf("data_version moved from %d to %d, want the repair to commit nothing", before, after)
+	}
 }

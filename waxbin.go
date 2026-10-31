@@ -1112,7 +1112,7 @@ type ScanRequest struct {
 // cannot touch their files. ImportEpisodeFile spans both trees and takes both,
 // fsMutateScope first (see fsLeaser.LeaseImport).
 const (
-	fsMutateScope  = "fs-mutate"
+	fsMutateScope  = model.FSMutateScope
 	podcastFSScope = "podcast-fs"
 )
 
@@ -1604,10 +1604,10 @@ func (l *Library) VerifyDerived(ctx context.Context) (*sqlite.DerivedReport, err
 }
 
 // RefreshRollups recomputes the maintained rollups, every book's denormalized total
-// duration and every album's year, and renumbers drifted playlist positions, the
-// repair for the rollup, book-duration, album-year and playlist-position drift
-// VerifyDerived can report.
-func (l *Library) RefreshRollups(ctx context.Context) error {
+// duration and ISBN key and every album's and item's year, and renumbers drifted
+// playlist positions, reporting what it rewrote: the repair for the drift VerifyDerived
+// can report.
+func (l *Library) RefreshRollups(ctx context.Context) (*model.RefreshReport, error) {
 	return l.store.RefreshRollups(ctx)
 }
 
@@ -1716,8 +1716,9 @@ func (l *Library) Vacuum(ctx context.Context) (*VacuumReport, error) {
 	}, nil
 }
 
-// IntegrityCheck runs SQLite's PRAGMA integrity_check and returns the problems it
-// reports (a healthy database returns a single "ok"). It is read-only.
+// IntegrityCheck runs SQLite's PRAGMA integrity_check over the catalog and returns the
+// problems it reports (a healthy database returns a single "ok"). The thumbnail file
+// beside the catalog is a cache and is not checked. It is read-only.
 func (l *Library) IntegrityCheck(ctx context.Context) ([]string, error) {
 	return l.store.IntegrityCheck(ctx)
 }
@@ -1740,9 +1741,9 @@ func (l *Library) ThumbCacheStats(ctx context.Context) (*model.ThumbCacheReport,
 
 // PruneThumbnails drops cached thumbnails to fit the policy, returning how many rows
 // went and how many bytes they held. Every entry is regenerated on the next request
-// that asks for it, so a prune costs decode time rather than pictures. The rows are
-// freed inside the catalog file; returning that space to the filesystem takes a
-// vacuum.
+// that asks for it, so a prune costs decode time rather than pictures. The thumbnails
+// live in a file of their own beside the catalog: a prune gives its freed pages back in
+// short steps after it commits, and the file shrinks once those steps are checkpointed.
 func (l *Library) PruneThumbnails(ctx context.Context, p ThumbPrunePolicy) (removed int, freed int64, err error) {
 	olderThan, maxBytes := int64(-1), int64(-1)
 	if p.OlderThan != nil {
@@ -2848,6 +2849,13 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 	managed, err := l.managedLibraries(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// The album years a plan files tracks under are settled ones, should a scan's settle
+	// have failed and left them behind.
+	if !l.store.ReadOnly() {
+		if _, err := l.store.SettleRollups(ctx); err != nil {
+			return nil, err
+		}
 	}
 	// Organize acts on catalog rows; a per-user filter in q resolves against the
 	// default user, and the library field against each item's primary, the file organize
@@ -4221,9 +4229,10 @@ func (l *Library) writeBackAcquisition(ctx context.Context, op string, itemPID m
 }
 
 // Backup writes a self-contained byte copy of the catalog to dest. The copy contains
-// every table, the secret table included, less what opts leaves out (secrets for a
-// copy that will leave the host, thumbnails to make it smaller); the live catalog is
-// untouched. A full backup is the disaster-recovery artifact.
+// every table, the secret table included, less what opts leaves out (secrets for a copy
+// that will leave the host); the live catalog is untouched. The generated thumbnails live
+// in a file of their own beside the catalog, which no backup copies. A full backup is
+// the disaster-recovery artifact.
 func (l *Library) Backup(ctx context.Context, dest string, opts port.BackupOptions) error {
 	if err := l.store.BackupTo(ctx, dest); err != nil {
 		return err

@@ -61,6 +61,10 @@ type PutScannedTrackInput struct {
 	// may still change kind in place. An unforced put over such a lock (one set after the
 	// scan read the item) is refused with CodeConflict, for the next scan to read again.
 	KindForced bool
+	// DeferRollups records the entities the put touches for a later SettleRollups instead
+	// of recomputing their rollups and album years in the put, which a scan of many files
+	// would otherwise pay once per file for every member an entity has.
+	DeferRollups bool
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -136,6 +140,8 @@ type PutScannedBookInput struct {
 	// holds keeps the one stored for it: the name organize or an import gave the file has
 	// replaced the one that stated it.
 	DiscUnstated, PlaceUnstated bool
+	// DeferRollups is PutScannedTrackInput's.
+	DeferRollups bool
 }
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual
@@ -167,6 +173,8 @@ type PutScannedVirtualTracksInput struct {
 	// PreserveLocks keeps a user-locked field on a virtual track from being re-derived
 	// from the .cue on a forced rescan (see PutScannedTrackInput.PreserveLocks).
 	PreserveLocks bool
+	// DeferRollups is PutScannedTrackInput's.
+	DeferRollups bool
 }
 
 // VirtualTrack is one cue TRACK of a single-file rip: a full track item plus the
@@ -453,6 +461,9 @@ type ThumbCacheReport struct {
 	OldestAt       int64 // unix ns of the oldest entry; 0 when the cache is empty
 	NewestAt       int64
 	Rungs          []ThumbRung // largest box first
+	// Damaged says the thumbnail file could not be read whole, so the counts of it are
+	// zero. A read-write store marks such a file, and its next open replaces it.
+	Damaged bool
 }
 
 // ThumbRung is one ladder rung's share of the thumbnail cache.
@@ -614,12 +625,17 @@ type Catalog interface {
 	LatestChangeSeq(ctx context.Context) (int64, error)
 
 	// RefreshRollups recomputes the maintained catalog-structural rollups
-	// (per artist/release_group/genre), each book's denormalized total duration and each
-	// album's year from the base tables, and renumbers drifted playlist positions. Normal
-	// scans maintain touched rows transactionally; this is the repair path for db verify
-	// drift, so it must cover every maintained value the drift report names or `db
-	// verify --fix` reports drift it cannot clear.
-	RefreshRollups(ctx context.Context) error
+	// (per artist/release_group/genre), each book's denormalized total duration and ISBN
+	// key, each album's and item's year from the base tables, and renumbers drifted
+	// playlist positions, reporting what it rewrote. Writes maintain these as they go (a
+	// scan through its settles); this is the repair path for db verify drift, so it must
+	// cover every maintained value the drift report names or `db verify --fix` reports
+	// drift it cannot clear.
+	RefreshRollups(ctx context.Context) (*RefreshReport, error)
+	// SettleRollups recomputes the rollups and album years of the entities deferred puts
+	// left pending (PutScannedTrackInput.DeferRollups) and clears them, reporting how many
+	// of each kind it settled.
+	SettleRollups(ctx context.Context) (RollupSettle, error)
 }
 
 // JobStore is the persistence port for jobs and leases.

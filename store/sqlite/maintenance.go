@@ -27,12 +27,14 @@ func (s *Store) Vacuum(ctx context.Context) error {
 	return nil
 }
 
-// IntegrityCheck runs SQLite's own PRAGMA integrity_check and returns the
-// problems it reports. A healthy database returns a single "ok"; any other
-// message is a real corruption finding. It is read-only.
+// IntegrityCheck runs SQLite's own PRAGMA integrity_check over the catalog and returns
+// the problems it reports. A healthy database returns a single "ok"; any other
+// message is a real corruption finding. The attached thumbnail file is left out: it is a
+// cache, a failed read of it regenerates that thumbnail, and a damaged file a read-write
+// store meets is moved aside by its next open. It is read-only.
 func (s *Store) IntegrityCheck(ctx context.Context) ([]string, error) {
 	const op = "store.IntegrityCheck"
-	rows, err := s.rdb().QueryContext(ctx, "PRAGMA integrity_check")
+	rows, err := s.rdb().QueryContext(ctx, "PRAGMA main.integrity_check")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
