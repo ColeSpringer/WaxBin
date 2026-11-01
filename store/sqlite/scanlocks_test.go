@@ -476,10 +476,10 @@ func TestForcedRescanClearsStaleCustomTagProvenance(t *testing.T) {
 	onDisk := map[string][]string{"RELEASESTATUS": {"official"}}
 	pid := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", onDisk, true).ItemPID
 	user := model.Attribution{Source: model.SourceUser}
-	if _, _, err := st.SetItemTag(ctx, pid, "RELEASESTATUS", []string{"unofficial"}, user, model.LockUnchanged, false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "RELEASESTATUS", []string{"unofficial"}, user, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set RELEASESTATUS: %v", err)
 	}
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"}, user, model.LockUnchanged, false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"chill"}, user, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set MOOD: %v", err)
 	}
 
@@ -603,7 +603,7 @@ func TestIgnoreLocksRescanKeepsLockDropsValue(t *testing.T) {
 	if err := st.EditItemField(ctx, pid, "genre", "Jazz", user, model.LockOn, false); err != nil {
 		t.Fatalf("edit genre: %v", err)
 	}
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"}, user, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"chill"}, user, model.LockOn, false); err != nil {
 		t.Fatalf("set MOOD: %v", err)
 	}
 
@@ -1429,7 +1429,7 @@ func TestEnrichmentCustomTagSurvivesASilentRescan(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putTrackCustom(t, st, lib.ID, "/lib/a.mp3", "ess-a", "c1", "Song", nil, true).ItemPID
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"Calm"}, model.Attribution{Source: model.SourceEnrichment, Provider: "mb"},
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"Calm"}, model.Attribution{Source: model.SourceEnrichment, Provider: "mb"},
 		model.LockUnchanged, false); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}

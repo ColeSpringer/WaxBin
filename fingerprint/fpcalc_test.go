@@ -2,7 +2,6 @@ package fingerprint
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -76,26 +75,6 @@ func TestChromaprintRawDetailKeepsACoveringPartialRead(t *testing.T) {
 	r, err := ChromaprintRawDetail(ctx, bin, "song.flac", MaxAnalyze, 300*time.Second)
 	if err != nil || r.Partial || len(r.Sub) != 948 || r.DurationSec != 300 {
 		t.Fatalf("clean run = %+v (err %v), want 948 values, 300 s, not partial", r, err)
-	}
-}
-
-// TestChromaprintCompressedDetailKeepsACoveringPartialRead: the AcoustID form carries its
-// value count in its header, so a partial read is judged the same way, against fpcalc's
-// own 120-second default when no length is passed.
-func TestChromaprintCompressedDetailKeepsACoveringPartialRead(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	compressed := func(n int) string {
-		return base64.RawURLEncoding.EncodeToString([]byte{1, byte(n >> 16), byte(n >> 8), byte(n), 0x5a, 0xc3})
-	}
-	out := func(n int) string { return `{"duration": 300.4, "fingerprint": "` + compressed(n) + `"}` }
-
-	r, err := ChromaprintCompressedDetail(ctx, testfpcalc.Write(t, out(948), decodeNote, 3), "song.flac", 0, 300*time.Second)
-	if err != nil || !r.Partial || r.Compressed != compressed(948) || r.DurationSec != 300 {
-		t.Fatalf("covering partial = %+v (err %v), want the fingerprint kept", r, err)
-	}
-	if r, err := ChromaprintCompressedDetail(ctx, testfpcalc.Write(t, out(300), decodeNote, 3), "song.flac", 0, 300*time.Second); err == nil {
-		t.Fatalf("short partial = %+v, want a refusal", r)
 	}
 }
 

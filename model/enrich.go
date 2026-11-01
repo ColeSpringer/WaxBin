@@ -179,10 +179,11 @@ type EnrichTarget struct {
 	MBID       string // existing MBID, when known
 	ArtistName string // release-group primary artist / book author / track artist, for disambiguation
 	Album      string // album title, for a per-track lyrics lookup
-	// FilePath and DurationSec back the optional AcoustID fallback: a representative
-	// audio file for a release group with no MBID, fingerprinted to resolve one. They
-	// are populated only when the store is asked to include the representative file.
-	// DurationSec also disambiguates a per-track lyrics lookup.
+	// FilePID, FilePath and DurationSec back the optional AcoustID fallback: a
+	// representative audio file for a release group with no MBID, fingerprinted to resolve
+	// one. They are populated only when the store is asked to include the representative
+	// file. DurationSec also disambiguates a per-track lyrics lookup.
+	FilePID     PID
 	FilePath    string
 	DurationSec int
 

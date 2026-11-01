@@ -161,20 +161,16 @@ func (s *Store) FollowAlbumSortWrite(ctx context.Context, albumPID model.PID, fi
 			for _, p := range chunk {
 				args = append(args, string(p))
 			}
-			const locked = `EXISTS (SELECT 1 FROM field_provenance fp
-				WHERE fp.item_id = t.item_id AND fp.field = 'album_sort' AND fp.locked = 1)`
-			from := ` FROM track t
+			const lockOn = `fp.item_id = t.item_id AND fp.field = 'album_sort' AND fp.locked = 1`
+			joins := ` FROM track t
 				JOIN item_file e ON e.item_id = t.item_id AND e.role = 'primary'
-				JOIN file f ON f.id = e.file_id
-				WHERE t.album_id = ? AND t.album_sort != ? AND f.pid IN ` + placeholders(len(chunk))
-			held, err := queryInt64sTx(ctx, tx, "SELECT f.id"+from+" AND "+locked, args...)
-			if err != nil {
+				JOIN file f ON f.id = e.file_id`
+			where := ` WHERE t.album_id = ? AND t.album_sort != ? AND f.pid IN ` + placeholders(len(chunk))
+			if err := noteHeldAlbumSortsTx(ctx, tx, `SELECT f.id, fp.source, COALESCE(fp.provider, '')`+joins+
+				` JOIN field_provenance fp ON `+lockOn+where, args); err != nil {
 				return err
 			}
-			if err := noteOwedTx(ctx, tx, held, []string{"album_sort"}); err != nil {
-				return err
-			}
-			members := "SELECT t.item_id" + from + " AND NOT " + locked
+			members := "SELECT t.item_id" + joins + where + " AND NOT EXISTS (SELECT 1 FROM field_provenance fp WHERE " + lockOn + ")"
 			if _, err := tx.ExecContext(ctx, `INSERT INTO change_log(ts, entity_type, entity_pid, op)
 				SELECT ?, 'item', pi.pid, 'update' FROM playable_item pi WHERE pi.id IN (`+members+`)`,
 				append([]any{nowNS()}, args...)...); err != nil {
@@ -198,6 +194,35 @@ func (s *Store) FollowAlbumSortWrite(ctx context.Context, albumPID model.PID, fi
 	})
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return nil
+}
+
+// noteHeldAlbumSortsTx owes album_sort to each file q names (its id, then the locked
+// value's source and provider), set by whoever set the value the lock keeps.
+func noteHeldAlbumSortsTx(ctx context.Context, tx *sql.Tx, q string, args []any) error {
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	bySetter := map[model.Attribution][]int64{}
+	for rows.Next() {
+		var id int64
+		var a model.Attribution
+		if err := rows.Scan(&id, &a.Source, &a.Provider); err != nil {
+			rows.Close()
+			return err
+		}
+		bySetter[a] = append(bySetter[a], id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for a, ids := range bySetter {
+		if err := noteOwedTx(ctx, tx, ids, []string{"album_sort"}, a); err != nil {
+			return err
+		}
 	}
 	return nil
 }

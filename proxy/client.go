@@ -404,14 +404,17 @@ func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, ent
 	return model.ArtLockChange{Changed: res.Changed, StillLocked: res.StillLocked}, nil
 }
 
-// SetTag proxies a custom-tag edit, returning the canonical key stored and the number
-// of values stored after trimming (0 = the tag was cleared). A committed tag whose file
-// write-back partially failed returns the failed files in the result; the transport error
-// stays nil, matching edit_fields.
-func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetTagResult, error) {
-	var res SetTagResult
-	err := c.call(ctx, MethodSetTag, SetTagParams{
-		ItemPID: string(itemPID), Key: key, Values: values,
+// SetTags proxies an edit of several custom tags, returning each key as stored and the
+// file rewrites made. A committed edit whose file write-back partially failed returns the
+// failed files in the result; the transport error stays nil, matching edit_fields.
+func (c *Client) SetTags(ctx context.Context, itemPID model.PID, edits []model.TagEdit, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetTagsResult, error) {
+	wire := make([]TagEdit, len(edits))
+	for i, e := range edits {
+		wire[i] = TagEdit{Key: e.Key, Values: e.Values}
+	}
+	var res SetTagsResult
+	err := c.call(ctx, MethodSetTags, SetTagsParams{
+		ItemPID: string(itemPID), Edits: wire,
 		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock), Force: force,
 		WriteBack: writeBack,
 	}, &res)

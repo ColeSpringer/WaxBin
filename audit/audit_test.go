@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ type fakeStore struct {
 	libs         []*model.Library
 	drift        model.DerivedDrift
 	diags        []model.FileDiagnostic
+	diagFilters  []model.DiagnosticFilter
 	diagStale    int
 	diagTotal    int
 	mismatches   []model.FileDurationMismatch
@@ -79,7 +81,8 @@ func (f *fakeStore) AuditFiles(context.Context) ([]model.AuditFileInfo, error) {
 func (f *fakeStore) Podcasts(context.Context) ([]*model.Podcast, error)        { return f.pods, nil }
 func (f *fakeStore) Libraries(context.Context) ([]*model.Library, error)       { return f.libs, nil }
 func (f *fakeStore) DerivedDrift(context.Context) (model.DerivedDrift, error)  { return f.drift, nil }
-func (f *fakeStore) FileDiagnostics(context.Context, model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
+func (f *fakeStore) FileDiagnostics(_ context.Context, filter model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
+	f.diagFilters = append(f.diagFilters, filter)
 	return f.diags, nil
 }
 func (f *fakeStore) DiagnosticCoverage(context.Context) (int, int, error) {
@@ -772,5 +775,18 @@ func TestAuditDuplicateCopy(t *testing.T) {
 	}
 	if fs := findingsFor(rep, model.CheckDuplicateCopy); len(fs) != 3 || !strings.Contains(fs[2].Message, "3 copies on 2 items (2 shown)") {
 		t.Errorf("capped = %+v, want two and a roll-up", fs)
+	}
+}
+
+// TestAuditReadsDiagnosticsWithoutItems: the audit's full read of the diagnostics uses no
+// row's item, so it asks the store to leave the per-row item lookup out.
+func TestAuditReadsDiagnosticsWithoutItems(t *testing.T) {
+	st := &fakeStore{diags: []model.FileDiagnostic{{FilePID: "f9", DisplayPath: "/lib/a.ogg",
+		Origin: model.OriginScan, Code: model.DiagUnsupportedFormat, Severity: model.SeverityWarn}}}
+	if _, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckFileDiagnostic}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.diagFilters) == 0 || slices.ContainsFunc(st.diagFilters, func(f model.DiagnosticFilter) bool { return !f.OmitItemPID }) {
+		t.Errorf("diagnostic reads = %+v, want every one to leave the item out", st.diagFilters)
 	}
 }

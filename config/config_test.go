@@ -224,3 +224,22 @@ func TestValidateTakesABlankPodcastDirAsNone(t *testing.T) {
 		t.Fatalf("a blank podcast dir validated to %q (err %v), want none", cfg.Podcasts.Dir, err)
 	}
 }
+
+// TestLoadReadsTheFpcalcPath: the fpcalc binary comes from fpcalc_path in the json file,
+// and WAXBIN_FPCALC overrides it.
+func TestLoadReadsTheFpcalcPath(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "waxbin.json")
+	if err := os.WriteFile(path, []byte(`{"fpcalc_path": "/opt/chromaprint/fpcalc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(config.Overrides{ConfigPath: path}, func(string) string { return "" })
+	if err != nil || cfg.FpcalcPath != "/opt/chromaprint/fpcalc" {
+		t.Fatalf("from json = %q (err %v), want /opt/chromaprint/fpcalc", cfg.FpcalcPath, err)
+	}
+	env := map[string]string{"WAXBIN_FPCALC": "/usr/local/bin/fpcalc"}
+	cfg, err = config.Load(config.Overrides{ConfigPath: path}, func(k string) string { return env[k] })
+	if err != nil || cfg.FpcalcPath != "/usr/local/bin/fpcalc" {
+		t.Fatalf("with the env = %q (err %v), want the env's path", cfg.FpcalcPath, err)
+	}
+}

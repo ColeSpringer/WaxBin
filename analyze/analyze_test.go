@@ -102,7 +102,7 @@ func (s *fakeStore) PutAnalysis(_ context.Context, in model.AnalysisInput) error
 // not fpcalc is installed (the field override is legal from this in-package test).
 func pureGoAnalyzer(t *testing.T, store Store) *Analyzer {
 	t.Helper()
-	a := New(store, nil, discardLog())
+	a := New(store, nil, "", discardLog())
 	a.fpAlgo = fingerprint.AlgoVersion
 	a.version = effectiveVersion(a.fpAlgo)
 	return a
@@ -719,9 +719,9 @@ func TestBucketDuration(t *testing.T) {
 
 // chromaprintAnalyzer builds an Analyzer on the Chromaprint backend with bin as fpcalc.
 func chromaprintAnalyzer(store Store, bin string) *Analyzer {
-	a := New(store, nil, discardLog())
+	a := New(store, nil, "", discardLog())
 	a.fpAlgo = fingerprint.ChromaprintAlgoVersion
-	a.caps.Fpcalc, a.caps.FpcalcPath = true, bin
+	a.fpcalc = bin
 	a.version = effectiveVersion(a.fpAlgo)
 	return a
 }

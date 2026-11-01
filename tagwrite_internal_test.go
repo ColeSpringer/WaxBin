@@ -3,6 +3,7 @@ package waxbin
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -1578,5 +1579,54 @@ func TestEnrichmentFillSurvivesASilentRetag(t *testing.T) {
 	fm, err := meta.NewReader().Read(ctx, path)
 	if err != nil || fm.Tags.Composer != "Someone" {
 		t.Fatalf("on-disk composer = %q (err %v), want Someone", fm.Tags.Composer, err)
+	}
+}
+
+// TestABatchNoKeyWentInOnKeepsTheFilesDrift: a file that refused every key of a batch was
+// not written, so like a failed write it keeps the drift it had, beside a row per refused
+// key, and each refusal is a failure naming its key.
+func TestABatchNoKeyWentInOnKeepsTheFilesDrift(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := OpenSeeded(t, ctx, Options{
+		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+	writeRaw(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Album"}))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	song := items[0]
+	lib.recordWriteBackDrift(ctx, model.OriginEdit, song.FilePID, "an earlier write could not reach the file")
+
+	_, err = lib.SetItemTags(ctx, song.PID, []model.TagEdit{
+		{Key: "TPE2", Values: []string{"x"}}, {Key: "TCOM", Values: []string{"y"}},
+	}, TagEditOptions{WriteBack: true})
+	var wb *WriteBackError
+	if !errors.As(err, &wb) || len(wb.Failures) != 2 || wb.Failures[0].Key != "TPE2" || wb.Failures[1].Key != "TCOM" {
+		t.Fatalf("write-back = %v, want both keys refused by name", err)
+	}
+	ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: song.FilePID, Code: model.DiagTagWriteUnsynced})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, d := range ds {
+		keys = append(keys, d.TagKey)
+	}
+	if !slices.Equal(keys, []string{"", "TCOM", "TPE2"}) {
+		t.Errorf("drift keys = %q, want the earlier row kept beside one per refused key", keys)
+	}
+	if owed, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: song.FilePID, Code: model.DiagTagWriteOwed}); err != nil || len(owed) != 0 {
+		t.Errorf("owed = %+v (err %v), want both settled: the format can never carry them", owed, err)
 	}
 }

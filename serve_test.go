@@ -95,7 +95,7 @@ func openServed(t *testing.T, ctx context.Context, db, root, sock string) *waxbi
 	return lib
 }
 
-// TestServeProxiedSetTagWriteBack: set_tag carries the write-back across the socket, and a
+// TestServeProxiedSetTagWriteBack: set_tags carries the write-back across the socket, and a
 // committed tag whose file refused the write comes back as failures in the result rather
 // than as a transport error, the way edit_fields reports one.
 func TestServeProxiedSetTagWriteBack(t *testing.T) {
@@ -117,8 +117,8 @@ func TestServeProxiedSetTagWriteBack(t *testing.T) {
 		return fm.Tags.Custom["MOOD"]
 	}
 
-	res, err := c.SetTag(ctx, pid, "mood", []string{"calm"}, model.Attribution{}, model.LockOn, false, true)
-	if err != nil || res.Key != "MOOD" || res.Stored != 1 || len(res.WriteBackFailures) != 0 {
+	res, err := c.SetTags(ctx, pid, []model.TagEdit{{Key: "mood", Values: []string{"calm"}}}, model.Attribution{}, model.LockOn, false, true)
+	if err != nil || len(res.Tags) != 1 || res.Tags[0].Key != "MOOD" || res.Tags[0].Stored != 1 || len(res.WriteBackFailures) != 0 {
 		t.Fatalf("proxied set = %+v (err %v), want MOOD stored and written", res, err)
 	}
 	if got := mood(); !slices.Equal(got, []string{"calm"}) {
@@ -126,8 +126,8 @@ func TestServeProxiedSetTagWriteBack(t *testing.T) {
 	}
 
 	setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, root), true)
-	res, err = c.SetTag(ctx, pid, "MOOD", []string{"tense"}, model.Attribution{}, model.LockOn, true, true)
-	if err != nil || res.Stored != 1 || len(res.WriteBackFailures) != 1 || res.WriteBackFailures[0].Path != src {
+	res, err = c.SetTags(ctx, pid, []model.TagEdit{{Key: "MOOD", Values: []string{"tense"}}}, model.Attribution{}, model.LockOn, true, true)
+	if err != nil || len(res.Tags) != 1 || res.Tags[0].Stored != 1 || len(res.WriteBackFailures) != 1 || res.WriteBackFailures[0].Path != src {
 		t.Fatalf("proxied set in a read-only library = %+v (err %v), want the file's refusal in the result", res, err)
 	}
 	if got := mood(); !slices.Equal(got, []string{"calm"}) {
@@ -136,6 +136,53 @@ func TestServeProxiedSetTagWriteBack(t *testing.T) {
 	tags, err := lib.ItemTags(ctx, pid)
 	if err != nil || len(tags) != 1 || !slices.Equal(tags[0].Values, []string{"tense"}) {
 		t.Errorf("catalog tags = %+v (err %v), want the refused edit to stand as [tense]", tags, err)
+	}
+}
+
+// TestServeProxiedSetTags: set_tags carries several keys across the socket in one call,
+// each reported as stored, the file rewritten once, and a key the file's format refuses
+// comes back as a failure naming it while the others are written.
+func TestServeProxiedSetTags(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sock := testsock.Path(t)
+	src := filepath.Join(root, "song.mp3")
+	// No album artist, so the MP3's TPE2 frame is free and a custom TPE2 is refused as the
+	// format's own field rather than dropped.
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Album"}))
+	lib := openServed(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	c := dialWhenReady(t, sock)
+	mb := model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}
+
+	res, err := c.SetTags(ctx, pid, []model.TagEdit{{Key: "mood", Values: []string{"calm"}}, {Key: "style", Values: []string{"lofi"}}},
+		mb, model.LockOn, false, true)
+	if err != nil || res.Written != 1 || len(res.WriteBackFailures) != 0 ||
+		!slices.Equal(res.Tags, []proxy.StoredTag{{Key: "MOOD", Stored: 1}, {Key: "STYLE", Stored: 1}}) {
+		t.Fatalf("proxied set = %+v (err %v), want both keys stored and one rewrite", res, err)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil || !slices.Equal(fm.Tags.Custom["MOOD"], []string{"calm"}) || !slices.Equal(fm.Tags.Custom["STYLE"], []string{"lofi"}) {
+		t.Fatalf("custom on disk = %v (err %v), want MOOD and STYLE", fm.Tags.Custom, err)
+	}
+	prov, err := lib.Provenance(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range prov {
+		if p.Field == "tag.MOOD" && (p.Source != model.SourceEnrichment || p.Provider != "musicbrainz") {
+			t.Errorf("tag.MOOD provenance = %+v, want the attribution carried", p)
+		}
+	}
+
+	res, err = c.SetTags(ctx, pid, []model.TagEdit{{Key: "TPE2", Values: []string{"x"}}, {Key: "MOOD"}},
+		model.Attribution{}, model.LockOn, true, true)
+	if err != nil || len(res.WriteBackFailures) != 1 || res.WriteBackFailures[0].Key != "TPE2" || res.Written != 1 {
+		t.Fatalf("proxied set with a refused key = %+v (err %v), want TPE2 named and MOOD's clear written", res, err)
+	}
+	if _, err := c.SetTags(ctx, pid, nil, model.Attribution{}, model.LockOn, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("an empty proxied batch = %v, want CodeInvalid", err)
 	}
 }
 

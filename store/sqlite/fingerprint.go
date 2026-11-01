@@ -299,20 +299,24 @@ ORDER BY shared DESC`
 	return out, rows.Err()
 }
 
-// LoadFingerprint returns a file's packed sub-fingerprint vector for full
-// verification, or CodeNotFound when the file has not been analyzed.
-func (s *Store) LoadFingerprint(ctx context.Context, filePID model.PID) ([]byte, error) {
+// LoadFingerprint returns a file's stored fingerprint, packed as fingerprint.Pack writes
+// it, and the analysis that made it (fingerprint.AlgoVersion or ChromaprintAlgoVersion), or
+// CodeNotFound when the file has no fingerprint of the audio it holds now: never analyzed,
+// or analyzed before its audio changed.
+func (s *Store) LoadFingerprint(ctx context.Context, filePID model.PID) ([]byte, int, error) {
 	const op = "store.LoadFingerprint"
 	var fp []byte
-	err := s.rdb().QueryRowContext(ctx,
-		"SELECT fp FROM fingerprint WHERE file_id = (SELECT id FROM file WHERE pid = ?)", string(filePID)).Scan(&fp)
+	var analysis int
+	err := s.rdb().QueryRowContext(ctx, `SELECT fp.fp, fp.algo_version FROM file f
+		JOIN fingerprint fp ON fp.file_id = f.id AND fp.essence_hash = f.essence_hash
+		WHERE f.pid = ?`, string(filePID)).Scan(&fp, &analysis)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "file not analyzed: "+string(filePID))
+		return nil, 0, waxerr.New(waxerr.CodeNotFound, op, "no fingerprint of the file's audio: "+string(filePID))
 	}
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return fp, nil
+	return fp, analysis, nil
 }
 
 // CountFingerprints returns how many files have a stored fingerprint (for doctor

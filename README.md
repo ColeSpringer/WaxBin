@@ -12,8 +12,9 @@ podcasts**.
   waveforms) via [WaxFlow]. The two libraries cover the same containers, so
   WaxBin can decode every format it catalogs, on every host, apart from a few rare
   codecs such as MPEG Layer II and AC-3. `fpcalc` is the sole remaining optional
-  subprocess: when present, analyze fingerprints with Chromaprint (the pure-Go
-  fingerprint covers a file it cannot read) and enrichment uses it for AcoustID.
+  subprocess: when present on PATH, or at the configured `fpcalc_path`, analyze
+  fingerprints with Chromaprint (the pure-Go fingerprint covers a file it cannot read)
+  and enrichment uses it for AcoustID.
 - **Hard scan/analyze boundary.** Scanning is I/O-bound and never decodes PCM;
   loudness, fingerprinting, and peaks live only in a resumable analyze pass.
 - **Source of truth.** Consumers read the catalog through WaxBin's canonical
@@ -148,7 +149,8 @@ of its own.
   credit and the field it fills (artist, composer, author, narrator) lock together, and
   an edit through either one replaces the other.
 - `waxbin tag <pid> --key KEY --value V` sets a **custom tag**: a non-standard frame a
-  file carries that WaxBin's typed model does not map, or one you add yourself.
+  file carries that WaxBin's typed model does not map, or one you add yourself (repeat
+  `--key`, or add `--clear KEY`, to change several in one write).
   `waxbin tag <pid>` lists an item's tags, and `waxbin tag keys` lists every custom-tag
   key in the catalog with per-key item counts.
 - `waxbin lyrics set`, `waxbin chapters`, and `waxbin art set` curate lyrics, book
@@ -170,7 +172,8 @@ The catalog is always authoritative; these opt-in features mirror an edit back i
 files for external players, always preserving audio essence (an essence-verified write
 never alters the encoded audio):
 - The curation edits above (`edit`, `entity`, `credit`, `tag`, `art set`) take `--write-back`
-  to embed the committed change into the item's file(s).
+  to embed the committed change into the item's file(s); `tag` rewrites each file once,
+  however many keys it sets.
 - `acquisition set`/`acquisition clear` take `--write-back` for the file's own
   `SOURCE_URL`/`SOURCE_ID`/`ACQUISITION_DATE`.
 - `waxbin analyze --write-replaygain` (or `write_replaygain_tags` in config) writes

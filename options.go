@@ -59,6 +59,11 @@ type Options struct {
 	Podcasts config.PodcastConfig
 	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
 	Enrichment config.EnrichConfig
+	// FpcalcPath names the fpcalc binary the analyze pass and the AcoustID fallback run.
+	// Empty looks fpcalc up on PATH as Open runs, and finding none leaves the pure-Go
+	// fingerprint in use. A path that names no executable leaves the catalog usable with no
+	// fpcalc, while the analyze pass refuses (CodeInvalid) and doctor names the problem.
+	FpcalcPath string
 	// SourceProviders are injected acquisition providers, such as a youtube provider
 	// supplied by another module. The built-in netsafe rss provider is always
 	// registered; these register under their own source types. The default CLI build
@@ -144,6 +149,7 @@ func OptionsFromConfig(cfg *config.Config, log *slog.Logger) Options {
 		StampItemPID:          cfg.StampItemPID,
 		Podcasts:              cfg.Podcasts,
 		Enrichment:            cfg.Enrichment,
+		FpcalcPath:            cfg.FpcalcPath,
 		Logger:                log,
 		BusyTimeoutMS:         cfg.BusyTimeoutMS,
 		CacheSizeKB:           cfg.CacheSizeKB,

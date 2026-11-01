@@ -94,8 +94,8 @@ func TestWriterRoundTripPreservesEssence(t *testing.T) {
 
 // TestApplyCustomTagGuardsTheKey: a custom tag is written only where it lands as itself. A
 // file whose format would write the key onto a modelled field (an ID3 frame id such as
-// TPE2, an MP4 name folded onto a MusicBrainz id) is refused untouched, a key the format
-// drops without a word is reported as a lost write, and the same key on a FLAC, whose
+// TPE2, an MP4 name folded onto a MusicBrainz id) refuses it and is left untouched, a key the
+// format drops without a word is reported as a lost write, and the same key on a FLAC, whose
 // comments are free-form, is an ordinary custom tag.
 func TestApplyCustomTagGuardsTheKey(t *testing.T) {
 	t.Parallel()
@@ -104,6 +104,9 @@ func TestApplyCustomTagGuardsTheKey(t *testing.T) {
 	m4a := writeTemp(t, "song.m4a", testaudio.Fixture(t, "sample.m4a"))
 	flac := writeTemp(t, "song.flac", testaudio.EncodeAs(t, "flac", "", 8000, testaudio.ReferenceSignal(8000, time.Second)))
 	w := NewWriter()
+	one := func(path, key string, values []string) (*CustomTagsResult, error) {
+		return w.ApplyCustomTags(ctx, path, []TagEdit{{Key: key, Values: values}})
+	}
 
 	for _, c := range []struct{ path, key string }{
 		{mp3, "TPE2"}, {mp3, "TCOM"}, {m4a, "MUSICBRAINZ TRACK ID"},
@@ -112,16 +115,17 @@ func TestApplyCustomTagGuardsTheKey(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.ApplyCustomTag(ctx, c.path, c.key, []string{"x"}); !waxerr.Is(err, waxerr.CodeUnsupported) || !errors.Is(err, ErrNotCustomTag) {
-			t.Errorf("%s on %s = %v, want CodeUnsupported for a key the format writes as a field", c.key, filepath.Base(c.path), err)
+		res, err := one(c.path, c.key, []string{"x"})
+		if refused := res.Refused[c.key]; err != nil || !waxerr.Is(refused, waxerr.CodeUnsupported) || !errors.Is(refused, ErrNotCustomTag) {
+			t.Errorf("%s on %s = %+v (err %v), want it refused as a field of the format's own", c.key, filepath.Base(c.path), res, err)
 		}
 		if after, _ := os.ReadFile(c.path); !bytes.Equal(before, after) {
 			t.Errorf("%s on %s rewrote the file", c.key, filepath.Base(c.path))
 		}
 	}
 
-	res, err := w.ApplyCustomTag(ctx, mp3, "TPE1", []string{"x"})
-	if err != nil || res.Changed || !slices.ContainsFunc(res.Warnings, func(wn model.TagWriteWarning) bool {
+	res, err := one(mp3, "TPE1", []string{"x"})
+	if err != nil || res.Changed || len(res.Refused) != 0 || !slices.ContainsFunc(res.Warnings, func(wn model.TagWriteWarning) bool {
 		return wn.Unrepresented && wn.Key == "TPE1"
 	}) {
 		t.Errorf("TPE1 on mp3 = %+v (err %v), want an unchanged file and the value reported lost", res, err)
@@ -132,8 +136,8 @@ func TestApplyCustomTagGuardsTheKey(t *testing.T) {
 		if path == flac {
 			key = "TPE2"
 		}
-		res, err := w.ApplyCustomTag(ctx, path, key, []string{"calm"})
-		if err != nil || !res.Changed || slices.ContainsFunc(res.Warnings, func(wn model.TagWriteWarning) bool { return wn.Unrepresented }) {
+		res, err := one(path, key, []string{"calm"})
+		if err != nil || !res.Changed || len(res.Refused) != 0 || slices.ContainsFunc(res.Warnings, func(wn model.TagWriteWarning) bool { return wn.Unrepresented }) {
 			t.Fatalf("%s on %s = %+v (err %v), want a clean write", key, filepath.Base(path), res, err)
 		}
 		fm, err := NewReader().Read(ctx, path)
@@ -141,7 +145,7 @@ func TestApplyCustomTagGuardsTheKey(t *testing.T) {
 			t.Errorf("%s on %s reads back %v (err %v), want [calm]", key, filepath.Base(path), fm.Tags.Custom[key], err)
 		}
 	}
-	if res, err := w.ApplyCustomTag(ctx, mp3, "ABSENT", nil); err != nil || res.Changed || len(res.Warnings) != 0 {
+	if res, err := one(mp3, "ABSENT", nil); err != nil || res.Changed || len(res.Warnings) != 0 || len(res.Refused) != 0 {
 		t.Errorf("clearing an absent key = %+v (err %v), want a quiet no-op", res, err)
 	}
 }
@@ -179,6 +183,123 @@ func TestJudgeCustomTagReadsTheChanges(t *testing.T) {
 		lost := slices.ContainsFunc(got, func(wn model.TagWriteWarning) bool { return wn.Unrepresented && wn.Key == "MOOD" })
 		if lost != c.lostKeyRow {
 			t.Errorf("%s: lost warning %v, want %v", c.name, lost, c.lostKeyRow)
+		}
+	}
+}
+
+// TestApplyCustomTagsWritesThemTogether: keys the format takes as themselves go in with one
+// rewrite, a clear among them, and the same keys again rewrite nothing; a file whose format
+// writes one key as a field of its own still takes the others in one rewrite, naming the one
+// it refused and leaving that field alone.
+func TestApplyCustomTagsWritesThemTogether(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mp3 := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "T", Artist: "A", Album: "Al"}))
+	w := NewWriter()
+	if _, err := w.ApplyCustomTags(ctx, mp3, []TagEdit{{Key: "OCCASION", Values: []string{"party"}}}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	read := func() map[string][]string {
+		t.Helper()
+		fm, err := NewReader().Read(ctx, mp3)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		return fm.Tags.Custom
+	}
+
+	together := []TagEdit{{Key: "MOOD", Values: []string{"calm"}}, {Key: "STYLE", Values: []string{"lofi"}}, {Key: "OCCASION"}}
+	res, err := w.ApplyCustomTags(ctx, mp3, together)
+	if err != nil || !res.Changed || len(res.Refused) != 0 {
+		t.Fatalf("together = %+v (err %v), want the file rewritten and nothing refused", res, err)
+	}
+	if c := read(); !slices.Equal(c["MOOD"], []string{"calm"}) || !slices.Equal(c["STYLE"], []string{"lofi"}) || c["OCCASION"] != nil {
+		t.Errorf("custom tags = %v, want MOOD and STYLE set and OCCASION cleared", c)
+	}
+	if res, err := w.ApplyCustomTags(ctx, mp3, together); err != nil || res.Changed {
+		t.Errorf("the same keys again = %+v (err %v), want no rewrite", res, err)
+	}
+
+	res, err = w.ApplyCustomTags(ctx, mp3, []TagEdit{
+		{Key: "TPE2", Values: []string{"x"}}, {Key: "MOOD", Values: []string{"bright"}}, {Key: "GROOVE", Values: []string{"y"}},
+	})
+	if err != nil || !res.Changed || len(res.Refused) != 1 || !errors.Is(res.Refused["TPE2"], ErrNotCustomTag) {
+		t.Fatalf("with a format's own key = %+v (err %v), want the others written and TPE2 refused as not custom", res, err)
+	}
+	fm, err := NewReader().Read(ctx, mp3)
+	if err != nil || fm.Tags.AlbumArtist != "" || !slices.Equal(fm.Tags.Custom["MOOD"], []string{"bright"}) ||
+		!slices.Equal(fm.Tags.Custom["GROOVE"], []string{"y"}) {
+		t.Errorf("after the fallback: album artist %q, custom %v (err %v), want MOOD and GROOVE alone written",
+			fm.Tags.AlbumArtist, fm.Tags.Custom, err)
+	}
+
+	if res, err := w.ApplyCustomTags(ctx, mp3, []TagEdit{{Key: "TCOM", Values: []string{"z"}}}); err != nil ||
+		res.Changed || !errors.Is(res.Refused["TCOM"], ErrNotCustomTag) {
+		t.Errorf("one refused key = %+v (err %v), want it refused with no rewrite", res, err)
+	}
+}
+
+// TestJudgeCustomTagsReadsTheChanges: several keys landing as asked go ahead; any other
+// key changing refuses the combined write, which the caller then makes a key at a time; a
+// key the plan dropped without a word is reported lost.
+func TestJudgeCustomTagsReadsTheChanges(t *testing.T) {
+	t.Parallel()
+	x, y := []string{"x"}, []string{"y"}
+	edits := []TagEdit{{Key: "MOOD", Values: x}, {Key: "STYLE", Values: y}}
+	for _, c := range []struct {
+		name    string
+		held    map[string][]string
+		changes []tag.Change
+		refused bool
+		lost    []string
+	}{
+		{"both landed", nil, []tag.Change{{Key: "MOOD", New: x}, {Key: "STYLE", New: y}}, false, nil},
+		{"one already held", map[string][]string{"STYLE": y}, []tag.Change{{Key: "MOOD", New: x}}, false, nil},
+		{"another field changed", nil, []tag.Change{{Key: "MOOD", New: x}, {Key: "ALBUMARTIST", New: y}}, true, nil},
+		{"beside a picture delta", nil, []tag.Change{{Key: "MOOD", New: x}, {Key: "STYLE", New: y}, {Key: "pictures"}}, false, nil},
+		{"one dropped", nil, []tag.Change{{Key: "MOOD", New: x}}, false, []string{"STYLE"}},
+	} {
+		got, err := judgeCustomTags("op", edits, c.held, c.changes, nil)
+		if (err != nil) != c.refused {
+			t.Errorf("%s: err = %v, want refused %v", c.name, err, c.refused)
+		}
+		var lost []string
+		for _, wn := range got {
+			if wn.Unrepresented {
+				lost = append(lost, wn.Key)
+			}
+		}
+		if !slices.Equal(lost, c.lost) {
+			t.Errorf("%s: lost %v, want %v", c.name, lost, c.lost)
+		}
+	}
+}
+
+// TestApplyCustomTagsIsolatesAValueTheWriterRefuses: a value the tag writer refuses to
+// prepare (a NUL byte here) is refused alone while the other keys go in with one rewrite,
+// and a file whose every key the writer refuses fails whole, as a lone such key does.
+func TestApplyCustomTagsIsolatesAValueTheWriterRefuses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mp3 := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "T", Artist: "A", Album: "Al"}))
+	w := NewWriter()
+	res, err := w.ApplyCustomTags(ctx, mp3, []TagEdit{
+		{Key: "MOOD", Values: []string{"calm"}}, {Key: "STYLE", Values: []string{"a\x00b"}}, {Key: "GROOVE", Values: []string{"y"}},
+	})
+	if err != nil || !res.Changed || len(res.Refused) != 1 || res.Refused["STYLE"] == nil {
+		t.Fatalf("with one bad value = %+v (err %v), want STYLE refused alone and the others written", res, err)
+	}
+	fm, err := NewReader().Read(ctx, mp3)
+	if err != nil || !slices.Equal(fm.Tags.Custom["MOOD"], []string{"calm"}) || !slices.Equal(fm.Tags.Custom["GROOVE"], []string{"y"}) ||
+		fm.Tags.Custom["STYLE"] != nil {
+		t.Errorf("custom on disk = %v (err %v), want MOOD and GROOVE alone", fm.Tags.Custom, err)
+	}
+	for _, edits := range [][]TagEdit{
+		{{Key: "STYLE", Values: []string{"a\x00b"}}},
+		{{Key: "STYLE", Values: []string{"a\x00b"}}, {Key: "OTHER", Values: []string{"c\x00d"}}},
+	} {
+		if res, err := w.ApplyCustomTags(ctx, mp3, edits); err == nil {
+			t.Errorf("%d bad keys = %+v, want the file to fail whole", len(edits), res)
 		}
 	}
 }

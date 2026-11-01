@@ -185,7 +185,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 			if err != nil {
 				return err
 			}
-			if err := noteOwedEntryTx(ctx, tx, e, valuesBefore[i], cleared); err != nil {
+			if err := noteOwedEntryTx(ctx, tx, e, valuesBefore[i], cleared, attr); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			rep.MemberEdits = append(rep.MemberEdits, model.ItemFieldEdit{ItemPID: e.pid, Fields: e.norm})
@@ -198,7 +198,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 			if err != nil {
 				return err
 			}
-			if err := noteOwedCreditTx(ctx, tx, e, creditsBefore[i]); err != nil {
+			if err := noteOwedCreditTx(ctx, tx, e, creditsBefore[i], attr); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			rep.CreditEdits = append(rep.CreditEdits,

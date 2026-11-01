@@ -18,7 +18,6 @@ import (
 
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/fingerprint"
-	"github.com/colespringer/waxbin/internal/caps"
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/peaks"
@@ -69,29 +68,28 @@ type Store interface {
 type Analyzer struct {
 	store   Store
 	eng     *decode.Engine
-	caps    caps.Caps
+	fpcalc  string // the fpcalc binary, "" for the pure-Go fingerprint
 	log     *slog.Logger
 	fpAlgo  int // fingerprint backend: pure-Go, or Chromaprint when fpcalc is present
 	version int // combined analysis version stamped on each file this run
 }
 
 // New builds an Analyzer. A nil engine uses decode.New(log) (pure-Go WaxFlow
-// decode for every codec WaxBin can tag-read). The fingerprint backend is chosen
-// from detected capabilities: fpcalc (Chromaprint) when present, else the pure-Go
-// fingerprint.
-func New(store Store, eng *decode.Engine, log *slog.Logger) *Analyzer {
+// decode for every codec WaxBin can tag-read). fpcalc is the fpcalc binary to run, as the
+// catalog resolved it at open: with one the fingerprint backend is Chromaprint, and
+// without one ("") the pure-Go fingerprint.
+func New(store Store, eng *decode.Engine, fpcalc string, log *slog.Logger) *Analyzer {
 	if log == nil {
 		log = slog.Default()
 	}
 	if eng == nil {
 		eng = decode.New(log)
 	}
-	c := caps.Detect()
 	fpAlgo := fingerprint.AlgoVersion
-	if c.Fpcalc {
+	if fpcalc != "" {
 		fpAlgo = fingerprint.ChromaprintAlgoVersion
 	}
-	return &Analyzer{store: store, eng: eng, caps: c, log: log, fpAlgo: fpAlgo, version: effectiveVersion(fpAlgo)}
+	return &Analyzer{store: store, eng: eng, fpcalc: fpcalc, log: log, fpAlgo: fpAlgo, version: effectiveVersion(fpAlgo)}
 }
 
 // Result tallies an analyze run.
@@ -321,7 +319,7 @@ type fingerprinted struct {
 func (a *Analyzer) fingerprintFile(ctx context.Context, f *model.File) (fingerprinted, error) {
 	var fallback string
 	if a.fpAlgo == fingerprint.ChromaprintAlgoVersion {
-		r, err := fingerprint.ChromaprintRawDetail(ctx, a.caps.FpcalcPath, string(f.Path), fingerprint.MaxAnalyze,
+		r, err := fingerprint.ChromaprintRawDetail(ctx, a.fpcalc, string(f.Path), fingerprint.MaxAnalyze,
 			time.Duration(f.DurationMS)*time.Millisecond)
 		if err == nil {
 			if r.Partial {

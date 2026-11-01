@@ -257,7 +257,7 @@ func TestFoldCarriesLockedAndFilledCustomTags(t *testing.T) {
 	t2 := putTrackCustom(t, st, lib.ID, "/lib/A/T/02.mp3", "ce2", "cc2", "Two", map[string][]string{"PLAIN": {"x"}}, true).ItemPID
 	set := func(pid model.PID, key, value string, attr model.Attribution, lock model.LockChange) {
 		t.Helper()
-		if _, _, err := st.SetItemTag(ctx, pid, key, []string{value}, attr, lock, false); err != nil {
+		if _, _, err := setTag(ctx, st, pid, key, []string{value}, attr, lock, false); err != nil {
 			t.Fatalf("tag %s: %v", key, err)
 		}
 	}
@@ -663,10 +663,10 @@ func TestFoldLeavesLockedTagsWhenLocksAreIgnored(t *testing.T) {
 	ctx := context.Background()
 	putTrackCustom(t, st, lib.ID, "/lib/A/T/01.mp3", "il1", "ic1", "One", nil, false)
 	t2 := putTrackCustom(t, st, lib.ID, "/lib/A/T/02.mp3", "il2", "ic2", "Two", nil, false).ItemPID
-	if _, _, err := st.SetItemTag(ctx, t2, "STYLE", []string{"baroque"}, model.Attribution{}, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, t2, "STYLE", []string{"baroque"}, model.Attribution{}, model.LockOn, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.SetItemTag(ctx, t2, "LANGUAGE", []string{"eng"}, model.Attribution{Source: model.SourceEnrichment, Provider: "test"}, model.LockOff, false); err != nil {
+	if _, _, err := setTag(ctx, st, t2, "LANGUAGE", []string{"eng"}, model.Attribution{Source: model.SourceEnrichment, Provider: "test"}, model.LockOff, false); err != nil {
 		t.Fatal(err)
 	}
 	var book model.PID

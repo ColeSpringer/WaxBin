@@ -71,7 +71,7 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 	if err := st.PutAcquisition(ctx, pid, model.AcquisitionInput{SourceType: model.SourceManual}); err != nil {
 		t.Fatalf("acquisition: %v", err)
 	}
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, model.Attribution{}, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"calm"}, model.Attribution{}, model.LockOn, false); err != nil {
 		t.Fatalf("custom tag: %v", err)
 	}
 	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), "png", model.Attribution{}, model.LockUnchanged, false); err != nil {
@@ -90,10 +90,16 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 	if err := st.SetItemLyrics(ctx, pid, &model.Lyrics{Unsynced: "la la"}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("lyrics: %v", err)
 	}
-	if _, _, err := st.SetItemTag(ctx, pid, "ASIN", []string{"B000TEST"}, model.Attribution{}, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "ASIN", []string{"B000TEST"}, model.Attribution{}, model.LockOn, false); err != nil {
 		t.Fatalf("asin tag: %v", err)
 	}
-	if err := st.NoteTagWriteOwed(ctx, []model.PID{tr.FilePID}, []string{"album", "tag.MOOD"}); err != nil {
+	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		id, err := idByPIDTx(ctx, tx, "file", tr.FilePID, "test")
+		if err != nil {
+			return err
+		}
+		return noteOwedTx(ctx, tx, []int64{id}, []string{"album", "tag.MOOD"}, model.Attribution{Source: model.SourceUser})
+	}); err != nil {
 		t.Fatalf("owed: %v", err)
 	}
 	if err := st.writeTx(ctx, func(tx *sql.Tx) error {

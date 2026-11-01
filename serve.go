@@ -522,21 +522,29 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return proxy.AcquisitionResult{WriteBackFailures: f}
 			})
 		},
-		proxy.MethodSetTag: func(ctx context.Context, raw json.RawMessage) (any, error) {
-			p, err := decodeParams[proxy.SetTagParams](raw)
+		proxy.MethodSetTags: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetTagsParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			lock, lockErr := wireLock("serve.set_tag", p.Lock)
+			lock, lockErr := wireLock("serve.set_tags", p.Lock)
 			if lockErr != nil {
 				return nil, lockErr
 			}
-			key, stored, setErr := l.SetItemTag(ctx, model.PID(p.ItemPID), p.Key, p.Values, TagEditOptions{
+			edits := make([]model.TagEdit, len(p.Edits))
+			for i, e := range p.Edits {
+				edits[i] = model.TagEdit{Key: e.Key, Values: e.Values}
+			}
+			res, setErr := l.SetItemTags(ctx, model.PID(p.ItemPID), edits, TagEditOptions{
 				WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
 				Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
 			})
-			return writeBackResponse(setErr, func(f []proxy.WriteBackFailure) proxy.SetTagResult {
-				return proxy.SetTagResult{Key: key, Stored: stored, WriteBackFailures: f}
+			return writeBackResponse(setErr, func(f []proxy.WriteBackFailure) proxy.SetTagsResult {
+				tags := make([]proxy.StoredTag, len(res.Tags))
+				for i, t := range res.Tags {
+					tags[i] = proxy.StoredTag{Key: t.Key, Stored: t.Stored}
+				}
+				return proxy.SetTagsResult{Tags: tags, Written: res.Written, WriteBackFailures: f}
 			})
 		},
 		proxy.MethodLock: func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -1006,7 +1014,7 @@ func decodeParams[T any](raw json.RawMessage) (T, error) {
 func toProxyFailures(failures []WriteBackFailure) []proxy.WriteBackFailure {
 	out := make([]proxy.WriteBackFailure, len(failures))
 	for i, f := range failures {
-		out[i] = proxy.WriteBackFailure{FilePID: string(f.FilePID), Path: f.Path, Reason: f.Reason}
+		out[i] = proxy.WriteBackFailure{FilePID: string(f.FilePID), Path: f.Path, Key: f.Key, Lost: f.Lost, Reason: f.Reason}
 	}
 	return out
 }

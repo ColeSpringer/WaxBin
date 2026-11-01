@@ -14,7 +14,9 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testfpcalc"
 	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -1459,5 +1461,90 @@ func TestDoctorReportsEnrichmentPhases(t *testing.T) {
 	}
 	if !rep.EnrichmentEnabled || len(rep.EnrichmentPhases) != 1 || rep.EnrichmentPhases[0] != model.EnrichPhaseLyrics {
 		t.Errorf("doctor enrichment = %v %v, want enabled with [lyrics]", rep.EnrichmentEnabled, rep.EnrichmentPhases)
+	}
+}
+
+// TestFpcalcPathOptionReachesAnalyzeAndEnrich: an fpcalc named by Options.FpcalcPath, off
+// PATH, is the one the AcoustID fallback and the analyze pass run and the one doctor
+// names.
+func TestFpcalcPathOptionReachesAnalyzeAndEnrich(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fpcalc stand-in is a shell script")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Song", "Nobody Known", "Untitled Thing", 1))
+	bin, runs := testfpcalc.WriteLogged(t, `{"duration": 3.0, "fingerprint": [1, 2, 3, 4]}`, "", 0)
+	var asked []string
+	aid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		asked = append(asked, r.PostFormValue("fingerprint"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","results":[]}`))
+	}))
+	t.Cleanup(aid.Close)
+	cfg := enrichTestConfig(enrichMBMock(t).URL)
+	cfg.AcoustIDKey, cfg.AcoustIDBaseURL = "k", aid.URL
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
+		DBPath:     filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Enrichment: cfg,
+		FpcalcPath: bin,
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	scanLib(t, ctx, lib)
+
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	want, err := fingerprint.EncodeCompressed([]uint32{1, 2, 3, 4}, fingerprint.ChromaprintAlgorithmDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || asked[0] != want || len(testfpcalc.Runs(t, runs)) != 1 {
+		t.Fatalf("AcoustID asked %q after %d fpcalc runs, want the stand-in's fingerprint from one run",
+			asked, len(testfpcalc.Runs(t, runs)))
+	}
+	res, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{})
+	if err != nil || res.Result.Analyzed != 1 || res.Result.FingerprintFallbacks != 0 {
+		t.Fatalf("analyze = %+v (err %v), want the file fingerprinted by the stand-in", res, err)
+	}
+	if r := testfpcalc.Runs(t, runs); len(r) != 2 || !strings.HasSuffix(r[1], filepath.Join(root, "song.mp3")) {
+		t.Errorf("fpcalc runs = %q, want the analyze pass's run of song.mp3 after enrich's", r)
+	}
+	rep, err := lib.Doctor(ctx)
+	if err != nil || rep.FpcalcPath != bin || rep.FpcalcError != "" {
+		t.Errorf("doctor = %+v (err %v), want the configured fpcalc named", rep, err)
+	}
+}
+
+// TestABrokenFpcalcPathBlocksOnlyAnalyze: a configured fpcalc that is not there leaves the
+// catalog usable: it opens, reads and reports, and doctor names the problem, while the
+// analyze pass refuses, since without that fpcalc its fingerprints would change algorithm.
+func TestABrokenFpcalcPathBlocksOnlyAnalyze(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	missing := filepath.Join(t.TempDir(), "no", "fpcalc")
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), FpcalcPath: missing})
+	if err != nil {
+		t.Fatalf("open = %v, want the catalog open", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Query(ctx, query.New(query.EntityItems).Build(), ""); err != nil {
+		t.Errorf("query = %v, want it to work", err)
+	}
+	if _, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{}); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), missing) {
+		t.Errorf("analyze = %v, want CodeInvalid naming %s", err, missing)
+	}
+	if _, err := lib.StartAnalyze(ctx, waxbin.AnalyzeOptions{}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("start analyze = %v, want CodeInvalid", err)
+	}
+	rep, err := lib.Doctor(ctx)
+	if err != nil || rep.FpcalcPath != "" || !strings.Contains(rep.FpcalcError, missing) {
+		t.Errorf("doctor = %+v (err %v), want no fpcalc in use and the problem named", rep, err)
 	}
 }

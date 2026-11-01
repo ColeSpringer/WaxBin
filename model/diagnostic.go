@@ -179,21 +179,30 @@ func (o DiagnosticOrigin) Valid() bool {
 // AuditSeverity because the audit's sort already ranks that vocabulary. TagKey
 // is the canonical tag key a key-specific diagnostic concerns, or "" when it
 // names none.
+//
+// Source and Provider name who set the value an owed row (DiagTagWriteOwed) carries,
+// from the edit's attribution, the last edit of the key winning; every other row names
+// none. A clear drops the value's provenance row, so the owed row is then the only
+// record of who cleared it. ItemPID, filled on a read, is the item the file backs, or
+// empty when it backs several (a rip, a shared file) or none.
 type FileDiagnostic struct {
 	FilePID     PID
 	DisplayPath string
+	ItemPID     PID
 	Origin      DiagnosticOrigin
 	Code        DiagnosticCode
 	Severity    AuditSeverity
 	TagKey      string
 	Detail      string
 	SeenAt      int64
+	Source      ProvenanceSource
+	Provider    string
 }
 
 // DiagnosticFilter selects a slice of the persisted per-file diagnostics. The
 // zero filter selects everything, which is what the audit reads. A zero
-// dimension means "any"; a non-empty Origin, Code, or Severity outside its
-// vocabulary is CodeInvalid (a typo fails closed instead of matching nothing),
+// dimension means "any"; a non-empty Origin, Code, Severity, Source, or ExcludeSource
+// outside its vocabulary is CodeInvalid (a typo fails closed instead of matching nothing),
 // and an unknown LibraryPID, FilePID, or ItemPID is CodeNotFound. A non-positive
 // Limit is uncapped and a non-positive Offset skips nothing: both are treated as
 // unset and never reach the SQL, so a negative value cannot produce a surprising
@@ -219,8 +228,16 @@ type DiagnosticFilter struct {
 	// FilePID-only API would leave the consumer resolving the parts and fanning out
 	// one call per part.
 	ItemPID PID
-	Limit   int
-	Offset  int
+	// Source keeps the rows whose value that setter set, and ExcludeSource leaves them
+	// out, keeping every other row, those that name no setter included. Either outside
+	// the provenance vocabulary is CodeInvalid.
+	Source        ProvenanceSource
+	ExcludeSource ProvenanceSource
+	// OmitItemPID leaves each row's ItemPID empty, sparing the per-row item lookup for a
+	// reader that does not use it, as the audit's full read does not.
+	OmitItemPID bool
+	Limit       int
+	Offset      int
 }
 
 // DiagnosticCount is one bucket of the grouped diagnostic summary: how many

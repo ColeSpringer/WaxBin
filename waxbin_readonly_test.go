@@ -116,7 +116,7 @@ func TestReadOnlyLibraryRefusesTheCustomTagWriteBack(t *testing.T) {
 		return fm.Tags.Custom["MOOD"]
 	}
 
-	_, _, err := lib.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
+	_, _, err := setItemTag(ctx, lib, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
 	var wb *waxbin.WriteBackError
 	if !errors.As(err, &wb) || len(wb.Failures) != 1 || !strings.Contains(wb.Failures[0].Reason, "read-only library") {
 		t.Fatalf("set in a read-only library = %v, want the file refused as read-only", err)
@@ -133,7 +133,7 @@ func TestReadOnlyLibraryRefusesTheCustomTagWriteBack(t *testing.T) {
 	}
 
 	setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, root), false)
-	if _, _, err := lib.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true, Force: true}); err != nil {
+	if _, _, err := setItemTag(ctx, lib, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true, Force: true}); err != nil {
 		t.Fatalf("set once writable: %v", err)
 	}
 	if got := mood(); !slices.Equal(got, []string{"calm"}) {

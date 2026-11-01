@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testfpcalc"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/port"
 )
@@ -134,4 +135,37 @@ func TestDoctorPrintsTheBaselineStamp(t *testing.T) {
 	if err != nil || !strings.Contains(out, `"BaselineStamp": "`+want+`"`) {
 		t.Fatalf("doctor JSON = %s (err %v), want BaselineStamp %s", out, err, want)
 	}
+}
+
+// TestDoctorNamesTheFpcalcInUse: WAXBIN_FPCALC names the fpcalc the catalog runs, which
+// doctor prints in text and JSON, and one that is not there is reported, not fatal.
+func TestDoctorNamesTheFpcalcInUse(t *testing.T) {
+	t.Parallel()
+	db, root, _ := creditCLIFixture(t)
+	bin := testfpcalc.Write(t, "", "", 0)
+	text, err := runCLITextEnv(t, envOf("WAXBIN_FPCALC", bin), db, root, "doctor")
+	if err != nil || !strings.Contains(text, "fpcalc:         "+bin+"\n") {
+		t.Fatalf("doctor printed %q (err %v), want the configured fpcalc", text, err)
+	}
+	out, err := runCLIJSONEnv(t, envOf("WAXBIN_FPCALC", bin), db, root, "doctor")
+	if err != nil || !strings.Contains(out, `"FpcalcPath": "`+bin+`"`) {
+		t.Fatalf("doctor JSON = %s (err %v), want FpcalcPath %s", out, err, bin)
+	}
+	missing := filepath.Join(t.TempDir(), "fpcalc")
+	text, err = runCLITextEnv(t, envOf("WAXBIN_FPCALC", missing), db, root, "doctor")
+	if err != nil || !strings.Contains(text, "fpcalc:         not usable: ") || !strings.Contains(text, missing) {
+		t.Errorf("doctor with a missing fpcalc printed %q (err %v), want it to report the path as not usable", text, err)
+	}
+}
+
+// runCLITextEnv is runCLIText with the command reading its WAXBIN_ settings from env.
+func runCLITextEnv(t *testing.T, env func(string) string, db, root string, args ...string) (string, error) {
+	t.Helper()
+	cmd := newRootCmd(&globals{getenv: env})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(append([]string{"--db", db, "--root", root + ":managed:waxbin-native"}, args...))
+	err := cmd.ExecuteContext(context.Background())
+	return stdout.String(), err
 }

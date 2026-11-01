@@ -147,7 +147,7 @@ func (s *Store) DetachItemFromMBIDAlbum(ctx context.Context, itemPID model.PID) 
 
 		// The file still names the album it left until a write-back strips both ids.
 		if err := noteOwedItemTx(ctx, tx, itemID, kind,
-			[]string{model.OwedAlbumMBID, model.OwedReleaseGroupMBID}); err != nil {
+			[]string{model.OwedAlbumMBID, model.OwedReleaseGroupMBID}, model.Attribution{Source: model.SourceUser}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 

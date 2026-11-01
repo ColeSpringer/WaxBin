@@ -228,18 +228,30 @@ func TestAKindChangeCheckpointsOnItsCadence(t *testing.T) {
 	}
 }
 
-// TestAKindChangeWritesNoCheckpointPerFile: at the default cadence a short change writes its
-// progress once at its end, and otherwise only as each second passes, never once a file.
+// TestAKindChangeWritesNoCheckpointPerFile: at the default cadence a change writes its
+// progress at its end, and before that only once a second has passed since its last write,
+// never once a file: a run whose files take under a second writes once. A run starved to
+// over a second a file may write after each, which is the cadence, so the test reads the
+// spacing rather than counting.
 func TestAKindChangeWritesNoCheckpointPerFile(t *testing.T) {
 	t.Parallel()
 	lib, _, _, pids := kindChapters(t, 6, "")
 	st := watchJobs(lib)
+	var at []time.Time
+	st.checkpoint = func(int) { at = append(at, time.Now()) }
 	began := time.Now()
 	if _, err := lib.SetItemKind(context.Background(), pids, model.KindBook, KindOptions{}); err != nil {
 		t.Fatalf("set kind: %v", err)
 	}
-	if n, most := len(st.saved), 1+int(time.Since(began)/time.Second); n == 0 || n > most || n >= len(pids) {
-		t.Errorf("checkpoints = %d for %d files, want one at the end and at most one a second", n, len(pids))
+	if len(at) == 0 {
+		t.Fatal("no checkpoint, want one at the end")
+	}
+	prev := began
+	for i, c := range at[:len(at)-1] {
+		if gap := c.Sub(prev); gap < time.Second {
+			t.Errorf("checkpoint %d of %d came %v after the one before, want a second at least", i+1, len(at), gap)
+		}
+		prev = c
 	}
 }
 

@@ -31,13 +31,16 @@ import (
 // that loses what the caller asked for, or a result field an older client would
 // read differently. An added method, result field or error field rides on the
 // current version, since an older server refuses a method it does not know
-// (ReasonUnknownMethod) and an older peer ignores a field it does not read. On 23 an error carries its reason,
-// an added field, and fetch_chapters is an added method. On 24 playlist_create and
-// playlist_import_m3u8 carry a description an older server would drop, and
-// playlist_set_description is an added method. On 25 the KindReport a run_set_kind job
-// records maps each created item to the item it came from, where an older client reads a
-// list, and carries the targets and how many it read. On 26 run_scan carries reResolve,
-// which an older server would drop and scan without, and run_unfold is an added method.
+// (ReasonUnknownMethod) and an older peer ignores a field it does not read. On 23 an
+// error carries its reason, an added field, and fetch_chapters is an added method. On 24
+// playlist_create and playlist_import_m3u8 carry a description an older server would
+// drop, and playlist_set_description is an added method. On 25 the KindReport a
+// run_set_kind job records maps each created item to the item it came from, where an
+// older client reads a list, and carries the targets and how many it read. On 26 run_scan
+// carries reResolve, which an older server would drop and scan without, and run_unfold
+// and set_tags are added methods, set_tags replacing set_tag (a client asking for set_tag
+// meets an unknown method); a write-back failure naming the key it is about, or a value
+// lost, is an added field.
 const ProtocolVersion = 26
 
 // ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
@@ -69,7 +72,7 @@ const (
 	MethodRenameEntity     = "rename_entity"
 	MethodSetAcquisition   = "set_acquisition"
 	MethodClearAcquisition = "clear_acquisition"
-	MethodSetTag           = "set_tag"
+	MethodSetTags          = "set_tags"
 	MethodLock             = "lock"
 	MethodUnlock           = "unlock"
 	MethodCreateUser       = "create_user"
@@ -207,12 +210,15 @@ type EditFieldsParams struct {
 	Force     bool              `json:"force"`
 }
 
-// WriteBackFailure names one backing file whose on-disk tag write-back did not
-// apply during a proxied edit. It mirrors the facade's write-back failure so the
-// CLI can rebuild the typed error the local path produces.
+// WriteBackFailure names one backing file whose on-disk tag write-back did not fully
+// apply during a proxied edit: Lost when it was written but did not keep a value as given,
+// Key naming the tag when the failure is about one. It mirrors the facade's write-back
+// failure so the CLI can rebuild the typed error the local path produces.
 type WriteBackFailure struct {
 	FilePID string `json:"filePid,omitempty"`
 	Path    string `json:"path,omitempty"`
+	Key     string `json:"key,omitempty"`
+	Lost    bool   `json:"lost,omitempty"`
 	Reason  string `json:"reason"`
 }
 
@@ -428,28 +434,41 @@ type SetArtLockResult struct {
 	StillLocked bool `json:"stillLocked"`
 }
 
-// SetTagParams is the set_tag request payload: a custom tag's ordered values on an
-// item. Empty Values clears the tag. Source, Provider and Lock carry the same meaning as
-// on EditFieldsParams. With WriteBack the tag is also written into the item's files.
-type SetTagParams struct {
-	ItemPID   string   `json:"itemPid"`
-	Key       string   `json:"key"`
-	Values    []string `json:"values,omitempty"`
-	Source    string   `json:"source,omitempty"`
-	Provider  string   `json:"provider,omitempty"`
-	Lock      string   `json:"lock"`
-	Force     bool     `json:"force"`
-	WriteBack bool     `json:"writeBack"`
+// SetTagsParams is the set_tags request payload: several custom tags' ordered values on
+// an item, set in one catalog write and, with WriteBack, one rewrite of each file. An
+// edit with no values clears its tag. Source, Provider and Lock carry the same meaning as
+// on EditFieldsParams.
+type SetTagsParams struct {
+	ItemPID   string    `json:"itemPid"`
+	Edits     []TagEdit `json:"edits"`
+	Source    string    `json:"source,omitempty"`
+	Provider  string    `json:"provider,omitempty"`
+	Lock      string    `json:"lock"`
+	Force     bool      `json:"force"`
+	WriteBack bool      `json:"writeBack"`
 }
 
-// SetTagResult is the set_tag response payload: the canonical key actually stored (the
-// normalized uppercase form) and the number of values stored after trimming (0 = the
-// tag was cleared). A committed tag whose file write-back partially failed returns the
-// failed files here rather than as a transport error, matching edit_fields.
-type SetTagResult struct {
-	Key               string             `json:"key"`
-	Stored            int                `json:"stored"`
+// TagEdit is one custom tag's new values in a set_tags request.
+type TagEdit struct {
+	Key    string   `json:"key"`
+	Values []string `json:"values,omitempty"`
+}
+
+// SetTagsResult is the set_tags response payload: each key as stored, canonical and in
+// the order given, with its value count (0 = cleared), and the files the write-back
+// rewrote. A committed edit whose write-back partly failed returns the failures here,
+// matching edit_fields; a failure names the key it is about, and none when the whole file
+// failed.
+type SetTagsResult struct {
+	Tags              []StoredTag        `json:"tags"`
+	Written           int                `json:"written"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// StoredTag is one key of a SetTagsResult.
+type StoredTag struct {
+	Key    string `json:"key"`
+	Stored int    `json:"stored"`
 }
 
 // EditEntityParams is the edit_entity request payload: curation edits to one shared

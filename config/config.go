@@ -128,6 +128,10 @@ type Config struct {
 	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
 	Enrichment EnrichConfig `json:"enrichment,omitempty"`
 
+	// FpcalcPath names the fpcalc binary (Chromaprint) when it is not on PATH; empty looks
+	// it up there.
+	FpcalcPath string `json:"fpcalc_path,omitempty"`
+
 	// Storage tuning (applied as SQLite pragmas by store/sqlite).
 	BusyTimeoutMS int   `json:"busy_timeout_ms"`
 	CacheSizeKB   int   `json:"cache_size_kb"` // SQLite cache_size, in KiB
@@ -182,6 +186,9 @@ func Load(ov Overrides, getenv func(string) string) (*Config, error) {
 	}
 	if v := getenv("WAXBIN_ACOUSTID_KEY"); v != "" {
 		cfg.Enrichment.AcoustIDKey = v
+	}
+	if v := getenv("WAXBIN_FPCALC"); v != "" {
+		cfg.FpcalcPath = v
 	}
 
 	// flag overrides (highest precedence)

@@ -34,7 +34,8 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"gracefully offline. The MusicBrainz passes and the key-free built-ins need a " +
 			"contact (config enrichment.contact or WAXBIN_ENRICH_CONTACT); an injected " +
 			"provider's own passes run without one. The optional AcoustID fallback " +
-			"additionally needs an API key and fpcalc. An embedder can inject further " +
+			"additionally needs an API key, and asks by a file's Chromaprint analysis or, for a " +
+			"file analyzed without fpcalc, by fpcalc's. An embedder can inject further " +
 			"providers via Options.\n\n" +
 			"An injected provider can also fill role-tagged art (back, disc, booklet, " +
 			"background) and imagery at the artist rung, which no built-in provider answers, " +

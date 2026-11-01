@@ -2,10 +2,13 @@ package sqlite_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testimage"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 func owedFields(t *testing.T, st *sqlite.Store, pid model.PID) map[string]bool {
@@ -237,6 +240,291 @@ func TestOwedEntityRowsFollowACarriedAlbum(t *testing.T) {
 		}
 		if got := owedFields(t, st, r.ItemPID); !got["album.label"] {
 			t.Errorf("into a curated album %v: owed after the move = %v, want album.label kept", intoCurated, got)
+		}
+	}
+}
+
+// setTag sets one custom tag through SetItemTags.
+func setTag(ctx context.Context, st *sqlite.Store, pid model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
+	res, err := st.SetItemTags(ctx, pid, []model.TagEdit{{Key: key, Values: values}}, attr, lock, force)
+	if err != nil {
+		return "", 0, err
+	}
+	return res[0].Key, res[0].Stored, nil
+}
+
+// owedRows returns an item's owed rows by key.
+func owedRows(t *testing.T, st *sqlite.Store, pid model.PID) map[string]model.FileDiagnostic {
+	t.Helper()
+	diags, err := st.FileDiagnostics(context.Background(), model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteOwed})
+	if err != nil {
+		t.Fatalf("owed rows: %v", err)
+	}
+	out := map[string]model.FileDiagnostic{}
+	for _, d := range diags {
+		out[d.TagKey] = d
+	}
+	return out
+}
+
+// TestOwedRowsCarryTheirSetter: an owed row names who set the value it carries, from the
+// edit's attribution, and a later edit of the same key takes the row over. The row also
+// names the item its file backs.
+func TestOwedRowsCarryTheirSetter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("put track: %v", err)
+	}
+	pid := res.ItemPID
+	for _, e := range []struct {
+		field, value string
+		attr         model.Attribution
+	}{
+		{"genre", "Jazz", model.Attribution{Source: model.SourceUser}},
+		{"title", "Song (Live)", model.Attribution{Source: model.SourceNormalize}},
+		{"year", "1999", model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
+	} {
+		if err := st.EditItemField(ctx, pid, e.field, e.value, e.attr, model.LockUnchanged, false); err != nil {
+			t.Fatalf("edit %s: %v", e.field, err)
+		}
+	}
+	want := map[string][2]string{
+		"genre": {"user", ""},
+		"title": {"normalize", ""},
+		"year":  {"enrichment", "musicbrainz"},
+	}
+	rows := owedRows(t, st, pid)
+	if len(rows) != len(want) {
+		t.Fatalf("owed rows = %v, want %v", rows, want)
+	}
+	for key, w := range want {
+		d := rows[key]
+		if string(d.Source) != w[0] || d.Provider != w[1] {
+			t.Errorf("%s setter = %q/%q, want %q/%q", key, d.Source, d.Provider, w[0], w[1])
+		}
+		if d.ItemPID != pid {
+			t.Errorf("%s item = %q, want %q", key, d.ItemPID, pid)
+		}
+	}
+	if err := st.EditItemField(ctx, pid, "genre", "Blues",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "discogs"}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit genre again: %v", err)
+	}
+	if d := owedRows(t, st, pid)["genre"]; d.Source != model.SourceEnrichment || d.Provider != "discogs" {
+		t.Errorf("genre setter after a second edit = %q/%q, want enrichment/discogs", d.Source, d.Provider)
+	}
+}
+
+// TestEveryOwedWriteNamesItsSetter: the credit, entity, cover, custom tag and acquisition
+// writes name their setter on the rows they owe, and a write-back that leaves a locked
+// album_sort owed names whoever set that lock's value.
+func TestEveryOwedWriteNamesItsSetter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("put track: %v", err)
+	}
+	pid := res.ItemPID
+	views, err := st.ItemsByPIDs(ctx, []model.PID{pid})
+	if err != nil || len(views) != 1 {
+		t.Fatalf("item view: %v (%d)", err, len(views))
+	}
+	album := views[0].AlbumPID
+	mb := model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}
+	if _, _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Composer"}, mb, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("credits: %v", err)
+	}
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, album, map[string]string{"label": "Label"},
+		model.Attribution{Source: model.SourceNormalize}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("album label: %v", err)
+	}
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testimage.TexturedPNG(t, 8, 8, 0), "",
+		model.Attribution{Source: model.SourceGenerated}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("art: %v", err)
+	}
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"calm"},
+		model.Attribution{Source: model.SourceEnrichment, Provider: "lastfm"}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	if err := st.SetAcquisition(ctx, pid, model.AcquisitionInput{SourceType: model.SourceManual}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("acquisition: %v", err)
+	}
+	if err := st.EditItemField(ctx, pid, "album_sort", "Album, The",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "discogs"}, model.LockOn, false); err != nil {
+		t.Fatalf("album_sort: %v", err)
+	}
+	if err := st.SettleTagWriteOwed(ctx, res.FilePID, []string{"album_sort"}); err != nil {
+		t.Fatalf("settle album_sort: %v", err)
+	}
+	if err := st.FollowAlbumSortWrite(ctx, album, []model.PID{res.FilePID}, "Album"); err != nil {
+		t.Fatalf("follow album_sort: %v", err)
+	}
+	want := map[string][2]string{
+		model.CreditField(model.RoleComposer): {"enrichment", "musicbrainz"},
+		"album.label":                         {"normalize", ""},
+		model.OwedArt:                         {"generated", ""},
+		"tag.MOOD":                            {"enrichment", "lastfm"},
+		model.OwedAcquisition:                 {"user", ""},
+		"album_sort":                          {"enrichment", "discogs"},
+	}
+	rows := owedRows(t, st, pid)
+	for key, w := range want {
+		d, ok := rows[key]
+		if !ok {
+			t.Errorf("no owed row for %s (rows %v)", key, rows)
+			continue
+		}
+		if string(d.Source) != w[0] || d.Provider != w[1] {
+			t.Errorf("%s setter = %q/%q, want %q/%q", key, d.Source, d.Provider, w[0], w[1])
+		}
+	}
+}
+
+// TestDiagnosticsFilterBySource: Source keeps the rows one setter wrote, ExcludeSource
+// leaves its rows out and keeps everything else, rows naming no setter included, and an
+// unknown source is refused rather than matching nothing.
+func TestDiagnosticsFilterBySource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("put track: %v", err)
+	}
+	pid := res.ItemPID
+	if err := st.EditItemField(ctx, pid, "genre", "Jazz", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("user edit: %v", err)
+	}
+	if err := st.EditItemField(ctx, pid, "title", "Song (Live)", model.Attribution{Source: model.SourceNormalize}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("normalize edit: %v", err)
+	}
+	if err := st.PutFileDiagnostics(ctx, res.FilePID, model.OriginScan, []model.FileDiagnostic{
+		{Code: model.DiagSortNameFallback, Severity: model.SeverityInfo, Detail: "title from the file name"},
+	}); err != nil {
+		t.Fatalf("scan row: %v", err)
+	}
+	keys := func(f model.DiagnosticFilter) []string {
+		t.Helper()
+		ds, err := st.FileDiagnostics(ctx, f)
+		if err != nil {
+			t.Fatalf("diagnostics %+v: %v", f, err)
+		}
+		var out []string
+		for _, d := range ds {
+			out = append(out, string(d.Code)+":"+d.TagKey)
+		}
+		return out
+	}
+	if got := keys(model.DiagnosticFilter{ExcludeSource: model.SourceNormalize}); !slices.Equal(got,
+		[]string{"tag_write_owed:genre", "sort_name_fallback:"}) {
+		t.Errorf("excluding normalize = %v, want the scan row and the user's genre", got)
+	}
+	if got := keys(model.DiagnosticFilter{Source: model.SourceNormalize}); !slices.Equal(got, []string{"tag_write_owed:title"}) {
+		t.Errorf("normalize alone = %v, want its title", got)
+	}
+	sum, err := st.DiagnosticSummary(ctx, model.DiagnosticFilter{Code: model.DiagTagWriteOwed, ExcludeSource: model.SourceNormalize})
+	if err != nil || len(sum) != 1 || sum[0].Count != 1 {
+		t.Errorf("summary excluding normalize = %+v (err %v), want one owed row", sum, err)
+	}
+	for _, f := range []model.DiagnosticFilter{{Source: "robot"}, {ExcludeSource: "robot"}} {
+		if _, err := st.FileDiagnostics(ctx, f); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("filter %+v = %v, want CodeInvalid", f, err)
+		}
+	}
+}
+
+// TestAClearedTagKeepsItsSetterOnTheOwedRow: a clear drops the tag's provenance row, so the
+// owed row it leaves is the only record of who cleared it.
+func TestAClearedTagKeepsItsSetterOnTheOwedRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("put track: %v", err)
+	}
+	pid := res.ItemPID
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"calm"}, model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if _, _, err := setTag(ctx, st, pid, "MOOD", nil, model.Attribution{Source: model.SourceNormalize}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	prov, err := st.FieldProvenance(ctx, pid)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	for _, p := range prov {
+		if p.Field == "tag.MOOD" {
+			t.Fatalf("the clear left a provenance row: %+v", p)
+		}
+	}
+	if d := owedRows(t, st, pid)["tag.MOOD"]; d.Source != model.SourceNormalize {
+		t.Errorf("owed tag.MOOD setter = %q, want normalize (the clear's)", d.Source)
+	}
+}
+
+// TestDiagnosticsNameTheirItem: a row names the item its file backs, and none on a file
+// several items share, such as a rip's.
+func TestDiagnosticsNameTheirItem(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("put track: %v", err)
+	}
+	rip, err := st.PutScannedVirtualTracks(ctx,
+		vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC", 8000, [][2]int64{{0, 300}, {300, 600}}))
+	if err != nil {
+		t.Fatalf("put rip: %v", err)
+	}
+	row := []model.FileDiagnostic{{Code: model.DiagSortNameFallback, Severity: model.SeverityInfo}}
+	for _, f := range []model.PID{res.FilePID, rip.FilePID} {
+		if err := st.PutFileDiagnostics(ctx, f, model.OriginScan, row); err != nil {
+			t.Fatalf("diagnostic on %s: %v", f, err)
+		}
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	got := map[model.PID]model.PID{}
+	for _, d := range ds {
+		got[d.FilePID] = d.ItemPID
+	}
+	if got[res.FilePID] != res.ItemPID || got[rip.FilePID] != "" || len(got) != 2 {
+		t.Errorf("items by file = %v, want %s on the track's file and none on the rip's", got, res.ItemPID)
+	}
+}
+
+// TestDiagnosticsCanLeaveTheItemOut: a reader that does not use a row's item can ask for
+// the rows without it, sparing the per-row lookup.
+func TestDiagnosticsCanLeaveTheItemOut(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("put track: %v", err)
+	}
+	if err := st.PutFileDiagnostics(ctx, res.FilePID, model.OriginScan, []model.FileDiagnostic{
+		{Code: model.DiagSortNameFallback, Severity: model.SeverityInfo},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, omit := range []bool{false, true} {
+		ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{OmitItemPID: omit})
+		if err != nil || len(ds) != 1 {
+			t.Fatalf("omit %v: rows = %+v (err %v)", omit, ds, err)
+		}
+		if want := map[bool]model.PID{false: res.ItemPID, true: ""}[omit]; ds[0].ItemPID != want {
+			t.Errorf("omit %v: item = %q, want %q", omit, ds[0].ItemPID, want)
 		}
 	}
 }

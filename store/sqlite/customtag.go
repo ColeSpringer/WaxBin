@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -16,105 +17,140 @@ import (
 // under a namespaced "tag.<KEY>" field in field_provenance (Category B), so a scan does
 // not re-derive a curated tag from the file.
 
-// SetItemTag replaces one custom tag's ordered values on an item, attributed to attr
-// (an unstated origin is a user edit) and recording the caller's lock instruction on
-// "tag.<KEY>" so a scan does not re-derive it from the file. Passing no values (or only
-// whitespace) clears the tag and drops any lock regardless of lock, so a
-// later scan re-derives it: a clear is a full forget, never a locked-empty tag. The key
-// is normalized to canonical uppercase, so KEY and key are one tag. A reserved key (one
-// WaxBin owns through the scalar, credit, or identifier APIs) is rejected with
-// CodeInvalid so the caller reaches for the right surface instead, and so is a key the
-// scanner reads into a book field (model.BookOwnedTagField) when the item is a book,
-// since a custom value under it would reach the file and shadow the field. A locked tag is
-// refused with CodeLocked unless force is set. It returns the canonical key stored and
-// the number of values stored after trimming (0 means the tag was cleared), so a caller
-// does not report a whitespace-only clear as a set.
+// SetItemTags replaces several custom tags' ordered values on an item in one transaction
+// with one item delta, each attributed to attr (an unstated origin is a user edit) and
+// recording the caller's lock instruction on its "tag.<KEY>" field so a scan does not
+// re-derive it from the file. It returns each key as stored, in the order given.
 //
-// A change to the values is owed to the item's files (model.DiagTagWriteOwed) until a
+// An edit with no values (or only whitespace) clears its tag and drops any lock regardless
+// of lock, so a later scan re-derives it: a clear is a full forget, never a locked-empty
+// tag. A key is normalized to canonical uppercase, so KEY and key are one tag, and a key
+// given twice is CodeInvalid. A reserved key (one WaxBin owns through the scalar, credit,
+// or identifier APIs) is rejected with CodeInvalid so the caller reaches for the right
+// surface instead, and so is a key the scanner reads into a book field
+// (model.BookOwnedTagField) when the item is a book, since a custom value under it would
+// reach the file and shadow the field. A locked tag is refused with CodeLocked unless
+// force is set. Any refusal refuses the whole call, before anything changes.
+//
+// A change to a key's values is owed to the item's files (model.DiagTagWriteOwed) until a
 // write-back lands it, except under a key a tag write would land on another field.
-func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
-	const op = "store.SetItemTag"
-	canon, ok := model.CanonicalTagKey(key)
-	if !ok {
-		return "", 0, waxerr.New(waxerr.CodeInvalid, op, "invalid tag key: "+key)
+func (s *Store) SetItemTags(ctx context.Context, itemPID model.PID, edits []model.TagEdit, attr model.Attribution, lock model.LockChange, force bool) ([]model.StoredTag, error) {
+	const op = "store.SetItemTags"
+	if len(edits) == 0 {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no tags to set")
 	}
-	if model.IsReservedTagKey(canon) {
-		return "", 0, waxerr.New(waxerr.CodeInvalid, op,
-			"tag key "+canon+" is reserved; set it through the scalar, credit, or entity edit API")
+	type tagWrite struct {
+		key   string
+		clean []string
+	}
+	writes := make([]tagWrite, len(edits))
+	seen := make(map[string]bool, len(edits))
+	for i, e := range edits {
+		canon, ok := model.CanonicalTagKey(e.Key)
+		if !ok {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid tag key: "+e.Key)
+		}
+		if model.IsReservedTagKey(canon) {
+			return nil, waxerr.New(waxerr.CodeInvalid, op,
+				"tag key "+canon+" is reserved; set it through the scalar, credit, or entity edit API")
+		}
+		if seen[canon] {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "tag key "+canon+" is given twice")
+		}
+		seen[canon] = true
+		// An all-empty (or nil) list clears the tag.
+		clean := model.CleanTagValues(e.Values)
+		for _, v := range clean {
+			// No tag format holds these, and the tag writer refuses every key beside one.
+			if strings.IndexByte(v, 0) >= 0 || !utf8.ValidString(v) {
+				return nil, waxerr.New(waxerr.CodeInvalid, op,
+					"tag "+canon+" has a value with a NUL byte or invalid UTF-8, which no file can hold")
+			}
+		}
+		writes[i] = tagWrite{key: canon, clean: clean}
 	}
 	attr, err := checkFieldAttribution(attr, op)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 	if err := checkLockChange(lock, op); err != nil {
-		return "", 0, err
+		return nil, err
 	}
-	// An all-empty (or nil) list clears the tag.
-	clean := model.CleanTagValues(values)
-	field := model.TagLockField(canon)
 
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
 		}
-		if !curatableFieldForKind(kind, field) {
-			return waxerr.New(waxerr.CodeInvalid, op, "custom tags are not editable on a "+kind+" item")
-		}
-		if kind == string(model.KindBook) {
-			if f, ok := model.BookOwnedTagField(canon); ok {
-				return waxerr.New(waxerr.CodeInvalid, op,
-					"tag key "+canon+" is the "+f+" field on a book; set it through the scalar edit API")
+		for _, w := range writes {
+			field := model.TagLockField(w.key)
+			if !curatableFieldForKind(kind, field) {
+				return waxerr.New(waxerr.CodeInvalid, op, "custom tags are not editable on a "+kind+" item")
 			}
-		}
-		if !force {
+			if kind == string(model.KindBook) {
+				if f, ok := model.BookOwnedTagField(w.key); ok {
+					return waxerr.New(waxerr.CodeInvalid, op,
+						"tag key "+w.key+" is the "+f+" field on a book; set it through the scalar edit API")
+				}
+			}
+			if force {
+				continue
+			}
 			locked, err := fieldLockedTx(ctx, tx, itemID, field)
 			if err != nil {
 				return err
 			}
 			if locked {
-				return waxerr.New(waxerr.CodeLocked, op, "tag "+canon+" is locked (use force to override)")
+				return waxerr.New(waxerr.CodeLocked, op, "tag "+w.key+" is locked (use force to override)")
 			}
 		}
-		before, err := itemTagValuesTx(ctx, tx, itemID, canon)
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if err := writeItemTagTx(ctx, tx, itemID, canon, clean); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if !model.IsRetargetedTagKey(canon) && !slices.Equal(before, clean) {
-			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{field}); err != nil {
+		now := nowNS()
+		for _, w := range writes {
+			field := model.TagLockField(w.key)
+			before, err := itemTagValuesTx(ctx, tx, itemID, w.key)
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-		}
-		if len(clean) == 0 {
-			// A clear forgets the tag entirely, including any lock, whatever lock instruction
-			// came with it, so a scan re-derives the file's value next time. This keeps the
-			// default lock from turning an accidental clear (say a whitespace-only value) into
-			// a locked-empty tag that then blocks a re-set, and it is why this is the one
-			// curation write LockUnchanged does not govern. Deliberately suppressing a file
-			// tag is an explicit `lock tag.<KEY>`.
-			if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id=? AND field=?", itemID, field); err != nil {
+			if err := writeItemTagTx(ctx, tx, itemID, w.key, w.clean); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-		} else {
-			// Record the tag's provenance, whose value is the joined display list, under the
+			if !model.IsRetargetedTagKey(w.key) && !slices.Equal(before, w.clean) {
+				if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{field}, attr); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+			if len(w.clean) == 0 {
+				// A clear forgets the tag entirely, including any lock, whatever lock
+				// instruction came with it, so a scan re-derives the file's value next time.
+				// This keeps the default lock from turning an accidental clear (say a
+				// whitespace-only value) into a locked-empty tag that then blocks a re-set,
+				// and it is why this is the one curation write LockUnchanged does not govern.
+				// Deliberately suppressing a file tag is an explicit `lock tag.<KEY>`.
+				if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id=? AND field=?", itemID, field); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				continue
+			}
+			// The tag's provenance, whose value is the joined display list, under the
 			// caller's attribution and lock instruction.
-			if err := upsertEditProvenanceTx(ctx, tx, itemID, field, attr, strings.Join(clean, "; "), lock, nowNS()); err != nil {
+			if err := upsertEditProvenanceTx(ctx, tx, itemID, field, attr, strings.Join(w.clean, "; "), lock, now); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// Rebuild the item's search row so the custom tag is immediately searchable.
+		// Rebuild the item's search row so the custom tags are immediately searchable.
 		if err := rebuildItemSearchFTSTx(ctx, tx, itemID, kind); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
-	return canon, len(clean), nil
+	out := make([]model.StoredTag, len(writes))
+	for i, w := range writes {
+		out[i] = model.StoredTag{Key: w.key, Stored: len(w.clean)}
+	}
+	return out, nil
 }
 
 // itemTagValuesTx reads one custom tag's stored values in order, nil when the item has none.
@@ -227,14 +263,14 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 			desired[canon] = clean
 		}
 	}
-	// A locked key keeps its values unless it has since become reserved: SetItemTag
+	// A locked key keeps its values unless it has since become reserved: SetItemTags
 	// rejects a reserved key, so re-adding it here would store a tag nothing could edit.
 	// Dropping it is what makes newly reserving a key take effect.
 	var stale []string
 	for k, row := range tagFields {
 		// A reserved key's provenance row goes whether or not it was locked.
 		// IsCuratableField refuses a reserved tag.<KEY> field, so once the values are gone
-		// neither SetItemTag nor UnlockField can reach the row and it would sit there
+		// neither SetItemTags nor UnlockField can reach the row and it would sit there
 		// unremovable except by raw SQL.
 		if model.IsReservedTagKey(k) {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id=? AND field=?",
@@ -358,7 +394,7 @@ func reservedTagProvenanceQuery(verb string) (string, []any) {
 
 // GCReservedTagProvenance deletes the "tag.<KEY>" provenance rows whose key WaxBin has
 // since reserved, returning how many went. Reserving a key makes its rows unreachable:
-// SetItemTag and UnlockField both refuse a reserved field, and syncItemTagsTx sweeps
+// SetItemTags and UnlockField both refuse a reserved field, and syncItemTagsTx sweeps
 // them on the next scan only for an item that has custom tags on either side, since its
 // fast path returns first. That fast path's one indexed probe per plain file is worth
 // keeping, so the stranded rows are reclaimed here instead, under `db verify --fix`.

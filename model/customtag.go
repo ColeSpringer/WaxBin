@@ -116,7 +116,7 @@ func RetargetedTagKeys() []string {
 // book's typed fields, each with the field it feeds. They are not reserved globally,
 // since a music release carries an ASIN or a subtitle as a plain custom tag and reserving
 // the key would drop it from every track; on a book the scalar edit owns the field, so
-// SetItemTag refuses them there. TIT3 is the ID3 subtitle frame, which the tag library
+// SetItemTags refuses them there. TIT3 is the ID3 subtitle frame, which the tag library
 // surfaces under its frame id. DESCRIPTION is reserved outright and so is absent here.
 var bookOwnedTagKeys = map[string]string{
 	"ASIN": "asin", "ISBN": "isbn", "SUBTITLE": "subtitle", "TIT3": "subtitle", "EDITION": "edition",
@@ -142,7 +142,7 @@ func BookOwnedTagKeys() []string {
 // IsReservedTagKey reports whether key (canonical uppercase) is one WaxBin owns through
 // another surface, so it may not be used as a custom tag. It is the single source of
 // truth shared by the scan-time custom-tag collector (which skips these) and the
-// SetItemTag edit (which rejects them).
+// SetItemTags edit (which rejects them).
 func IsReservedTagKey(key string) bool { return reservedTagKeys[key] }
 
 // ReservedTagKeys returns the reserved keys in sorted order, for the callers that
@@ -218,4 +218,18 @@ func TagLockField(key string) string { return "tag." + key }
 type ItemTag struct {
 	Key    string
 	Values []string
+}
+
+// TagEdit is one custom tag's new values in an edit of several (SetItemTags): Key in any
+// case, and no values (or only whitespace) clearing it.
+type TagEdit struct {
+	Key    string
+	Values []string
+}
+
+// StoredTag is how one TagEdit landed: its canonical key and the number of values it
+// holds after trimming, 0 for a clear.
+type StoredTag struct {
+	Key    string
+	Stored int
 }

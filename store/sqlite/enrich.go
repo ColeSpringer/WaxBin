@@ -253,11 +253,11 @@ func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, opts model.EnrichQ
 // drops the backs-items ghost heuristic for the explicit targets.
 func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.ReleaseGroupsNeedingEnrichment"
-	// The representative file's path and duration must come from ONE row, so a single
+	// The representative file's pid, path and duration must come from one row, so a single
 	// correlated subquery picks the file id (deterministically, lowest first) and the
 	// join reads both columns from that same file. That keeps a path from ever pairing
 	// with a duration read off a different file.
-	repJoin, repCols := "", "X'', 0"
+	repJoin, repCols := "", "'', X'', 0"
 	if includeRepFile {
 		repJoin = ` LEFT JOIN file rf ON rf.id = (
 			SELECT pf.file_id FROM item_file pf
@@ -265,7 +265,7 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 			JOIN album al ON al.id = t.album_id
 			WHERE al.release_group_id = rg.id AND pf.role = 'primary'
 			ORDER BY pf.file_id LIMIT 1)`
-		repCols = "COALESCE(rf.path, X''), COALESCE(rf.duration_ms, 0)"
+		repCols = "COALESCE(rf.pid, ''), COALESCE(rf.path, X''), COALESCE(rf.duration_ms, 0)"
 	}
 	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
 	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''), ` + repCols + `,
@@ -289,15 +289,16 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 	var out []model.EnrichTarget
 	for rows.Next() {
 		t := model.EnrichTarget{Type: model.EnrichReleaseGroupType}
-		var pid string
+		var pid, filePID string
 		var path []byte
 		var durMS int64
 		var artLocked int
-		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &path, &durMS, &artLocked,
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &filePID, &path, &durMS, &artLocked,
 			&t.GroupFrontHash, &t.HasArt, &t.NeedsGenres); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
+		t.FilePID = model.PID(filePID)
 		t.FilePath = string(path)
 		t.DurationSec = int(durMS / 1000)
 		t.ArtLocked = artLocked == 1

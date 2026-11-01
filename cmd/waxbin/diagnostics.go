@@ -11,12 +11,14 @@ import (
 
 // diagnosticFlags are the shared filter flags of the diagnostics subcommands.
 type diagnosticFlags struct {
-	origin   string
-	code     string
-	severity string
-	library  string
-	file     string
-	item     string
+	origin        string
+	code          string
+	severity      string
+	library       string
+	file          string
+	item          string
+	source        string
+	excludeSource string
 }
 
 func (df *diagnosticFlags) register(cmd *cobra.Command) {
@@ -27,6 +29,8 @@ func (df *diagnosticFlags) register(cmd *cobra.Command) {
 	f.StringVar(&df.library, "library", "", "filter to files under this library, by pid or registered root path")
 	f.StringVar(&df.file, "file", "", "filter to one file pid")
 	f.StringVar(&df.item, "item", "", "filter to every file backing this item pid (all parts of a book)")
+	f.StringVar(&df.source, "source", "", "keep the owed values this setter set: user|enrichment|normalize|organize|...")
+	f.StringVar(&df.excludeSource, "exclude-source", "", "leave out the owed values this setter set")
 }
 
 // resolvedFilter builds the filter, turning --library's pid-or-root-path into a pid so
@@ -38,6 +42,9 @@ func (df *diagnosticFlags) resolvedFilter(ctx context.Context, lister libraryLis
 		Severity: model.AuditSeverity(df.severity),
 		FilePID:  model.PID(df.file),
 		ItemPID:  model.PID(df.item),
+
+		Source:        model.ProvenanceSource(df.source),
+		ExcludeSource: model.ProvenanceSource(df.excludeSource),
 	}
 	if df.library == "" {
 		return f, nil
@@ -60,7 +67,8 @@ func newDiagnosticsCmd(g *globals) *cobra.Command {
 			"values not yet written to the file (tag_write_owed, one row per value), names filled from " +
 			"sort tags or file names, damaged audio, files fpcalc could not fingerprint, copies and " +
 			"other encodings attached to an item (duplicate_copy, alternate_encoding), and the rest, " +
-			"filtered by writer, code, severity, library, file, or item. " +
+			"filtered by writer, code, severity, library, file, or item. An owed value names who set it " +
+			"(user, enrichment and its provider, normalize, ...), which --source and --exclude-source filter by. " +
 			"`list` prints the rows; `summary` prints grouped counts, most severe first.",
 	}
 	cmd.AddCommand(newDiagnosticsListCmd(g), newDiagnosticsSummaryCmd(g))
@@ -105,6 +113,9 @@ func newDiagnosticsListCmd(g *globals) *cobra.Command {
 				detail := d.Detail
 				if d.TagKey != "" {
 					detail = "[" + d.TagKey + "] " + detail
+				}
+				if d.Source != "" {
+					detail += " (set by " + setterOf(d) + ")"
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", d.Severity, d.Origin, d.Code, d.DisplayPath, detail)
 			}
@@ -156,25 +167,37 @@ func newDiagnosticsSummaryCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// setterOf names who set an owed value, with the provider that supplied it if any.
+func setterOf(d model.FileDiagnostic) string {
+	if d.Provider != "" {
+		return string(d.Source) + " " + d.Provider
+	}
+	return string(d.Source)
+}
+
 // diagnosticView is the JSON shape for one persisted diagnostic row.
 type diagnosticView struct {
 	FilePID  string `json:"filePid"`
 	Path     string `json:"path"`
+	ItemPID  string `json:"itemPid,omitempty"`
 	Origin   string `json:"origin"`
 	Code     string `json:"code"`
 	Severity string `json:"severity"`
 	TagKey   string `json:"tagKey,omitempty"`
 	Detail   string `json:"detail,omitempty"`
 	SeenAt   int64  `json:"seenAt,string"` // unix ns; a string, see playStateView
+	Source   string `json:"source,omitempty"`
+	Provider string `json:"provider,omitempty"`
 }
 
 func diagnosticViews(ds []model.FileDiagnostic) []diagnosticView {
 	out := make([]diagnosticView, len(ds))
 	for i, d := range ds {
 		out[i] = diagnosticView{
-			FilePID: string(d.FilePID), Path: d.DisplayPath,
+			FilePID: string(d.FilePID), Path: d.DisplayPath, ItemPID: string(d.ItemPID),
 			Origin: string(d.Origin), Code: string(d.Code), Severity: string(d.Severity),
 			TagKey: d.TagKey, Detail: d.Detail, SeenAt: d.SeenAt,
+			Source: string(d.Source), Provider: d.Provider,
 		}
 	}
 	return out

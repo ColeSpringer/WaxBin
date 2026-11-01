@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/colespringer/waxbin/decode"
-	"github.com/colespringer/waxbin/internal/caps"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
@@ -53,11 +52,14 @@ type DoctorReport struct {
 	EnrichmentEnabled bool
 	EnrichmentPhases  []model.EnrichPhase
 
-	// Fpcalc is the sole remaining optional helper (Chromaprint for AcoustID); it is
-	// never required for core use. Decoding is pure-Go via WaxFlow, so there is no
-	// ffmpeg capability to report. Coverage below is the honest "what can this build
-	// decode" answer.
-	Fpcalc bool
+	// FpcalcPath is fpcalc, the sole remaining optional helper (Chromaprint for grouping
+	// and AcoustID), as the catalog runs it: the configured binary or the one found on
+	// PATH when the catalog opened, empty for none. It is never required for core use.
+	// FpcalcError says why a configured fpcalc is not usable, which the analyze pass
+	// refuses on. Decoding is pure-Go via WaxFlow, so there is no ffmpeg capability to
+	// report. Coverage below is the honest "what can this build decode" answer.
+	FpcalcPath  string
+	FpcalcError string
 
 	// Coverage reports, per codec, how the analyze pass decodes it in this build.
 	Coverage []decode.FormatSupport
@@ -73,13 +75,16 @@ func (r *DoctorReport) NeedsMigration() bool {
 // never migrates, and it reports the catalog's applied schema version next to
 // the build's so an operator can see when a read-write command would upgrade.
 func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
-	c := caps.Detect()
 	rep := &DoctorReport{
 		DBPath:             l.opts.DBPath,
 		BuildSchemaVersion: sqlite.SchemaVersion,
 		ReadOnly:           l.ReadOnly(),
-		Fpcalc:             c.Fpcalc,
+		FpcalcPath:         l.fpcalc,
 		Coverage:           l.Coverage(),
+	}
+
+	if l.fpcalcErr != nil {
+		rep.FpcalcError = l.fpcalcErr.Error()
 	}
 
 	version, err := l.store.CatalogVersion(ctx)

@@ -207,7 +207,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := noteOwedMembersTx(ctx, tx, entityType, entityID, owed); err != nil {
+		if err := noteOwedMembersTx(ctx, tx, entityType, entityID, owed, attr); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 

@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/colespringer/waxbin/internal/caps"
+	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/internal/testfpcalc"
 	"github.com/colespringer/waxbin/model"
@@ -120,11 +123,27 @@ func TestAcoustIDErrorResponse(t *testing.T) {
 	}
 }
 
-// TestAcoustIDKeepsAPartialFpcalcRead: a read error fpcalc reports after fingerprinting
-// the span it was asked for still makes the lookup, with that fingerprint, while one that
-// stopped well short of the file's duration makes none.
-func TestAcoustIDKeepsAPartialFpcalcRead(t *testing.T) {
-	t.Parallel()
+// rawVector is fpcalc -raw -json output reporting duration seconds and n values, with
+// the vector it holds.
+func rawVector(duration string, n int) (string, []uint32) {
+	vec := make([]uint32, n)
+	var b strings.Builder
+	b.WriteString(`{"duration": ` + duration + `, "fingerprint": [`)
+	for i := range vec {
+		vec[i] = uint32(i*2654435761) & 0x7fffffff
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(strconv.Itoa(int(vec[i])))
+	}
+	b.WriteString("]}")
+	return b.String(), vec
+}
+
+// acoustServer answers every AcoustID lookup with one release group and records each
+// fingerprint it was asked about.
+func acoustServer(t *testing.T) (*httptest.Server, *[]string) {
+	t.Helper()
 	var asked []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -133,26 +152,179 @@ func TestAcoustIDKeepsAPartialFpcalcRead(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"ok","results":[{"id":"aid","score":0.95,
 			"recordings":[{"id":"rec-mbid","releasegroups":[{"id":"rg-mbid"}]}]}]}`))
 	}))
-	defer srv.Close()
-	compressed := func(n int) string {
-		return base64.RawURLEncoding.EncodeToString([]byte{1, byte(n >> 16), byte(n >> 8), byte(n), 0x5a, 0xc3})
+	t.Cleanup(srv.Close)
+	return srv, &asked
+}
+
+// vectorStore is the one store read the AcoustID fallback makes: a file's stored
+// fingerprint and the analysis that made it.
+type vectorStore struct {
+	Store
+	vec      []uint32
+	analysis int
+	err      error
+}
+
+func (v vectorStore) LoadFingerprint(context.Context, model.PID) ([]byte, int, error) {
+	if v.err != nil {
+		return nil, 0, v.err
 	}
-	resolve := func(n int) string {
+	return fingerprint.Pack(v.vec), v.analysis, nil
+}
+
+func acoustService(srv *httptest.Server, st Store, bin string) *Service {
+	return &Service{
+		store:  st,
+		cfg:    Config{AcoustIDKey: "k"},
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		fpcalc: bin,
+		aid:    &acoustID{client: netsafe.New(netsafe.Policy{}), baseURL: srv.URL, key: "k"},
+	}
+}
+
+// TestAcoustIDKeepsAPartialFpcalcRead: a read error fpcalc reports after fingerprinting
+// the span it was asked for still makes the lookup, with that fingerprint, while one that
+// stopped well short of the file's duration makes none.
+func TestAcoustIDKeepsAPartialFpcalcRead(t *testing.T) {
+	t.Parallel()
+	srv, asked := acoustServer(t)
+	resolve := func(n int) (string, string) {
 		t.Helper()
-		bin := testfpcalc.Write(t, `{"duration": 300.4, "fingerprint": "`+compressed(n)+`"}`,
-			"ERROR: Error decoding audio frame (End of file)", 3)
-		s := &Service{
-			log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-			caps: caps.Caps{Fpcalc: true, FpcalcPath: bin},
-			aid:  &acoustID{client: netsafe.New(netsafe.Policy{}), baseURL: srv.URL, key: "k"},
+		out, vec := rawVector("300.4", n)
+		bin := testfpcalc.Write(t, out, "ERROR: Error decoding audio frame (End of file)", 3)
+		want, err := fingerprint.EncodeCompressed(vec, fingerprint.ChromaprintAlgorithmDefault)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return s.acoustResolveReleaseGroup(context.Background(), &runState{}, model.EnrichTarget{FilePath: "song.flac", DurationSec: 300})
+		return acoustService(srv, nil, bin).acoustResolveReleaseGroup(context.Background(), &runState{},
+			model.EnrichTarget{FilePath: "song.flac", DurationSec: 300}), want
 	}
 
-	if got := resolve(948); got != "rg-mbid" || len(asked) != 1 || asked[0] != compressed(948) {
-		t.Fatalf("covering partial read resolved %q after asking %q, want rg-mbid from its fingerprint", got, asked)
+	if got, want := resolve(948); got != "rg-mbid" || len(*asked) != 1 || (*asked)[0] != want {
+		t.Fatalf("covering partial read resolved %q after asking %q, want rg-mbid from its fingerprint", got, *asked)
 	}
-	if got := resolve(300); got != "" || len(asked) != 1 {
-		t.Fatalf("short partial read resolved %q after asking %q, want no lookup", got, asked)
+	if got, _ := resolve(300); got != "" || len(*asked) != 1 {
+		t.Fatalf("short partial read resolved %q after asking %q, want no lookup", got, *asked)
+	}
+}
+
+// TestAcoustIDUsesTheStoredVectorWithoutFpcalc: a file whose stored analysis is
+// Chromaprint's is looked up by that vector, encoded under fpcalc's default algorithm (the
+// string opens with its byte, never the catalog's analysis id), and fpcalc never runs.
+func TestAcoustIDUsesTheStoredVectorWithoutFpcalc(t *testing.T) {
+	t.Parallel()
+	srv, asked := acoustServer(t)
+	bin, runs := testfpcalc.WriteLogged(t, "", "ERROR: should not run", 2)
+	_, stored := rawVector("0", 948)
+	st := vectorStore{vec: stored, analysis: fingerprint.ChromaprintAlgoVersion}
+	got := acoustService(srv, st, bin).acoustResolveReleaseGroup(context.Background(), &runState{},
+		model.EnrichTarget{FilePID: "file", FilePath: "song.flac", DurationSec: 300})
+	if got != "rg-mbid" || len(*asked) != 1 {
+		t.Fatalf("resolved %q after asking %q, want rg-mbid from the stored vector", got, *asked)
+	}
+	head, err := base64.RawURLEncoding.DecodeString((*asked)[0][:8])
+	if err != nil || head[0] != fingerprint.ChromaprintAlgorithmDefault {
+		t.Errorf("asked %q, want it to open with algorithm byte %d (err %v)", (*asked)[0], fingerprint.ChromaprintAlgorithmDefault, err)
+	}
+	if vec, _, err := fingerprint.DecodeCompressed((*asked)[0]); err != nil || !slices.Equal(vec, stored) {
+		t.Errorf("asked about %d values (err %v), want the stored vector", len(vec), err)
+	}
+	if r := testfpcalc.Runs(t, runs); len(r) != 0 {
+		t.Errorf("fpcalc ran %q, want it never run", r)
+	}
+}
+
+// TestAcoustIDRunsFpcalcOnceForAnUnanalyzedFile: a file with no stored analysis is
+// fingerprinted by one fpcalc run, with -raw, whose vector is encoded for the lookup.
+func TestAcoustIDRunsFpcalcOnceForAnUnanalyzedFile(t *testing.T) {
+	t.Parallel()
+	srv, asked := acoustServer(t)
+	out, vec := rawVector("300.4", 948)
+	bin, runs := testfpcalc.WriteLogged(t, out, "", 0)
+	st := vectorStore{err: waxerr.New(waxerr.CodeNotFound, "test", "file not analyzed")}
+	got := acoustService(srv, st, bin).acoustResolveReleaseGroup(context.Background(), &runState{},
+		model.EnrichTarget{FilePID: "file", FilePath: "song.flac", DurationSec: 300})
+	want, err := fingerprint.EncodeCompressed(vec, fingerprint.ChromaprintAlgorithmDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "rg-mbid" || len(*asked) != 1 || (*asked)[0] != want {
+		t.Fatalf("resolved %q after asking %q, want rg-mbid from fpcalc's vector", got, *asked)
+	}
+	if r := testfpcalc.Runs(t, runs); len(r) != 1 || !strings.Contains(r[0], "-raw") {
+		t.Errorf("fpcalc runs = %q, want one with -raw", r)
+	}
+}
+
+// TestAcoustIDSkipsAPureGoVector: a stored pure-Go fingerprint is not Chromaprint's, so
+// the lookup runs fpcalc instead of encoding it.
+func TestAcoustIDSkipsAPureGoVector(t *testing.T) {
+	t.Parallel()
+	srv, asked := acoustServer(t)
+	out, vec := rawVector("300.4", 948)
+	bin, runs := testfpcalc.WriteLogged(t, out, "", 0)
+	_, pureGo := rawVector("0", 500)
+	st := vectorStore{vec: pureGo, analysis: fingerprint.AlgoVersion}
+	acoustService(srv, st, bin).acoustResolveReleaseGroup(context.Background(), &runState{},
+		model.EnrichTarget{FilePID: "file", FilePath: "song.flac", DurationSec: 300})
+	want, err := fingerprint.EncodeCompressed(vec, fingerprint.ChromaprintAlgorithmDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*asked) != 1 || (*asked)[0] != want || len(testfpcalc.Runs(t, runs)) != 1 {
+		t.Errorf("asked %q after %d fpcalc runs, want fpcalc's vector from one run", *asked, len(testfpcalc.Runs(t, runs)))
+	}
+}
+
+// TestAcoustIDSkipsAnEmptyFingerprint: a fingerprint of no values identifies nothing, so no
+// lookup is made for it, from a stored analysis (fpcalc would print the same, so it is not
+// run) or from fpcalc, and the fallback stays on for the rest of the run.
+func TestAcoustIDSkipsAnEmptyFingerprint(t *testing.T) {
+	t.Parallel()
+	srv, asked := acoustServer(t)
+	stored, storedRuns := testfpcalc.WriteLogged(t, "", "ERROR: should not run", 2)
+	fresh, freshRuns := testfpcalc.WriteLogged(t, `{"duration": 0.4, "fingerprint": []}`, "", 0)
+	for _, c := range []struct {
+		name string
+		st   Store
+		bin  string
+		runs string
+		want int
+	}{
+		{"stored", vectorStore{vec: []uint32{}, analysis: fingerprint.ChromaprintAlgoVersion}, stored, storedRuns, 0},
+		{"fpcalc", vectorStore{err: waxerr.New(waxerr.CodeNotFound, "test", "file not analyzed")}, fresh, freshRuns, 1},
+	} {
+		st := &runState{}
+		got := acoustService(srv, c.st, c.bin).acoustResolveReleaseGroup(context.Background(), st,
+			model.EnrichTarget{FilePID: "file", FilePath: "short.flac", DurationSec: 1})
+		if got != "" || len(*asked) != 0 || st.acoustOff {
+			t.Errorf("%s: resolved %q after asking %q, fallback off %v; want no lookup and the fallback on", c.name, got, *asked, st.acoustOff)
+		}
+		if r := testfpcalc.Runs(t, c.runs); len(r) != c.want {
+			t.Errorf("%s: fpcalc ran %d times, want %d", c.name, len(r), c.want)
+		}
+	}
+}
+
+// TestAcoustIDNeedsNoFpcalcForAStoredVector: a catalog analyzed with fpcalc keeps its
+// Chromaprint vectors, so with fpcalc gone the fallback still runs on them, and a file
+// with none is skipped rather than handed to a binary that is not there.
+func TestAcoustIDNeedsNoFpcalcForAStoredVector(t *testing.T) {
+	t.Parallel()
+	srv, asked := acoustServer(t)
+	_, stored := rawVector("0", 948)
+	s := acoustService(srv, vectorStore{vec: stored, analysis: fingerprint.ChromaprintAlgoVersion}, "")
+	if !s.acoustEnabled() {
+		t.Fatal("the fallback is off without fpcalc, want it on for stored vectors")
+	}
+	st := &runState{}
+	if got := s.acoustResolveReleaseGroup(context.Background(), st,
+		model.EnrichTarget{FilePID: "file", FilePath: "song.flac", DurationSec: 300}); got != "rg-mbid" || len(*asked) != 1 {
+		t.Fatalf("resolved %q after asking %q, want rg-mbid from the stored vector", got, *asked)
+	}
+	s = acoustService(srv, vectorStore{err: waxerr.New(waxerr.CodeNotFound, "test", "file not analyzed")}, "")
+	if got := s.acoustResolveReleaseGroup(context.Background(), st,
+		model.EnrichTarget{FilePID: "other", FilePath: "other.flac", DurationSec: 300}); got != "" || len(*asked) != 1 || st.acoustOff {
+		t.Errorf("an unanalyzed file without fpcalc resolved %q after asking %q (fallback off %v), want it skipped", got, *asked, st.acoustOff)
 	}
 }

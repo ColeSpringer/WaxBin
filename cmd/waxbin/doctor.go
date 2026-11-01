@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +50,7 @@ func newDoctorCmd(g *globals) *cobra.Command {
 			}
 			fmt.Fprintf(w, "lyrics:         %d of %d tracks (%d looked up, none found)\n",
 				rep.TracksWithLyrics, rep.TrackCount, rep.TracksLyricsAsked)
-			fmt.Fprintf(w, "fpcalc:         %s\n", presentLabel(rep.Fpcalc))
+			fmt.Fprintf(w, "fpcalc:         %s\n", fpcalcLabel(rep))
 			fmt.Fprintln(w, "analyze decode coverage:")
 			tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "  CODEC\tDECODER\tANALYSIS")
@@ -68,9 +69,14 @@ func readOnlyLabel(ro bool) string {
 	return "read-write (write lock held)"
 }
 
-func presentLabel(ok bool) string {
-	if ok {
-		return "detected"
+// fpcalcLabel names the fpcalc in use, says why a configured one is not usable, or says
+// the pure-Go fingerprint stands in.
+func fpcalcLabel(rep *waxbin.DoctorReport) string {
+	switch {
+	case rep.FpcalcError != "":
+		return "not usable: " + rep.FpcalcError
+	case rep.FpcalcPath != "":
+		return rep.FpcalcPath
 	}
 	return "not found (pure-Go baseline only)"
 }

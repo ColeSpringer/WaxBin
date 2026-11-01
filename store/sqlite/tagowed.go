@@ -13,10 +13,10 @@ import (
 )
 
 // noteOwedItemTx records, inside the edit that changed them, that an item's files lag the
-// catalog on keys (model.DiagTagWriteOwed). An episode, whose tags are its feed's, and a
-// file several items share or one carrying a cue window are left out: no write-back can
-// ever pay those.
-func noteOwedItemTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, keys []string) error {
+// catalog on keys (model.DiagTagWriteOwed), set by attr. An episode, whose tags are its
+// feed's, and a file several items share or one carrying a cue window are left out: no
+// write-back can ever pay those.
+func noteOwedItemTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, keys []string, attr model.Attribution) error {
 	if len(keys) == 0 || (kind != string(model.KindTrack) && kind != string(model.KindBook)) {
 		return nil
 	}
@@ -25,12 +25,12 @@ func noteOwedItemTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, 
 	if err != nil {
 		return err
 	}
-	return noteOwedTx(ctx, tx, ids, keys)
+	return noteOwedTx(ctx, tx, ids, keys, attr)
 }
 
 // noteOwedMembersTx is noteOwedItemTx over the member files an entity's values are
 // written to (entityMemberFilesFrom).
-func noteOwedMembersTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, entityID int64, keys []string) error {
+func noteOwedMembersTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, entityID int64, keys []string, attr model.Attribution) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -39,45 +39,25 @@ func noteOwedMembersTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, en
 	if err != nil {
 		return err
 	}
-	return noteOwedTx(ctx, tx, ids, keys)
+	return noteOwedTx(ctx, tx, ids, keys, attr)
 }
 
-func noteOwedTx(ctx context.Context, tx *sql.Tx, fileIDs []int64, keys []string) error {
+// noteOwedTx writes the owed rows, naming attr as the setter of each value; a key owed
+// already takes the new setter.
+func noteOwedTx(ctx context.Context, tx *sql.Tx, fileIDs []int64, keys []string, attr model.Attribution) error {
 	now := nowNS()
 	for _, id := range fileIDs {
 		for _, k := range keys {
 			if err := upsertFileDiagnosticTx(ctx, tx, id, model.OriginEdit, "", model.FileDiagnostic{
 				Code: model.DiagTagWriteOwed, Severity: model.SeverityInfo, TagKey: k,
 				Detail: k + " was edited in the catalog and not written to the file",
+				Source: attr.Source, Provider: attr.Provider,
 			}, now); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
-}
-
-// NoteTagWriteOwed records owed rows for keys on the given files, for a write that left
-// them lacking a value the catalog holds.
-func (s *Store) NoteTagWriteOwed(ctx context.Context, filePIDs []model.PID, keys []string) error {
-	const op = "store.NoteTagWriteOwed"
-	if len(filePIDs) == 0 || len(keys) == 0 {
-		return nil
-	}
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		ids := make([]int64, 0, len(filePIDs))
-		for _, pid := range filePIDs {
-			id, err := idByPIDTx(ctx, tx, "file", pid, op)
-			if err != nil {
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := noteOwedTx(ctx, tx, ids, keys); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		return nil
-	})
 }
 
 // SettleTagWriteOwed clears a file's owed rows for fields, once a write-back landed them.

@@ -148,9 +148,9 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 	}
 	wbErr := &WriteBackError{ItemPID: entityPID, Edits: edits}
 	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil, entityOwedKeys(entityType, edits),
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+		wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
-		}); err != nil {
+		})); err != nil {
 		return err
 	}
 	// A track whose file took the artist's ARTISTSORT or the album's ALBUMSORT spells its

@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io/fs"
@@ -529,30 +530,156 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 	}, nil)
 }
 
-// ErrNotCustomTag is the cause of an ApplyCustomTag refusal that no later write-back
+// ErrNotCustomTag is the cause of an ApplyCustomTags refusal that no later write-back
 // changes: the file's format writes the key as one of its own fields.
 var ErrNotCustomTag = errors.New("not a custom tag in this file's format")
 
-// ApplyCustomTag writes one custom tag's values (none clears it) the way Apply writes its
-// edits, but only where the key lands as itself. A file whose format writes the key onto
-// another field, as an ID3 frame id like TPE2 or an MP4 name folded onto a MusicBrainz id
-// would be, is refused with CodeUnsupported (wrapping ErrNotCustomTag) and left untouched,
-// and so is one whose rewrite would change another field besides. Values the file would
-// not hold as given are reported as an unrepresented warning.
-func (w *Writer) ApplyCustomTag(ctx context.Context, path, key string, values []string) (*WriteResult, error) {
-	const op = "meta.Writer.ApplyCustomTag"
-	var held []string
-	return writeTags(ctx, op, path, func(doc *waxlabel.Document, ed *waxlabel.Editor) {
-		k := tag.Key(key)
-		held, _ = doc.Tags().Get(k)
-		if len(values) == 0 {
-			ed.Clear(k)
-		} else {
-			ed.Set(k, values...)
+// CustomTagsResult is what ApplyCustomTags did to one file.
+type CustomTagsResult struct {
+	// WriteResult is the file as the rewrite left it (Changed false when there was none),
+	// with its warnings. There is at most one rewrite.
+	WriteResult
+	// Refused holds each key that did not go in, with why: wrapping ErrNotCustomTag when
+	// the file's format writes the key as a field of its own, a CodeUnsupported refusal
+	// when writing it would change another field, or the tag writer refusing its value.
+	// The keys not named here went in.
+	Refused map[string]error
+}
+
+// ApplyCustomTags writes custom tags (distinct keys, no values clearing one) to the file at
+// path in one rewrite, each only where it lands as itself. When the file's format writes a
+// key onto another field, as an ID3 frame id like TPE2 or an MP4 name folded onto a
+// MusicBrainz id would be, or the rewrite would change another field besides, or the tag
+// writer refuses a value, each key is judged by a plan prepared and not written, beside
+// the keys taken so far, and the keys taken go in together, the others named in Refused
+// and left as they were. Values the file would not hold as given are reported as an
+// unrepresented warning. An error means nothing was written: the file could not be read
+// or written, or the writer refused every key's value.
+func (w *Writer) ApplyCustomTags(ctx context.Context, path string, edits []TagEdit) (*CustomTagsResult, error) {
+	const op = "meta.Writer.ApplyCustomTags"
+	out := &CustomTagsResult{}
+	res, refused, err := applyCustomTags(ctx, op, path, edits, true)
+	switch {
+	case err != nil:
+		return nil, err
+	case refused == nil:
+		out.WriteResult = *res
+		return out, nil
+	case len(edits) == 1:
+		if bad, ok := refused.(*badValue); ok {
+			return nil, bad.err
 		}
-	}, func(plan *waxlabel.Plan, warnings []model.TagWriteWarning) ([]model.TagWriteWarning, error) {
-		return judgeCustomTag(op, key, values, held, plan.Changes(), warnings)
-	})
+		out.refuse(edits[0].Key, refused)
+		return out, nil
+	}
+	var taken []TagEdit
+	var bad error // the writer's refusal of a value, kept while every key meets one
+	allBad := true
+	for _, e := range edits {
+		_, refused, err := applyCustomTags(ctx, op, path, append(slices.Clone(taken), e), false)
+		if err != nil {
+			return nil, err
+		}
+		if refused == nil {
+			taken = append(taken, e)
+			allBad = false
+			continue
+		}
+		if len(taken) > 0 {
+			// Refused beside the others: its own verdict says why, unless alone it goes in.
+			_, alone, err := applyCustomTags(ctx, op, path, []TagEdit{e}, false)
+			if err != nil {
+				return nil, err
+			}
+			if alone != nil {
+				refused = alone
+			}
+		}
+		if v, ok := refused.(*badValue); ok {
+			refused = v.err
+			bad = cmp.Or(bad, v.err)
+		} else {
+			allBad = false
+		}
+		out.refuse(e.Key, refused)
+	}
+	if len(taken) == 0 {
+		if allBad {
+			return nil, bad
+		}
+		return out, nil
+	}
+	res, refused, err = applyCustomTags(ctx, op, path, taken, true)
+	if err != nil {
+		return nil, err
+	}
+	if refused != nil {
+		// The file changed since the keys were judged, and none went in.
+		if v, ok := refused.(*badValue); ok {
+			refused = v.err
+		}
+		for _, e := range taken {
+			out.refuse(e.Key, refused)
+		}
+		return out, nil
+	}
+	out.WriteResult = *res
+	return out, nil
+}
+
+func (r *CustomTagsResult) refuse(key string, why error) {
+	if r.Refused == nil {
+		r.Refused = map[string]error{}
+	}
+	r.Refused[key] = why
+}
+
+// badValue is the tag writer refusing to prepare an edit, a value it cannot hold, as
+// against a file it cannot read or write.
+type badValue struct{ err error }
+
+func (b *badValue) Error() string { return b.err.Error() }
+
+// applyCustomTags makes one plan of edits, judged by judgeCustomTag for one key and
+// judgeCustomTags for several, and writes it when commit is set. A judge's refusal, or the
+// writer's refusal of the edit as a *badValue, comes back as refused, apart from err, which
+// is the file failing to parse or write.
+func applyCustomTags(ctx context.Context, op, path string, edits []TagEdit, commit bool) (res *WriteResult, refused, err error) {
+	held := make(map[string][]string, len(edits))
+	var parsed, judged bool
+	edit := func(doc *waxlabel.Document, ed *waxlabel.Editor) {
+		parsed = true
+		for _, e := range edits {
+			k := tag.Key(e.Key)
+			held[e.Key], _ = doc.Tags().Get(k)
+			if len(e.Values) == 0 {
+				ed.Clear(k)
+			} else {
+				ed.Set(k, e.Values...)
+			}
+		}
+	}
+	check := func(plan *waxlabel.Plan, warnings []model.TagWriteWarning) ([]model.TagWriteWarning, error) {
+		judged = true
+		if len(edits) == 1 {
+			warnings, refused = judgeCustomTag(op, edits[0].Key, edits[0].Values, held[edits[0].Key], plan.Changes(), warnings)
+		} else {
+			warnings, refused = judgeCustomTags(op, edits, held, plan.Changes(), warnings)
+		}
+		return warnings, refused
+	}
+	if commit {
+		res, err = writeTags(ctx, op, path, edit, check)
+	} else {
+		_, _, err = prepareTags(ctx, op, path, edit, check)
+	}
+	switch {
+	case refused != nil:
+		return nil, refused, nil
+	case err != nil && parsed && !judged:
+		return nil, &badValue{err}, nil
+	}
+	return res, nil, err
 }
 
 // judgeCustomTag decides a custom tag write from the plan's changes, given the values the
@@ -580,25 +707,59 @@ func judgeCustomTag(op, key string, values, held []string, changes []tag.Change,
 		return nil, waxerr.New(waxerr.CodeUnsupported, op,
 			"writing "+key+" to this file would also change "+strings.Join(others, ", "))
 	}
-	if !asked && !slices.ContainsFunc(warnings, func(wn model.TagWriteWarning) bool {
-		return wn.Unrepresented && wn.Key == key
-	}) {
-		warnings = append(warnings, model.TagWriteWarning{
-			Code: waxlabel.WarnValueDropped.String(), Key: key, Unrepresented: true,
-			Message: model.CapDetail("this file does not hold " + key + " as written"),
-		})
+	if !asked {
+		warnings = withLostWarning(warnings, key)
 	}
 	return warnings, nil
 }
 
-// writeTags is the write both Apply and ApplyCustomTag make: parse the file at path,
-// record edit on it, prepare the essence-verified rewrite, let check (when set) judge the
-// plan and its warnings, and commit unless it is a no-op.
-func writeTags(ctx context.Context, op, path string, edit func(*waxlabel.Document, *waxlabel.Editor),
-	check func(*waxlabel.Plan, []model.TagWriteWarning) ([]model.TagWriteWarning, error)) (*WriteResult, error) {
+// judgeCustomTags is judgeCustomTag for several keys written together. Any other tag key
+// changing refuses the combined write without saying which key caused it, since writing
+// the keys one at a time tells.
+func judgeCustomTags(op string, edits []TagEdit, held map[string][]string, changes []tag.Change, warnings []model.TagWriteWarning) ([]model.TagWriteWarning, error) {
+	landed := make(map[string][]string, len(edits))
+	for _, e := range edits {
+		landed[e.Key] = held[e.Key]
+	}
+	var others []string
+	for _, c := range changes {
+		if _, ours := landed[string(c.Key)]; ours {
+			landed[string(c.Key)] = c.New
+		} else if c.Key.Valid() {
+			others = append(others, tag.SanitizeLine(string(c.Key)))
+		}
+	}
+	if len(others) > 0 {
+		return nil, waxerr.New(waxerr.CodeUnsupported, op,
+			"writing these tags together would also change "+strings.Join(others, ", "))
+	}
+	for _, e := range edits {
+		if !slices.Equal(landed[e.Key], e.Values) {
+			warnings = withLostWarning(warnings, e.Key)
+		}
+	}
+	return warnings, nil
+}
+
+// withLostWarning adds an unrepresented warning for key unless the plan already reported one.
+func withLostWarning(warnings []model.TagWriteWarning, key string) []model.TagWriteWarning {
+	if slices.ContainsFunc(warnings, func(wn model.TagWriteWarning) bool { return wn.Unrepresented && wn.Key == key }) {
+		return warnings
+	}
+	return append(warnings, model.TagWriteWarning{
+		Code: waxlabel.WarnValueDropped.String(), Key: key, Unrepresented: true,
+		Message: model.CapDetail("this file does not hold " + key + " as written"),
+	})
+}
+
+// prepareTags parses the file at path, records edit on it, and prepares the
+// essence-verified rewrite, letting check (when set) judge the plan and its warnings.
+// Nothing is written: the audio is read and verified only when the plan is executed.
+func prepareTags(ctx context.Context, op, path string, edit func(*waxlabel.Document, *waxlabel.Editor),
+	check func(*waxlabel.Plan, []model.TagWriteWarning) ([]model.TagWriteWarning, error)) (*waxlabel.Plan, []model.TagWriteWarning, error) {
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
-		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for tag write", path)
+		return nil, nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for tag write", path)
 	}
 	ed := doc.Edit()
 	edit(doc, ed)
@@ -607,7 +768,7 @@ func writeTags(ctx context.Context, op, path string, edit func(*waxlabel.Documen
 	// if it differs, so a tag edit can never mutate audio.
 	plan, err := ed.Prepare(waxlabel.WithVerifyEssence())
 	if err != nil {
-		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing tag write for %s", path)
+		return nil, nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing tag write for %s", path)
 	}
 	// Read the report before the no-op gate. WaxLabel documents that a no-op can still
 	// carry a warning the consumer needs to see: an edit whose only effect was a value
@@ -616,8 +777,19 @@ func writeTags(ctx context.Context, op, path string, edit func(*waxlabel.Documen
 	warnings := writeWarnings(plan.Report().Warnings)
 	if check != nil {
 		if warnings, err = check(plan, warnings); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+	}
+	return plan, warnings, nil
+}
+
+// writeTags is the write both Apply and ApplyCustomTags make: prepareTags, then the commit
+// unless the plan is a no-op.
+func writeTags(ctx context.Context, op, path string, edit func(*waxlabel.Document, *waxlabel.Editor),
+	check func(*waxlabel.Plan, []model.TagWriteWarning) ([]model.TagWriteWarning, error)) (*WriteResult, error) {
+	plan, warnings, err := prepareTags(ctx, op, path, edit, check)
+	if err != nil {
+		return nil, err
 	}
 	if plan.IsNoOp() {
 		return &WriteResult{Changed: false, Warnings: warnings}, nil

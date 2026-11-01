@@ -197,7 +197,7 @@ func applyEditEntriesTx(ctx context.Context, tx *sql.Tx, log logger, entries []e
 			return nil, err
 		}
 		if owe {
-			if err := noteOwedEntryTx(ctx, tx, e, before[i], cleared); err != nil {
+			if err := noteOwedEntryTx(ctx, tx, e, before[i], cleared, attr); err != nil {
 				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -353,7 +353,7 @@ func entryValuesTx(ctx context.Context, tx *sql.Tx, entries []editEntry) ([]map[
 
 // noteOwedEntryTx records what an applied entry changed as owed to its item's files: each
 // field whose stored value moved from before, and each total the apply cleared.
-func noteOwedEntryTx(ctx context.Context, tx *sql.Tx, e editEntry, before map[string]string, cleared []string) error {
+func noteOwedEntryTx(ctx context.Context, tx *sql.Tx, e editEntry, before map[string]string, cleared []string, attr model.Attribution) error {
 	if before == nil {
 		return nil
 	}
@@ -367,7 +367,7 @@ func noteOwedEntryTx(ctx context.Context, tx *sql.Tx, e editEntry, before map[st
 			changed = append(changed, f)
 		}
 	}
-	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, changed)
+	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, changed, attr)
 }
 
 // editFieldValuesTx reads the stored values of an item's edited fields, as the strings

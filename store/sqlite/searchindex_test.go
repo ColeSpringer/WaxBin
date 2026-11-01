@@ -211,7 +211,7 @@ func TestGCStrandedTagKeysReindexes(t *testing.T) {
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One", map[string][]string{"MOOD": {"chill"}}, true)
 	itemID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(res.ItemPID)))
-	// Seeded raw: SetItemTag refuses the key now, which is the point.
+	// Seeded raw: SetItemTags refuses the key now, which is the point.
 	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO item_tag(item_id, key, value, position) VALUES (?, 'ODD~KEY', 'zanzibar', 0)", itemID); err != nil {

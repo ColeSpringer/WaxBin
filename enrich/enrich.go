@@ -35,7 +35,6 @@ import (
 
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/identity"
-	"github.com/colespringer/waxbin/internal/caps"
 	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -61,6 +60,10 @@ type Store interface {
 	// when includeRepFile is set (the AcoustID fallback needs it), so the correlated
 	// lookup is skipped on the common path where AcoustID is off.
 	ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error)
+	// LoadFingerprint returns a file's stored fingerprint, packed, and the analysis that made
+	// it, or CodeNotFound when none describes the file's current audio, so the AcoustID
+	// fallback encodes an analyzed file's Chromaprint vector instead of running fpcalc.
+	LoadFingerprint(ctx context.Context, filePID model.PID) ([]byte, int, error)
 	// AlbumsNeedingReleaseMatch returns the next keyset page of albums that carry some
 	// matchable evidence (a release identifier, or a medium or country) but no release
 	// MBID, under a release group that has one.
@@ -173,9 +176,13 @@ type Config struct {
 	// UserAgent overrides the full User-Agent string; when empty one is built from
 	// the app name and Contact.
 	UserAgent string
-	// AcoustIDKey enables the AcoustID fingerprint fallback (requires fpcalc). Empty
-	// disables it.
+	// AcoustIDKey enables the AcoustID fingerprint fallback, which asks by a file's stored
+	// Chromaprint analysis or, for a file without one, by fpcalc's. Empty disables it.
 	AcoustIDKey string
+	// FpcalcPath is the fpcalc binary the AcoustID fallback runs for a file with no stored
+	// Chromaprint analysis, as the catalog resolved it; empty means none, and such a file
+	// is skipped.
+	FpcalcPath string
 	// FetchCoverArt enables Cover Art Archive lookups (default enabled when a contact
 	// is set; the facade sets it explicitly). One switch gates both rungs, the
 	// release-group cover and the per-release one. The per-release half reuses the
@@ -295,7 +302,8 @@ type Service struct {
 	store Store
 	cfg   Config
 	log   *slog.Logger
-	caps  caps.Caps
+	// fpcalc is the fpcalc binary the AcoustID fallback runs, "" for none.
+	fpcalc string
 
 	// mb + aid are the identity spine: MusicBrainz resolves the anchoring MBID (and,
 	// for a release group, its type and its own genres) and AcoustID is the internal
@@ -348,12 +356,12 @@ func New(store Store, cfg Config, log *slog.Logger) *Service {
 	})
 	c := cache{store: store}
 	s := &Service{
-		store: store,
-		cfg:   cfg,
-		log:   log,
-		caps:  caps.Detect(),
-		mb:    &musicBrainz{client: client, baseURL: baseOr(cfg.MusicBrainzBaseURL, defaultMBBaseURL), cache: c},
-		aid:   &acoustID{client: client, baseURL: baseOr(cfg.AcoustIDBaseURL, defaultAcoustBaseURL), key: cfg.AcoustIDKey},
+		store:  store,
+		cfg:    cfg,
+		log:    log,
+		fpcalc: cfg.FpcalcPath,
+		mb:     &musicBrainz{client: client, baseURL: baseOr(cfg.MusicBrainzBaseURL, defaultMBBaseURL), cache: c},
+		aid:    &acoustID{client: client, baseURL: baseOr(cfg.AcoustIDBaseURL, defaultAcoustBaseURL), key: cfg.AcoustIDKey},
 	}
 
 	// Injected providers rank first in the fixed list, ahead of the built-ins.
@@ -492,9 +500,10 @@ const enrichDisabledMessage = "enrichment needs a MusicBrainz contact " +
 // agreement, so a catalog with one and no contact still has work to do.
 func (s *Service) Enabled() bool { return len(s.Phases()) > 0 }
 
-// acoustEnabled reports whether the AcoustID fingerprint fallback is usable: a key
-// is set and fpcalc is present to produce a Chromaprint fingerprint.
-func (s *Service) acoustEnabled() bool { return s.cfg.AcoustIDKey != "" && s.caps.Fpcalc }
+// acoustEnabled reports whether the AcoustID fingerprint fallback runs: a key is set. A
+// file's stored Chromaprint analysis needs no fpcalc; one without it is fingerprinted by
+// fpcalc when there is one and skipped when there is not.
+func (s *Service) acoustEnabled() bool { return s.cfg.AcoustIDKey != "" }
 
 // RunOptions controls one enrichment pass.
 type RunOptions struct {
@@ -1508,25 +1517,19 @@ func (s *Service) resolveReleaseGroup(ctx context.Context, st *runState, t model
 	return nil, nil
 }
 
-// acoustResolveReleaseGroup fingerprints a release group's representative file with
-// fpcalc and asks AcoustID for a release-group MBID. It is best-effort. An fpcalc
-// failure is skipped, and a read error it reports after fingerprinting the span asked
-// for is not one. An AcoustID error (a bad or expired key, a quota, or an endpoint
-// problem usually recurs for every file) disables the fallback for the rest of the run
-// instead of retrying. It never aborts the pass, since AcoustID is an optional resolver
-// layered on top of MusicBrainz.
+// acoustResolveReleaseGroup asks AcoustID for a release-group MBID by the fingerprint of a
+// release group's representative file. It is best-effort. A fingerprint that cannot be
+// had is skipped, and a read error fpcalc reports after fingerprinting the span asked for
+// is not one. An AcoustID error (a bad or expired key, a quota, or an endpoint problem
+// usually recurs for every file) disables the fallback for the rest of the run instead of
+// retrying. It never aborts the pass, since AcoustID is an optional resolver layered on
+// top of MusicBrainz.
 func (s *Service) acoustResolveReleaseGroup(ctx context.Context, st *runState, t model.EnrichTarget) string {
-	r, err := fingerprint.ChromaprintCompressedDetail(ctx, s.caps.FpcalcPath, t.FilePath, acoustFingerprintMaxDur,
-		time.Duration(t.DurationSec)*time.Second)
-	if err != nil {
-		s.log.Debug("acoustid fingerprint failed", "path", t.FilePath, "err", err)
+	fp, durSec, ok := s.acoustFingerprint(ctx, t)
+	if !ok {
 		return ""
 	}
-	durSec := r.DurationSec
-	if t.DurationSec > 0 {
-		durSec = t.DurationSec
-	}
-	m, err := s.aid.lookup(ctx, r.Compressed, durSec)
+	m, err := s.aid.lookup(ctx, fp, durSec)
 	if err != nil {
 		s.log.Warn("acoustid lookup failed; disabling the fallback for this run", "err", err)
 		st.acoustOff = true
@@ -1536,6 +1539,56 @@ func (s *Service) acoustResolveReleaseGroup(ctx context.Context, st *runState, t
 		return ""
 	}
 	return m.ReleaseGroupMBID
+}
+
+// acoustFingerprint is the compressed fingerprint and duration AcoustID is asked about for
+// t's file. A file whose stored analysis is Chromaprint's, of its current audio, is encoded
+// from that vector, fpcalc's default algorithm assumed since its raw output names none;
+// the analysis read the span fpcalc reads by default, so the string is the one fpcalc
+// would print. Any other file, a pure-Go analysis included, takes one fpcalc run with
+// -raw, its vector encoded the same way, and is skipped when there is no fpcalc. The catalog's duration is used when it knows one,
+// and a stored vector is only used then, having no duration of its own. A fingerprint of
+// no values identifies nothing and is not asked about, since AcoustID's refusal of it
+// would turn the fallback off for the rest of the run.
+func (s *Service) acoustFingerprint(ctx context.Context, t model.EnrichTarget) (string, int, bool) {
+	if t.FilePID != "" && t.DurationSec > 0 {
+		blob, analysis, err := s.store.LoadFingerprint(ctx, t.FilePID)
+		vec := fingerprint.Unpack(blob)
+		switch {
+		case err == nil && analysis == fingerprint.ChromaprintAlgoVersion && len(vec) == 0:
+			return "", 0, false
+		case err == nil && analysis == fingerprint.ChromaprintAlgoVersion:
+			fp, err := fingerprint.EncodeCompressed(vec, fingerprint.ChromaprintAlgorithmDefault)
+			if err == nil {
+				return fp, t.DurationSec, true
+			}
+			s.log.Debug("acoustid stored fingerprint not encodable", "path", t.FilePath, "err", err)
+		case err != nil && !waxerr.Is(err, waxerr.CodeNotFound):
+			s.log.Debug("acoustid stored fingerprint unreadable", "path", t.FilePath, "err", err)
+		}
+	}
+	if s.fpcalc == "" {
+		return "", 0, false
+	}
+	r, err := fingerprint.ChromaprintRawDetail(ctx, s.fpcalc, t.FilePath, acoustFingerprintMaxDur,
+		time.Duration(t.DurationSec)*time.Second)
+	if err != nil {
+		s.log.Debug("acoustid fingerprint failed", "path", t.FilePath, "err", err)
+		return "", 0, false
+	}
+	if len(r.Sub) == 0 {
+		return "", 0, false
+	}
+	fp, err := fingerprint.EncodeCompressed(r.Sub, fingerprint.ChromaprintAlgorithmDefault)
+	if err != nil {
+		s.log.Debug("acoustid fingerprint not encodable", "path", t.FilePath, "err", err)
+		return "", 0, false
+	}
+	durSec := r.DurationSec
+	if t.DurationSec > 0 {
+		durSec = t.DurationSec
+	}
+	return fp, durSec, true
 }
 
 // enrichAlbumRelease resolves which release of its group one album is, from a

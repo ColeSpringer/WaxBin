@@ -2,7 +2,6 @@ package fingerprint
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -28,9 +27,9 @@ const ChromaprintAlgoVersion = 100
 // packs a 32-bit value per frame; agreement is measured across all 32 bits.
 const chromaprintBits = 32
 
-// fpcalcOutput is the JSON shape fpcalc emits with -json. With -raw the
-// fingerprint is an array of integers; without it, a compressed base64 string. The
-// duration is the file's as its container states it, not what fpcalc decoded.
+// fpcalcOutput is the JSON shape fpcalc emits with -json. With -raw, which every run
+// here passes, the fingerprint is an array of integers; without it, a compressed base64
+// string. The duration is the file's as its container states it, not what fpcalc decoded.
 type fpcalcOutput struct {
 	Duration    float64         `json:"duration"`
 	Fingerprint json.RawMessage `json:"fingerprint"`
@@ -52,11 +51,11 @@ const (
 // failed may stop and still be kept.
 const partialReadSlack = 2 * time.Second
 
-// ChromaprintResult is one fpcalc run: the fingerprint in the form asked for, the file
-// duration fpcalc reported, in whole seconds, and how the run ended.
+// ChromaprintResult is one fpcalc run: the fingerprint as the vector it printed (which
+// EncodeCompressed under ChromaprintAlgorithmDefault turns into the string AcoustID takes),
+// the file duration fpcalc reported, in whole seconds, and how the run ended.
 type ChromaprintResult struct {
-	Sub         []uint32 // from ChromaprintRawDetail
-	Compressed  string   // from ChromaprintCompressedDetail
+	Sub         []uint32
 	DurationSec int
 	// Partial says fpcalc exited with ExitCode and the read error in Note after its
 	// fingerprint already covered the span asked for, so the fingerprint was kept.
@@ -65,25 +64,17 @@ type ChromaprintResult struct {
 	Note     string
 }
 
-// ChromaprintRaw runs fpcalc to produce a raw Chromaprint sub-fingerprint vector
-// for internal grouping, capped at maxDur. The vector is comparable across lossy
-// encodings of one recording, like the pure-Go fingerprint, but is Chromaprint's
-// own layout, so it is stored under ChromaprintAlgoVersion. Any non-zero exit fails it.
-func ChromaprintRaw(ctx context.Context, bin, path string, maxDur time.Duration) ([]uint32, int, error) {
-	r, err := ChromaprintRawDetail(ctx, bin, path, maxDur, 0)
-	if err != nil {
-		return nil, 0, err
-	}
-	return r.Sub, r.DurationSec, nil
-}
-
-// ChromaprintRawDetail is ChromaprintRaw given the file's duration, expected. fpcalc
-// prints the fingerprint of what it read before it reports a read error, under an exit
-// code that is not documented, so a non-zero exit is judged by that fingerprint alone:
-// it is kept, marked Partial, when it covers expected capped at maxDur, and refused
+// ChromaprintRawDetail runs fpcalc once, with -raw, for a file's Chromaprint fingerprint
+// over at most maxDur of it, given the file's duration, expected. The vector is
+// comparable across lossy encodings of one recording, like the pure-Go fingerprint, but
+// is Chromaprint's own layout, so it is stored under ChromaprintAlgoVersion.
+//
+// fpcalc prints the fingerprint of what it read before it reports a read error, under an
+// exit code that is not documented, so a non-zero exit is judged by that fingerprint
+// alone: it is kept, marked Partial, when it covers expected capped at maxDur, and refused
 // otherwise, as is every non-zero exit when expected is unknown (0).
 func ChromaprintRawDetail(ctx context.Context, bin, path string, maxDur, expected time.Duration) (*ChromaprintResult, error) {
-	run, err := runFpcalc(ctx, bin, path, maxDur, true)
+	run, err := runFpcalc(ctx, bin, path, maxDur)
 	if err != nil {
 		return nil, err
 	}
@@ -112,49 +103,6 @@ func decodeRawFingerprint(raw json.RawMessage) ([]uint32, error) {
 		sub[i] = uint32(n)
 	}
 	return sub, nil
-}
-
-// ChromaprintCompressed runs fpcalc to produce the compressed base64 fingerprint
-// and the duration in whole seconds, the pair the AcoustID API accepts. AcoustID
-// is Chromaprint-only, so this is the only fingerprint form it takes. Any non-zero
-// exit fails it.
-func ChromaprintCompressed(ctx context.Context, bin, path string, maxDur time.Duration) (string, int, error) {
-	r, err := ChromaprintCompressedDetail(ctx, bin, path, maxDur, 0)
-	if err != nil {
-		return "", 0, err
-	}
-	return r.Compressed, r.DurationSec, nil
-}
-
-// ChromaprintCompressedDetail is ChromaprintCompressed judging a non-zero exit the way
-// ChromaprintRawDetail does. The compressed form states its length in its header.
-func ChromaprintCompressedDetail(ctx context.Context, bin, path string, maxDur, expected time.Duration) (*ChromaprintResult, error) {
-	run, err := runFpcalc(ctx, bin, path, maxDur, false)
-	if err != nil {
-		return nil, err
-	}
-	var fp string
-	if err := json.Unmarshal(run.out.Fingerprint, &fp); err != nil {
-		return nil, run.refuse(waxerr.Wrapf(waxerr.CodeInvalid, "fingerprint.fpcalc", err, "parsing compressed fingerprint"))
-	}
-	r := &ChromaprintResult{Compressed: fp}
-	if err := run.settle(r, compressedLength(fp), maxDur, expected); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-// compressedLength returns how many values a compressed fingerprint holds: its header is
-// an algorithm byte and then the count in three big-endian bytes, in URL-safe base64.
-func compressedLength(fp string) int {
-	if len(fp) < 8 {
-		return 0
-	}
-	b, err := base64.RawURLEncoding.DecodeString(fp[:8])
-	if err != nil {
-		return 0
-	}
-	return int(b[1])<<16 | int(b[2])<<8 | int(b[3])
 }
 
 // fpcalcRun is one finished fpcalc process: its output, and when it exited non-zero, the
@@ -206,20 +154,17 @@ func fingerprintSpan(n int) time.Duration {
 	return time.Duration((float64(n)*chromaprintItemSeconds + chromaprintDelaySeconds) * float64(time.Second))
 }
 
-// runFpcalc invokes fpcalc with -json (and -raw when raw), bounding the output so a
-// misbehaving binary cannot exhaust memory, and parses the JSON envelope. A non-zero exit
+// runFpcalc invokes fpcalc with -json and -raw, bounding the output so a misbehaving
+// binary cannot exhaust memory, and parses the JSON envelope. A non-zero exit
 // that still printed a fingerprint is returned for the caller to judge, since fpcalc
 // prints what it read before it reports a read error. It never passes -ignore-errors,
 // which would hide that error behind a clean exit.
-func runFpcalc(ctx context.Context, bin, path string, maxDur time.Duration, raw bool) (*fpcalcRun, error) {
+func runFpcalc(ctx context.Context, bin, path string, maxDur time.Duration) (*fpcalcRun, error) {
 	const op = "fingerprint.fpcalc"
 	if bin == "" {
 		bin = "fpcalc"
 	}
-	args := []string{"-json"}
-	if raw {
-		args = append(args, "-raw")
-	}
+	args := []string{"-json", "-raw"}
 	if maxDur > 0 {
 		args = append(args, "-length", strconv.Itoa(int(maxDur.Seconds())))
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/inbox"
+	"github.com/colespringer/waxbin/internal/caps"
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/jobs"
@@ -141,6 +142,11 @@ type Library struct {
 	// roots checks the roots AddRoot, RelocateRoot and MarkMissing stat, bounded in time;
 	// its zero value is the plain bounded stat.
 	roots fsx.RootChecker
+
+	// fpcalc is the fpcalc binary this catalog runs, resolved at Open ("" for none), and
+	// fpcalcErr why a configured one is not usable, which the analyze pass refuses on.
+	fpcalc    string
+	fpcalcErr error
 }
 
 // Open opens (creating if needed) the catalog and wires the subsystems. A
@@ -176,6 +182,12 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			return nil, err
 		}
 	}
+	// A configured fpcalc that is not there leaves the catalog usable; the analyze pass
+	// refuses until it is, since without it the fingerprints would change algorithm.
+	fpcalc, fpcalcErr := caps.Resolve(opts.FpcalcPath)
+	if fpcalcErr != nil {
+		log.Warn("the configured fpcalc is not usable; analyze refuses until it is", "err", fpcalcErr)
+	}
 
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
 		Path:               opts.DBPath,
@@ -197,6 +209,8 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	}
 
 	decoder := decode.New(log)
+	ec := enrichConfig(opts.Enrichment, opts.EnrichmentProviders, opts.EnrichmentProviderList)
+	ec.FpcalcPath = fpcalc
 	l := &Library{
 		store:     st,
 		jobs:      jobs.NewManager(st, owner, log),
@@ -204,13 +218,15 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		organizer: organize.New(st, meta.NewWriter(), log),
 		profiles:  profiles,
 		trasher:   trash.New(st, log),
-		analyzer:  analyze.New(st, decoder, log),
+		analyzer:  analyze.New(st, decoder, fpcalc, log),
 		playback:  playback.New(st),
 		playlists: playlist.New(st),
-		enricher:  enrich.New(st, enrichConfig(opts.Enrichment, opts.EnrichmentProviders, opts.EnrichmentProviderList), log),
+		enricher:  enrich.New(st, ec, log),
 		decoder:   decoder,
 		log:       log,
 		opts:      opts,
+		fpcalc:    fpcalc,
+		fpcalcErr: fpcalcErr,
 	}
 	// The importer catalogs each placed file through the scanner, so it is wired
 	// after the struct is built and shares that scanner.
@@ -1228,6 +1244,9 @@ type AnalyzeOptions struct {
 // missing or stale, under an "analyze"-scoped job. Files whose codec this build
 // cannot decode are reported as skipped, not failed.
 func (l *Library) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeResult, error) {
+	if err := l.fpcalcUsable("waxbin.Analyze"); err != nil {
+		return nil, err
+	}
 	out := &AnalyzeResult{}
 	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
 	job, runErr := l.jobs.Run(ctx, jobs.Spec{Kind: "analyze", Scope: "analyze"}, l.analyzeWork(writeRG, out))
@@ -1235,6 +1254,15 @@ func (l *Library) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeRes
 		out.JobPID = job.PID
 	}
 	return out, runErr
+}
+
+// fpcalcUsable refuses the analyze pass while a configured fpcalc is not usable: with it
+// gone the pass would fingerprint with the pure-Go algorithm, re-analyzing every file.
+func (l *Library) fpcalcUsable(op string) error {
+	if l.fpcalcErr == nil {
+		return nil
+	}
+	return waxerr.Wrapf(waxerr.CodeInvalid, op, l.fpcalcErr, "the configured fpcalc is not usable")
 }
 
 // WatchActivity summarizes one watch cycle for a heartbeat consumer.
@@ -1545,7 +1573,7 @@ func (l *Library) FindAltEncodings(ctx context.Context, itemPID model.PID) ([]Al
 	if item.FilePID == "" {
 		return nil, nil
 	}
-	queryFP, err := l.store.LoadFingerprint(ctx, item.FilePID)
+	queryFP, _, err := l.store.LoadFingerprint(ctx, item.FilePID)
 	if err != nil {
 		if waxerr.Is(err, waxerr.CodeNotFound) {
 			return nil, nil // not analyzed yet: nothing to group on
@@ -2122,11 +2150,16 @@ func recordWriteBack(dst *map[model.PID]*WriteBackError, pid model.PID, wberr er
 	return nil
 }
 
-// WriteBackFailure records one backing file whose on-disk tag write-back did not
-// apply, with a human-readable reason.
+// WriteBackFailure records one backing file whose on-disk tag write-back did not fully
+// apply, with a human-readable reason. Lost says the file was rewritten but did not keep a
+// value as given, Key naming its tag when the tag writer said which. Without Lost, Key
+// names a custom tag the file refused while the write's other keys went in (SetItemTags),
+// and a failure with neither is the whole file's: nothing was written to it.
 type WriteBackFailure struct {
 	FilePID model.PID `json:"filePid,omitempty"`
 	Path    string    `json:"path,omitempty"`
+	Key     string    `json:"key,omitempty"`
+	Lost    bool      `json:"lost,omitempty"`
 	Reason  string    `json:"reason"`
 }
 
@@ -2164,13 +2197,16 @@ func (e *WriteBackError) result() error {
 	return nil
 }
 
+// Error names each file once, however many of its keys or values it refused.
 func (e *WriteBackError) Error() string {
 	paths := make([]string, 0, len(e.Failures))
 	for _, f := range e.Failures {
-		paths = append(paths, f.Path)
+		if !slices.Contains(paths, f.Path) {
+			paths = append(paths, f.Path)
+		}
 	}
 	return "catalog updated, but on-disk tag write-back failed for " +
-		strconv.Itoa(len(e.Failures)) + " file(s): " + strings.Join(paths, ", ")
+		strconv.Itoa(len(paths)) + " file(s): " + strings.Join(paths, ", ")
 }
 
 // writeBackItemTags fans a set of tag edits across an item's own files, reporting a
@@ -2180,13 +2216,13 @@ func (e *WriteBackError) Error() string {
 // such as the book identity re-anchor, drives writeBackFiles directly. settles names the
 // owed fields a landed write pays.
 func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID model.PID, tagEdits []meta.TagEdit, settles []string) error {
-	return l.writeBackItem(ctx, op, itemPID, settles, func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+	return l.writeBackItem(ctx, op, itemPID, settles, wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 		return w.Apply(ctx, path, tagEdits)
-	})
+	}))
 }
 
 // writeBackItem is writeBackItemTags with the per-file write supplied by the caller.
-func (l *Library) writeBackItem(ctx context.Context, op string, itemPID model.PID, settles []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
+func (l *Library) writeBackItem(ctx context.Context, op string, itemPID model.PID, settles []string, apply func(w *meta.Writer, path string) (fileWrite, error)) error {
 	// Everything here runs after the catalog change committed, so a lookup failure is a
 	// write-back failure to report rather than a hard error that would hide it.
 	files, err := l.store.ItemFiles(ctx, itemPID)
@@ -2203,19 +2239,42 @@ func (l *Library) writeBackItem(ctx context.Context, op string, itemPID model.PI
 	return wbErr.result()
 }
 
+// fileWrite is what a write-back's per-file write did: res is the rewrite that went in, nil
+// when none did; refused names each key the file would not take, with why; settles, when
+// not nil, are the owed fields the file pays in place of the call's.
+type fileWrite struct {
+	res     *meta.WriteResult
+	refused []keyRefusal
+	settles []string
+}
+
+type keyRefusal struct {
+	key string
+	err error
+}
+
+// wholeFile adapts a write that takes or fails a file whole to writeBackFiles.
+func wholeFile(apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) func(*meta.Writer, string) (fileWrite, error) {
+	return func(w *meta.Writer, path string) (fileWrite, error) {
+		res, err := apply(w, path)
+		return fileWrite{res: res}, err
+	}
+}
+
 // writeBackFiles applies a per-file on-disk write across files, recording every refusal
 // or failure on wbErr instead of aborting the rest. It is the shared engine behind every
 // write-back fan-out. The caller supplies the file set and an apply closure; this handles
 // the shared-or-virtual-file guard, the drift diagnostic, the unrepresented-value
 // warning, and the optimistic file-state update, and writes a file backing several
-// members once. Only a context cancellation is a hard error, and op names the caller
-// in it.
+// members once. An apply that took some keys and not others names the refused ones in
+// its fileWrite, so each is reported and settled on its own. Only a context cancellation
+// is a hard error, and op names the caller in it.
 //
 // origin is the diagnostic writer these rows belong to, and it has to be the caller's
 // own: a clean write CLEARS that origin's whole set for the file, so a pass borrowing
 // another writer's origin would wipe drift it knows nothing about and file its own losses
 // where nobody looks for them.
-func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals, settles []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
+func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals, settles []string, apply func(w *meta.Writer, path string) (fileWrite, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
 	readOnly, roErr := l.readOnlyLibraries(ctx)
@@ -2265,27 +2324,47 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			continue
 		}
 
-		res, err := apply(w, path)
+		fw, err := apply(w, path)
 		if err != nil {
 			l.log.Warn("tag write-back", "path", path, "err", err)
 			l.recordWriteBackDrift(ctx, origin, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
-			// A custom tag the file's format writes as a field of its own is refused for good,
-			// so the file stops owing it and the drift row says why.
-			if errors.Is(err, meta.ErrNotCustomTag) {
-				if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, settles); err != nil {
-					l.log.Warn("tag write owed settle", "path", path, "err", err)
+			continue
+		}
+		fileSettles := settles
+		if fw.settles != nil {
+			fileSettles = fw.settles
+		}
+		// Each key the file refused is reported under its key, and the file stops owing what
+		// went in and what it can never carry (fw.settles).
+		keyed := make([]model.FileDiagnostic, 0, len(fw.refused))
+		for _, r := range fw.refused {
+			l.log.Warn("tag write-back", "path", path, "key", r.key, "err", r.err)
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Key: r.key, Reason: r.err.Error()})
+			keyed = append(keyed, model.FileDiagnostic{
+				Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, TagKey: r.key, Detail: r.err.Error(),
+			})
+		}
+		if fw.res == nil {
+			// None went in: like a failed write, the file keeps the drift it had.
+			if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, fileSettles); err != nil {
+				l.log.Warn("tag write owed settle", "path", path, "err", err)
+			}
+			for _, d := range keyed {
+				if err := l.store.AddFileDiagnostic(ctx, ref.FilePID, origin, d); err != nil {
+					l.log.Warn("write-back drift diagnostic", "file", ref.FilePID, "err", err)
 				}
 			}
 			continue
 		}
+		res := fw.res
 		if wbErr.landed == nil {
 			wbErr.landed = map[model.PID]bool{}
 		}
 		wbErr.landed[ref.FilePID] = true
 		// The write landed, so the fields it carried are no longer owed to this file. A
 		// value the format could not store is reported below as lost instead.
-		if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, settles); err != nil {
+		if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, fileSettles); err != nil {
 			l.log.Warn("tag write owed settle", "path", path, "err", err)
 		}
 		// A value the on-disk format cannot store leaves the bytes unchanged but is still
@@ -2297,13 +2376,16 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 		// separately would have this clear them again, and the review queue would read a
 		// partly-refused file as fully synced. The early continues above keep their own
 		// single reason, which still puts the file in the queue.
-		lost := make([]model.FileDiagnostic, 0, len(refusals)+len(res.Warnings))
+		lost := make([]model.FileDiagnostic, 0, len(refusals)+len(keyed)+len(res.Warnings))
 		for _, reason := range refusals {
 			lost = append(lost, model.FileDiagnostic{
 				Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: reason,
 			})
 		}
-		var unrepresented bool
+		lost = append(lost, keyed...)
+		// The keys of the values this write lost, "" standing for those a warning names no
+		// key for, each reported once.
+		var lostKeys []string
 		for _, wn := range res.Warnings {
 			// A landed write whose post-commit step failed: worth a log line, but the
 			// tags are on disk and match the catalog, so it is neither a lost value
@@ -2312,7 +2394,9 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 				l.log.Warn("tag write-back post-write", "path", path, "warning", wn.Message)
 			}
 			if wn.Unrepresented {
-				unrepresented = true
+				if !slices.Contains(lostKeys, wn.Key) {
+					lostKeys = append(lostKeys, wn.Key)
+				}
 				lost = append(lost, model.FileDiagnostic{
 					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
 					TagKey: wn.Key, Detail: wn.Message,
@@ -2324,12 +2408,14 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 				l.log.Warn("write-back diagnostics", "path", path, "err", derr)
 			}
 		}
-		// Only a value this write lost is reported here. A refusal seeded above was
-		// already reported by the caller that refused it, and counting it again would
-		// name the same file twice for one cause.
-		if unrepresented {
-			l.log.Warn("tag value unrepresented", "path", path)
-			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path,
+		// Only a value this write lost is reported here, under its key. A refusal seeded
+		// above was already reported by the caller that refused it, and counting it again
+		// would name the same file twice for one cause.
+		if len(lostKeys) > 0 {
+			l.log.Warn("tag value unrepresented", "path", path, "keys", lostKeys)
+		}
+		for _, k := range lostKeys {
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Key: k, Lost: true,
 				Reason: "this file's tags could not be written without loss"})
 		}
 		if len(lost) == 0 {
@@ -2524,9 +2610,9 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 		return wbErr.noFiles()
 	}
 	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, refusals, settles,
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+		wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
-		}); err != nil {
+		})); err != nil {
 		return err
 	}
 

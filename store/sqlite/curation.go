@@ -354,7 +354,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		// One path for set and clear: replace this role's mapping (a nil image just
 		// deletes it). A cleared role's orphaned source becomes GC-able.
 		if err := setFrontOwingTx(ctx, tx, "track", itemID, string(role), pic, func() error {
-			return noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedArt})
+			return noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedArt}, attr)
 		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -484,11 +484,11 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				if err := tx.QueryRowContext(ctx, "SELECT kind FROM playable_item WHERE id = ?", entityID).Scan(&kind); err != nil {
 					return err
 				}
-				return noteOwedItemTx(ctx, tx, entityID, kind, []string{model.OwedArt})
+				return noteOwedItemTx(ctx, tx, entityID, kind, []string{model.OwedArt}, attr)
 			}
 		case model.ArtAlbum:
 			owe = func() error {
-				return noteOwedMembersTx(ctx, tx, model.MergeAlbum, entityID, []string{model.OwedAlbumArt})
+				return noteOwedMembersTx(ctx, tx, model.MergeAlbum, entityID, []string{model.OwedAlbumArt}, attr)
 			}
 		}
 		if err := setFrontOwingTx(ctx, tx, string(entityType), entityID, string(role), pic, owe); err != nil {

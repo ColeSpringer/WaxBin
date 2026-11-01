@@ -12,6 +12,16 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
+// setTag sets one custom tag through SetItemTags, returning its key as stored and how many
+// values it holds.
+func setTag(ctx context.Context, st *Store, pid model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
+	res, err := st.SetItemTags(ctx, pid, []model.TagEdit{{Key: key, Values: values}}, attr, lock, force)
+	if err != nil {
+		return "", 0, err
+	}
+	return res[0].Key, res[0].Stored, nil
+}
+
 func putTrackCustom(t *testing.T, st *Store, libID int64, path, essence, content, title string, custom map[string][]string, preserveLocks bool) *model.ScanItemResult {
 	t.Helper()
 	in := model.PutScannedTrackInput{
@@ -58,12 +68,12 @@ func TestSetItemTag(t *testing.T) {
 	pid := res.ItemPID
 
 	// Set a multi-valued custom tag (key normalized to uppercase).
-	stored, n, err := st.SetItemTag(ctx, pid, "mood", []string{"chill", "upbeat"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
+	stored, n, err := setTag(ctx, st, pid, "mood", []string{"chill", "upbeat"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 	if stored != "MOOD" || n != 2 {
-		t.Fatalf("SetItemTag = (%q,%d), want (MOOD,2)", stored, n)
+		t.Fatalf("SetItemTags = (%q,%d), want (MOOD,2)", stored, n)
 	}
 	if got := tagValues(t, st, pid, "MOOD"); len(got) != 2 || got[0] != "chill" || got[1] != "upbeat" {
 		t.Fatalf("MOOD values = %v", got)
@@ -75,18 +85,18 @@ func TestSetItemTag(t *testing.T) {
 	}
 
 	// A reserved key is rejected, directing the caller to the right surface.
-	if _, _, err := st.SetItemTag(ctx, pid, "artist", []string{"x"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, _, err := setTag(ctx, st, pid, "artist", []string{"x"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("reserved key should be CodeInvalid, got %v", err)
 	}
 	// An invalid key is rejected.
-	if _, _, err := st.SetItemTag(ctx, pid, "bad=key", []string{"x"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, _, err := setTag(ctx, st, pid, "bad=key", []string{"x"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("invalid key should be CodeInvalid, got %v", err)
 	}
 
 	// A whitespace-only value trims to empty, so it clears (reporting 0 stored) rather
 	// than reading as a set of one value. Even with lock on (the default), a clear must
 	// NOT leave a locked-empty tag behind (force is needed to clear the locked MOOD).
-	if _, n, err := st.SetItemTag(ctx, pid, "MOOD", []string{"   "}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil || n != 0 {
+	if _, n, err := setTag(ctx, st, pid, "MOOD", []string{"   "}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil || n != 0 {
 		t.Fatalf("whitespace-only value should clear (n=0), got n=%d err=%v", n, err)
 	}
 	if got := tagValues(t, st, pid, "MOOD"); got != nil {
@@ -96,7 +106,7 @@ func TestSetItemTag(t *testing.T) {
 		t.Fatalf("a clear must drop the tag.MOOD lock, not leave a locked-empty tag")
 	}
 	// Because the clear dropped the lock, a re-set needs no force.
-	if _, n, err := st.SetItemTag(ctx, pid, "MOOD", []string{"reset"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil || n != 1 {
+	if _, n, err := setTag(ctx, st, pid, "MOOD", []string{"reset"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil || n != 1 {
 		t.Fatalf("re-set after a clear should succeed without force: n=%d err=%v", n, err)
 	}
 }
@@ -114,14 +124,14 @@ func TestSetItemTagRefusesBookOwnedKeysOnBooks(t *testing.T) {
 	})
 	attr := model.Attribution{Source: model.SourceUser}
 	for _, k := range []string{"SUBTITLE", "edition", "ASIN"} {
-		_, _, err := st.SetItemTag(ctx, book.ItemPID, k, []string{"x"}, attr, model.LockOf(false), false)
+		_, _, err := setTag(ctx, st, book.ItemPID, k, []string{"x"}, attr, model.LockOf(false), false)
 		if !waxerr.Is(err, waxerr.CodeInvalid) {
-			t.Errorf("SetItemTag(book, %s) = %v, want CodeInvalid", k, err)
+			t.Errorf("SetItemTags(book, %s) = %v, want CodeInvalid", k, err)
 		}
 	}
 	track := putTrackCustom(t, st, lib.ID, "/lib/song.mp3", "te1", "tc1", "Airbag", nil, false)
-	if _, n, err := st.SetItemTag(ctx, track.ItemPID, "SUBTITLE", []string{"Live"}, attr, model.LockOf(false), false); err != nil || n != 1 {
-		t.Errorf("SetItemTag(track, SUBTITLE) = (%d, %v), want the tag stored", n, err)
+	if _, n, err := setTag(ctx, st, track.ItemPID, "SUBTITLE", []string{"Live"}, attr, model.LockOf(false), false); err != nil || n != 1 {
+		t.Errorf("SetItemTags(track, SUBTITLE) = (%d, %v), want the tag stored", n, err)
 	}
 }
 
@@ -139,7 +149,7 @@ func TestScanPreservesLockedCustomTag(t *testing.T) {
 	}
 
 	// User curates and locks MOOD.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"locked-mood"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"locked-mood"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 
@@ -176,7 +186,7 @@ func TestScanRefreshesFTSOnTagChangeWithoutAudioChange(t *testing.T) {
 	pid := res.ItemPID
 
 	// User overrides MOOD (unlocked) to a searchable value.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"editvalue"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"editvalue"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 	sr, _ := st.Search(ctx, "editvalue", read.SearchOptions{})
@@ -218,7 +228,7 @@ func TestCustomTagIsSearchable(t *testing.T) {
 	pid := res.ItemPID
 
 	// A distinctive custom-tag value should surface the item in full-text search.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"melancholic"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"melancholic"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 	sr, err := st.Search(ctx, "melancholic", read.SearchOptions{})
@@ -232,7 +242,7 @@ func TestCustomTagIsSearchable(t *testing.T) {
 
 // TestScanDropsALockedRowUnderANewlyReservedKey: newly reserving a key (MEDIA moved to
 // album.media) takes effect on the next rescan, and a lock cannot exempt it, since
-// SetItemTag rejects a reserved key and a surviving row would be uneditable. The fixture
+// SetItemTags rejects a reserved key and a surviving row would be uneditable. The fixture
 // is written directly: only a catalog predating the reservation can hold such a row.
 func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 	t.Parallel()
@@ -242,7 +252,7 @@ func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 		map[string][]string{"MOOD": {"chill"}}, true)
 	pid := res.ItemPID
 	// The control: a curated, locked tag under a key that stays custom.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"chill"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("lock MOOD: %v", err)
 	}
 
@@ -273,7 +283,7 @@ func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 		t.Errorf("locked tag.MEDIA survived the sync as %v; a reserved key has no custom-tag surface", got)
 	}
 	// The lock row goes with the values. IsCuratableField refuses a reserved tag.<KEY>,
-	// so a surviving row would be unreachable by SetItemTag and UnlockField alike.
+	// so a surviving row would be unreachable by SetItemTags and UnlockField alike.
 	var orphans int
 	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field='tag.MEDIA'", itemID).
@@ -394,9 +404,9 @@ func TestScanRetiresTheFoldedWireSpellings(t *testing.T) {
 		if orphans != 0 {
 			t.Errorf("tag.%s provenance rows = %d, want 0 (nothing could remove them)", key, orphans)
 		}
-		if _, _, err := st.SetItemTag(ctx, pid, key, []string{"x"},
+		if _, _, err := setTag(ctx, st, pid, key, []string{"x"},
 			model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
-			t.Errorf("SetItemTag(%s) = %v, want CodeInvalid for a reserved key", key, err)
+			t.Errorf("SetItemTags(%s) = %v, want CodeInvalid for a reserved key", key, err)
 		}
 	}
 	if got := tagValues(t, st, pid, "MOOD"); len(got) != 1 || got[0] != "chill" {
@@ -473,7 +483,7 @@ func TestGCReservedTagProvenanceKeepsLiveLocks(t *testing.T) {
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
 		map[string][]string{"MOOD": {"chill"}}, true)
 	pid := res.ItemPID
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"},
+	if _, _, err := setTag(ctx, st, pid, "MOOD", []string{"chill"},
 		model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("lock MOOD: %v", err)
 	}
@@ -513,7 +523,7 @@ func TestVerifyReclaimsStrandedTagKeys(t *testing.T) {
 		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("resolve item: %v", err)
 	}
-	// Seeded raw: SetItemTag refuses the key now, which is the point.
+	// Seeded raw: SetItemTags refuses the key now, which is the point.
 	err := st.writeTx(ctx, func(tx *sql.Tx) error {
 		for i, v := range []string{"a", "b"} {
 			if _, err := tx.ExecContext(ctx,
@@ -581,19 +591,19 @@ func TestTagEditOwesItsFiles(t *testing.T) {
 		return keys
 	}
 
-	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{" calm "}, user, model.LockUnchanged, false); err != nil {
+	if _, _, err := setTag(ctx, st, res.ItemPID, "MOOD", []string{" calm "}, user, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set unchanged: %v", err)
 	}
 	if got := owed(); got != nil {
 		t.Fatalf("owed after a set that changed nothing = %v, want none", got)
 	}
-	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "mood", []string{"happy"}, user, model.LockUnchanged, false); err != nil {
+	if _, _, err := setTag(ctx, st, res.ItemPID, "mood", []string{"happy"}, user, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	if got := owed(); !slices.Equal(got, []string{"tag.MOOD"}) {
 		t.Fatalf("owed after a catalog-only set = %v, want [tag.MOOD]", got)
 	}
-	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "YEAR", []string{"1999"}, user, model.LockUnchanged, false); err != nil {
+	if _, _, err := setTag(ctx, st, res.ItemPID, "YEAR", []string{"1999"}, user, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set an alias spelling: %v", err)
 	}
 	if got := owed(); !slices.Equal(got, []string{"tag.MOOD"}) {
@@ -621,7 +631,7 @@ func TestScanSettlesOwedTagRows(t *testing.T) {
 		return keys
 	}
 
-	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{"happy"}, user, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, res.ItemPID, "MOOD", []string{"happy"}, user, model.LockOn, false); err != nil {
 		t.Fatalf("set locked: %v", err)
 	}
 	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", calm, true)
@@ -633,7 +643,7 @@ func TestScanSettlesOwedTagRows(t *testing.T) {
 		t.Fatalf("owed once the file carries the value = %v, want none", got)
 	}
 
-	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{"sad"}, user, model.LockOff, true); err != nil {
+	if _, _, err := setTag(ctx, st, res.ItemPID, "MOOD", []string{"sad"}, user, model.LockOff, true); err != nil {
 		t.Fatalf("set unlocked: %v", err)
 	}
 	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c2", "One", happy, true)
@@ -658,7 +668,7 @@ func TestScanSettlesAReDerivedBookTagOnEveryPart(t *testing.T) {
 	if one.ItemPID != two.ItemPID {
 		t.Fatalf("parts landed on %s and %s, want one book", one.ItemPID, two.ItemPID)
 	}
-	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+	if _, _, err := setTag(ctx, st, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	for _, f := range []model.PID{one.FilePID, two.FilePID} {
@@ -688,7 +698,7 @@ func TestScanSettlesABookPartThatCarriesTheTag(t *testing.T) {
 	one := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1})
 	partTwo := bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2}
 	two := putBook(t, st, lib.ID, partTwo)
-	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
@@ -713,7 +723,7 @@ func TestIgnoreLocksRescanSettlesALockedTagEverywhere(t *testing.T) {
 	partOne := bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1}
 	one := putBook(t, st, lib.ID, partOne)
 	two := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2})
-	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
@@ -737,7 +747,7 @@ func TestVerifyReclaimsUnpayableTagOwedRows(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One", nil, true)
-	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{"calm"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+	if _, _, err := setTag(ctx, st, res.ItemPID, "MOOD", []string{"calm"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	// Seeded raw: each was owed before the rule that strands it.
@@ -761,5 +771,122 @@ func TestVerifyReclaimsUnpayableTagOwedRows(t *testing.T) {
 	}
 	if keys, err := owedKeysOf(ctx, st, res.FilePID); err != nil || !slices.Equal(keys, []string{"tag.MOOD"}) {
 		t.Errorf("owed after gc = %v (err %v), want the live key alone", keys, err)
+	}
+}
+
+// TestSetItemTagsWritesEveryKeyInOneDelta: several keys set and cleared in one call land in
+// one transaction with one item delta, each key reported canonical and in the order given,
+// each changed key owed and attributed.
+func TestSetItemTagsWritesEveryKeyInOneDelta(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", nil, true).ItemPID
+	user := model.Attribution{Source: model.SourceUser}
+	if _, _, err := setTag(ctx, st, pid, "OCCASION", []string{"party"}, user, model.LockUnchanged, false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	seq, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb := model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}
+	got, err := st.SetItemTags(ctx, pid, []model.TagEdit{
+		{Key: "mood", Values: []string{"calm", " bright "}}, {Key: "occasion"}, {Key: "Style", Values: []string{"lofi"}},
+	}, mb, model.LockOn, false)
+	if err != nil {
+		t.Fatalf("set tags: %v", err)
+	}
+	want := []model.StoredTag{{Key: "MOOD", Stored: 2}, {Key: "OCCASION", Stored: 0}, {Key: "STYLE", Stored: 1}}
+	if !slices.Equal(got, want) {
+		t.Errorf("stored = %+v, want %+v", got, want)
+	}
+	if v := tagValues(t, st, pid, "MOOD"); !slices.Equal(v, []string{"calm", "bright"}) {
+		t.Errorf("MOOD = %v", v)
+	}
+	if v := tagValues(t, st, pid, "OCCASION"); v != nil {
+		t.Errorf("OCCASION = %v, want cleared", v)
+	}
+	if locked, err := st.IsFieldLocked(ctx, pid, "tag.STYLE"); err != nil || !locked {
+		t.Errorf("tag.STYLE locked = %v (err %v), want the batch's lock", locked, err)
+	}
+	changes, err := st.ChangesSince(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items int
+	for _, c := range changes {
+		if c.EntityType == "item" {
+			items++
+		}
+	}
+	if items != 1 {
+		t.Errorf("item deltas = %d, want one for the whole batch", items)
+	}
+	owed, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteOwed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setters := map[string]string{}
+	for _, d := range owed {
+		setters[d.TagKey] = string(d.Source) + "/" + d.Provider
+	}
+	for _, k := range []string{"tag.MOOD", "tag.OCCASION", "tag.STYLE"} {
+		if setters[k] != "enrichment/musicbrainz" {
+			t.Errorf("owed %s setter = %q, want enrichment/musicbrainz (rows %v)", k, setters[k], setters)
+		}
+	}
+}
+
+// TestSetItemTagsRefusesTheWholeBatch: one key the batch cannot take refuses the call
+// before anything changes, and so do a key given twice and an empty batch.
+func TestSetItemTagsRefusesTheWholeBatch(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", nil, true).ItemPID
+	user := model.Attribution{Source: model.SourceUser}
+	if _, _, err := setTag(ctx, st, pid, "LOCKED", []string{"kept"}, user, model.LockOn, false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for _, c := range []struct {
+		name  string
+		edits []model.TagEdit
+		code  waxerr.Code
+	}{
+		{"a reserved key", []model.TagEdit{{Key: "MOOD", Values: []string{"x"}}, {Key: "artist", Values: []string{"x"}}}, waxerr.CodeInvalid},
+		{"a locked key", []model.TagEdit{{Key: "MOOD", Values: []string{"x"}}, {Key: "LOCKED", Values: []string{"y"}}}, waxerr.CodeLocked},
+		{"a key given twice", []model.TagEdit{{Key: "MOOD", Values: []string{"x"}}, {Key: "mood", Values: []string{"y"}}}, waxerr.CodeInvalid},
+		{"no keys", nil, waxerr.CodeInvalid},
+	} {
+		if _, err := st.SetItemTags(ctx, pid, c.edits, user, model.LockOn, false); !waxerr.Is(err, c.code) {
+			t.Errorf("%s: err = %v, want %s", c.name, err, c.code)
+		}
+		if v := tagValues(t, st, pid, "MOOD"); v != nil {
+			t.Errorf("%s: MOOD = %v, want nothing stored", c.name, v)
+		}
+	}
+	if v := tagValues(t, st, pid, "LOCKED"); !slices.Equal(v, []string{"kept"}) {
+		t.Errorf("LOCKED = %v, want it untouched", v)
+	}
+}
+
+// TestSetItemTagsRefusesAValueNoFileCanHold: a value with a NUL byte or invalid UTF-8 is
+// one no tag format holds, and the tag writer refuses every key beside it, so the catalog
+// refuses it with the batch before anything changes.
+func TestSetItemTagsRefusesAValueNoFileCanHold(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", nil, true).ItemPID
+	for _, bad := range []string{"a\x00b", "caf\xe9"} {
+		_, err := st.SetItemTags(ctx, pid, []model.TagEdit{{Key: "MOOD", Values: []string{"calm"}}, {Key: "STYLE", Values: []string{"ok", bad}}},
+			model.Attribution{Source: model.SourceUser}, model.LockOn, false)
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("value %q: err = %v, want CodeInvalid", bad, err)
+		}
+		if v := tagValues(t, st, pid, "MOOD"); v != nil {
+			t.Errorf("value %q: MOOD = %v, want nothing stored", bad, v)
+		}
 	}
 }

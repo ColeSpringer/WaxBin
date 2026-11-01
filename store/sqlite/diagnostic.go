@@ -57,12 +57,13 @@ func upsertFileDiagnosticTx(ctx context.Context, tx *sql.Tx, fileID int64, origi
 		seen = now
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO file_diagnostic
-		(file_id, origin, code, severity, tag_key, detail, seen_at, essence)
-		VALUES (?,?,?,?,?,?,?,?)
+		(file_id, origin, code, severity, tag_key, detail, seen_at, essence, source, provider)
+		VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(file_id, origin, code, tag_key) DO UPDATE SET
 			severity=excluded.severity, detail=excluded.detail, seen_at=excluded.seen_at,
-			essence=excluded.essence`,
-		fileID, string(origin), string(d.Code), string(sev), d.TagKey, model.CapDetail(d.Detail), seen, nullStr(essence))
+			essence=excluded.essence, source=excluded.source, provider=excluded.provider`,
+		fileID, string(origin), string(d.Code), string(sev), d.TagKey, model.CapDetail(d.Detail), seen, nullStr(essence),
+		string(d.Source), d.Provider)
 	return err
 }
 
@@ -168,6 +169,19 @@ func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.Diagnostic
 		conds = append(conds, "d.severity = ?")
 		args = append(args, string(filter.Severity))
 	}
+	for _, src := range []struct {
+		v  model.ProvenanceSource
+		eq string
+	}{{filter.Source, "="}, {filter.ExcludeSource, "<>"}} {
+		if src.v == "" {
+			continue
+		}
+		if !src.v.Valid() {
+			return "", nil, waxerr.New(waxerr.CodeInvalid, op, "unknown provenance source: "+string(src.v))
+		}
+		conds = append(conds, "d.source "+src.eq+" ?")
+		args = append(args, string(src.v))
+	}
 	if filter.LibraryPID != "" {
 		ids, err := s.libraryIDsByPIDs(ctx, []model.PID{filter.LibraryPID}, op)
 		if err != nil {
@@ -199,6 +213,11 @@ func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.Diagnostic
 // an analyze verdict on audio the file no longer holds.
 const diagnosticCurrent = "(d.essence IS NULL OR d.essence = f.essence_hash)"
 
+// diagnosticItemPID is the pid of the one item a row's file backs, NULL when it backs
+// several or none; item_file_file serves it.
+const diagnosticItemPID = `(SELECT CASE WHEN COUNT(DISTINCT itf.item_id) = 1 THEN MIN(pi.pid) END
+		FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id WHERE itf.file_id = d.file_id)`
+
 // FileDiagnostics returns the persisted diagnostics matching the filter, each
 // joined to its file's display path. Ordering is deterministic (path, origin,
 // code, key) so capped and offset-paged output is stable. The zero filter is the
@@ -209,8 +228,12 @@ func (s *Store) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilt
 	if err != nil {
 		return nil, err
 	}
+	item := diagnosticItemPID
+	if filter.OmitItemPID {
+		item = "NULL"
+	}
 	stmt := `SELECT f.pid, f.display_path, d.origin, d.code,
-		d.severity, d.tag_key, d.detail, d.seen_at
+		d.severity, d.tag_key, d.detail, d.seen_at, d.source, d.provider, ` + item + `
 		FROM file_diagnostic d JOIN file f ON f.id = d.file_id` + where + `
 		ORDER BY f.display_path, d.origin, d.code, d.tag_key`
 	switch {
@@ -233,11 +256,14 @@ func (s *Store) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilt
 	var out []model.FileDiagnostic
 	for rows.Next() {
 		var d model.FileDiagnostic
-		var origin, code, sev string
-		if err := rows.Scan(&d.FilePID, &d.DisplayPath, &origin, &code, &sev, &d.TagKey, &d.Detail, &d.SeenAt); err != nil {
+		var origin, code, sev, source string
+		var item sql.NullString
+		if err := rows.Scan(&d.FilePID, &d.DisplayPath, &origin, &code, &sev, &d.TagKey, &d.Detail, &d.SeenAt,
+			&source, &d.Provider, &item); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		d.Origin, d.Code, d.Severity = model.DiagnosticOrigin(origin), model.DiagnosticCode(code), model.AuditSeverity(sev)
+		d.Source, d.ItemPID = model.ProvenanceSource(source), model.PID(item.String)
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {

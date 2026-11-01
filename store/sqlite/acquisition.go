@@ -276,7 +276,7 @@ func (s *Store) SetAcquisition(ctx context.Context, itemPID model.PID, in model.
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if after != prior {
-			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedAcquisition}); err != nil {
+			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedAcquisition}, model.Attribution{Source: model.SourceUser}); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -324,7 +324,7 @@ func acquisitionTagStateTx(ctx context.Context, tx *sql.Tx, itemID int64) (strin
 // is not "leave the lock alone". A set leaves a row the merge rule already refuses to
 // lower, while a clear leaves nothing, so the next scan re-derives the same wrong origin
 // from the file's own tags. The clear is the one that gets undone by default, and
-// LockOff is the explicit opt-out. SetItemTag's clear is the precedent for a clear owning
+// LockOff is the explicit opt-out. SetItemTags' clear is the precedent for a clear owning
 // its own lock rule, and it points the other way: a locked-empty custom tag would block a
 // later re-set from the file, while a locked-empty acquisition is exactly the point.
 func (s *Store) ClearAcquisition(ctx context.Context, itemPID model.PID, lock model.LockChange, force bool) error {
@@ -368,7 +368,7 @@ func (s *Store) ClearAcquisition(ctx context.Context, itemPID model.PID, lock mo
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if hasRow {
-			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedAcquisition}); err != nil {
+			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedAcquisition}, model.Attribution{Source: model.SourceUser}); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}

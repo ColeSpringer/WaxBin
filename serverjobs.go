@@ -216,6 +216,9 @@ func (l *Library) analyzeWork(writeRG bool, out *AnalyzeResult) jobFn {
 
 // StartAnalyze submits the analyze pass as a background job and returns its PID.
 func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.PID, error) {
+	if err := l.fpcalcUsable("waxbin.StartAnalyze"); err != nil {
+		return "", err
+	}
 	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
 	return l.startJob(ctx, jobs.Spec{Kind: "analyze", Scope: "analyze"}, func(jctx context.Context, h *jobs.Handle) error {
 		out := &AnalyzeResult{}

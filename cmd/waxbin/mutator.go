@@ -266,15 +266,19 @@ func (m *mutator) ClearAcquisition(ctx context.Context, itemPID model.PID, opts 
 	return m.lib.ClearAcquisition(ctx, itemPID, opts)
 }
 
-func (m *mutator) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts waxbin.TagEditOptions) (string, int, error) {
+func (m *mutator) SetItemTags(ctx context.Context, itemPID model.PID, edits []model.TagEdit, opts waxbin.TagEditOptions) (waxbin.TagsResult, error) {
 	if m.px != nil {
-		res, err := m.px.SetTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
+		res, err := m.px.SetTags(ctx, itemPID, edits, opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
 		if err != nil {
-			return "", 0, err
+			return waxbin.TagsResult{}, err
 		}
-		return res.Key, res.Stored, writeBackErr(itemPID, nil, res.WriteBackFailures)
+		out := waxbin.TagsResult{Tags: make([]model.StoredTag, len(res.Tags)), Written: res.Written}
+		for i, t := range res.Tags {
+			out.Tags[i] = model.StoredTag{Key: t.Key, Stored: t.Stored}
+		}
+		return out, writeBackErr(itemPID, nil, res.WriteBackFailures)
 	}
-	return m.lib.SetItemTag(ctx, itemPID, key, values, opts)
+	return m.lib.SetItemTags(ctx, itemPID, edits, opts)
 }
 
 func (m *mutator) Provenance(ctx context.Context, pid model.PID) ([]model.FieldProvenance, error) {
@@ -646,7 +650,7 @@ func writeBackErrs(failures map[string][]proxy.WriteBackFailure,
 func fromProxyFailures(failures []proxy.WriteBackFailure) []waxbin.WriteBackFailure {
 	out := make([]waxbin.WriteBackFailure, len(failures))
 	for i, f := range failures {
-		out[i] = waxbin.WriteBackFailure{FilePID: model.PID(f.FilePID), Path: f.Path, Reason: f.Reason}
+		out[i] = waxbin.WriteBackFailure{FilePID: model.PID(f.FilePID), Path: f.Path, Key: f.Key, Lost: f.Lost, Reason: f.Reason}
 	}
 	return out
 }

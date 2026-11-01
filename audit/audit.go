@@ -205,7 +205,7 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 	var corruptSeen map[string]bool
 	runDiag, runCorrupt := a.runs(cfg, model.CheckFileDiagnostic), a.runs(cfg, model.CheckCorruptAudio)
 	if runDiag || runCorrupt {
-		ds, err := a.store.FileDiagnostics(ctx, model.DiagnosticFilter{})
+		ds, err := a.store.FileDiagnostics(ctx, model.DiagnosticFilter{OmitItemPID: true})
 		if err != nil {
 			return nil, err
 		}

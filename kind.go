@@ -617,9 +617,9 @@ func (l *Library) finishKind(ctx context.Context, op string, targets []model.Kin
 		}
 	}
 	wb := &WriteBackError{}
-	if err := l.writeBackFiles(ctx, op, model.OriginEdit, refs, wb, nil, nil, func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, refs, wb, nil, nil, wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 		return w.Apply(ctx, path, []meta.TagEdit{edit})
-	}); err != nil {
+	})); err != nil {
 		return err
 	}
 	rep.WriteBackFailures = wb.Failures

@@ -210,7 +210,7 @@ func (s *Store) setItemCreditsBatch(ctx context.Context, op string, edits []mode
 			if err != nil {
 				return err
 			}
-			if err := noteOwedCreditTx(ctx, tx, e, before[i]); err != nil {
+			if err := noteOwedCreditTx(ctx, tx, e, before[i], attr); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			res.Edited = append(res.Edited, model.ItemCreditEdit{ItemPID: e.pid, Role: e.role, Names: stored})
@@ -398,7 +398,7 @@ func creditStateTx(ctx context.Context, tx *sql.Tx, e creditEntry) (creditState,
 
 // noteOwedCreditTx records an applied credit as owed to the item's files when its state
 // moved from before and a write-back can carry its role.
-func noteOwedCreditTx(ctx context.Context, tx *sql.Tx, e creditEntry, before creditState) error {
+func noteOwedCreditTx(ctx context.Context, tx *sql.Tx, e creditEntry, before creditState, attr model.Attribution) error {
 	if !model.CreditWritable(e.role) {
 		return nil
 	}
@@ -406,7 +406,7 @@ func noteOwedCreditTx(ctx context.Context, tx *sql.Tx, e creditEntry, before cre
 	if err != nil || !before.moved(after) {
 		return err
 	}
-	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, []string{model.CreditField(e.role)})
+	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, []string{model.CreditField(e.role)}, attr)
 }
 
 // creditRenameField reports the rename pre-pass's key field for a credit role, if it

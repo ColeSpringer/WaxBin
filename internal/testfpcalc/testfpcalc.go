@@ -36,3 +36,35 @@ func Write(t testing.TB, stdout, stderr string, code int) string {
 	}
 	return bin
 }
+
+// WriteLogged is Write with each run's arguments appended as a line to the file at the
+// returned log path, so a test can count the runs and see what each was asked.
+func WriteLogged(t testing.TB, stdout, stderr string, code int) (bin, log string) {
+	t.Helper()
+	bin = Write(t, stdout, stderr, code)
+	log = filepath.Join(filepath.Dir(bin), "runs")
+	script, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := strings.Replace(string(script), "#!/bin/sh\n", fmt.Sprintf("#!/bin/sh\necho \"$*\" >> '%s'\n", log), 1)
+	cmd := exec.Command("/bin/sh", "-c", `cat > "$1.new" && chmod 755 "$1.new" && mv "$1.new" "$1"`, "testfpcalc", bin)
+	cmd.Stdin = strings.NewReader(logged)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write logging fpcalc stand-in: %v: %s", err, out)
+	}
+	return bin, log
+}
+
+// Runs returns the argument lines a WriteLogged stand-in recorded, one per run.
+func Runs(t testing.TB, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+}

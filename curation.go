@@ -2,6 +2,7 @@ package waxbin
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/colespringer/waxbin/art"
@@ -230,9 +231,9 @@ func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.
 	}
 	wbErr := &WriteBackError{ItemPID: refPID, Edits: edits}
 	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil, []string{owed},
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+		wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.ApplyPicture(ctx, path, pedit)
-		}); err != nil {
+		})); err != nil {
 		return err
 	}
 	return wbErr.result()
@@ -272,41 +273,98 @@ func (o TagEditOptions) Attribution() model.Attribution {
 	return model.Attribution{Source: o.Source, Provider: o.Provider}
 }
 
-// SetItemTag replaces a custom tag's ordered values on an item, recording opts.Source
-// (empty means a user edit) and opts.Lock on "tag.<KEY>" so a scan does not re-derive it
-// from the file. Empty (or whitespace-only) values clear the tag. The key is normalized
-// to canonical uppercase; a reserved key (one WaxBin owns through the scalar, credit, or
-// identifier APIs) is rejected. It returns the canonical key stored and the number of
-// values actually stored after trimming (0 means the tag was cleared).
+// TagsResult reports a SetItemTags call.
+type TagsResult struct {
+	// Tags are the keys as stored, canonical and in the order given, each with the number
+	// of values it holds after trimming (0 for a clear).
+	Tags []model.StoredTag
+	// Written counts the files the write-back rewrote, each once: a file that took none of
+	// the keys, or held every value already, is not rewritten.
+	Written int
+}
+
+// SetItemTags replaces several custom tags' ordered values on an item in one catalog
+// write, recording opts.Source (empty means a user edit) and opts.Lock on each
+// "tag.<KEY>" field so a scan does not re-derive it from the file. An edit with empty (or
+// whitespace-only) values clears its tag. Keys are normalized to canonical uppercase; a
+// reserved key (one WaxBin owns through the scalar, credit, or identifier APIs), a key
+// given twice, and a locked key without opts.Force refuse the whole call before anything
+// changes.
 //
-// With opts.WriteBack set, the stored values are also written into the backing files once
-// the catalog edit commits, and a file that cannot take them is reported the way
-// EditFields reports one: a *WriteBackError beside the returned key and count, with the
-// edit standing. A key WaxLabel writes onto another field on every format (YEAR is the
-// recording date) is refused with CodeInvalid before anything changes, a clear included,
-// and a file whose own format would do so (TPE2 on an MP3) is refused at that file.
-func (l *Library) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts TagEditOptions) (string, int, error) {
-	// The list the store reads to owe such a key nothing decides it here too; WaxLabel only
-	// names the field.
-	if canon, ok := model.CanonicalTagKey(key); ok && opts.WriteBack && model.IsRetargetedTagKey(canon) {
-		to, _ := meta.RetargetedTagKey(canon)
-		msg := "tag key " + canon + " is written to a file as " + to
-		if model.IsReservedTagKey(to) {
-			msg += ", which WaxBin keeps as a field of its own rather than a custom tag"
-		} else {
-			msg += "; set the tag as " + to
+// With opts.WriteBack the stored values are also written into the backing files once the
+// catalog edit commits, each file rewritten once with every key. A file whose format would
+// write a key onto another field (TPE2 on an MP3), or change another field writing it, is
+// written a key at a time instead, so that key is refused there alone while the others go
+// in. A file that cannot take a key is reported the way EditFields reports one: a
+// *WriteBackError beside the result, with the edit standing, its failure naming the key
+// when the file's other keys went in. A key WaxLabel writes onto another field on every
+// format (YEAR is the recording date) is refused with CodeInvalid before anything changes,
+// a clear included.
+func (l *Library) SetItemTags(ctx context.Context, itemPID model.PID, edits []model.TagEdit, opts TagEditOptions) (TagsResult, error) {
+	const op = "waxbin.SetItemTags"
+	if opts.WriteBack {
+		// The list the store reads to owe such a key nothing decides it here too; WaxLabel
+		// only names the field.
+		for _, e := range edits {
+			canon, ok := model.CanonicalTagKey(e.Key)
+			if !ok || !model.IsRetargetedTagKey(canon) {
+				continue
+			}
+			to, _ := meta.RetargetedTagKey(canon)
+			msg := "tag key " + canon + " is written to a file as " + to
+			if model.IsReservedTagKey(to) {
+				msg += ", which WaxBin keeps as a field of its own rather than a custom tag"
+			} else {
+				msg += "; set the tag as " + to
+			}
+			return TagsResult{}, waxerr.New(waxerr.CodeInvalid, op, msg)
 		}
-		return "", 0, waxerr.New(waxerr.CodeInvalid, "waxbin.SetItemTag", msg)
 	}
-	canon, n, err := l.store.SetItemTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force)
+	stored, err := l.store.SetItemTags(ctx, itemPID, edits, opts.Attribution(), opts.Lock, opts.Force)
+	res := TagsResult{Tags: stored}
 	if err != nil || !opts.WriteBack {
-		return canon, n, err
+		return res, err
 	}
-	clean := model.CleanTagValues(values)
-	return canon, n, l.writeBackItem(ctx, "waxbin.SetItemTag", itemPID, []string{model.TagLockField(canon)},
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
-			return w.ApplyCustomTag(ctx, path, canon, clean)
-		})
+	writes := make([]meta.TagEdit, len(stored))
+	settles := make([]string, len(stored))
+	for i, t := range stored {
+		writes[i] = meta.TagEdit{Key: t.Key, Values: model.CleanTagValues(edits[i].Values)}
+		settles[i] = model.TagLockField(t.Key)
+	}
+	err = l.writeBackItem(ctx, op, itemPID, settles, func(w *meta.Writer, path string) (fileWrite, error) {
+		wr, err := w.ApplyCustomTags(ctx, path, writes)
+		if err != nil {
+			return fileWrite{}, err
+		}
+		if wr.Changed {
+			res.Written++
+		}
+		if len(wr.Refused) == 0 {
+			return fileWrite{res: &wr.WriteResult}, nil
+		}
+		return refusedKeys(wr, writes), nil
+	})
+	return res, err
+}
+
+// refusedKeys is the write-back outcome of a file that refused some of writes: the rewrite,
+// unless every key was refused, each refusal, and the owed fields the file pays, each key
+// that went in and each its format can never carry.
+func refusedKeys(wr *meta.CustomTagsResult, writes []meta.TagEdit) fileWrite {
+	fw := fileWrite{settles: make([]string, 0, len(writes))}
+	if len(wr.Refused) < len(writes) {
+		fw.res = &wr.WriteResult
+	}
+	for _, w := range writes {
+		err, refused := wr.Refused[w.Key]
+		if !refused || errors.Is(err, meta.ErrNotCustomTag) {
+			fw.settles = append(fw.settles, model.TagLockField(w.Key))
+		}
+		if refused {
+			fw.refused = append(fw.refused, keyRefusal{key: w.Key, err: err})
+		}
+	}
+	return fw
 }
 
 // ItemTags returns an item's custom tags (the non-standard frames WaxBin's model does
