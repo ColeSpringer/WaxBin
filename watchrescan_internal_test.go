@@ -62,3 +62,43 @@ func TestLogTickCallsOnlyAHeldLeaseBusy(t *testing.T) {
 		t.Fatalf("log = %q, want the held lease at debug and the other conflict a warning", lines)
 	}
 }
+
+// TestWatchRescanCountsARevivalAsAChange: a rescan whose only effect was finding a missing
+// item's file again reports a change, so the watcher's downstream passes run for it.
+func TestWatchRescanCountsARevivalAsAChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	path := filepath.Join(root, "1.mp3")
+	data := testaudio.BuildMP3WithAudio("Song", "Band", "One", 1, testaudio.AudioWithSeed(4))
+	writeRaw(t, path, data)
+	res, err := lib.Scan(ctx, ScanRequest{})
+	if err != nil || res.Total.ItemsCreated != 1 {
+		t.Fatalf("scan = %+v (err %v)", res, err)
+	}
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := lib.store.FileByPath(ctx, []byte(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.store.MarkFilesMissing(ctx, []model.PID{file.PID}); err != nil {
+		t.Fatal(err)
+	}
+	writeRaw(t, path, data)
+	changed, err := (&watchEngine{lib: lib}).Rescan(ctx, libs[0].PID, "", false)
+	if err != nil || !changed {
+		t.Errorf("rescan changed = %v (err %v), want a change", changed, err)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/colespringer/waxbin"
@@ -123,8 +124,9 @@ func emitKindReport(cmd *cobra.Command, g *globals, kind model.Kind, rep *waxbin
 	for _, p := range absorbed {
 		fmt.Fprintf(out(cmd), "  absorbed  %s -> %s\n", p, rep.Absorbed[p])
 	}
-	for _, p := range rep.Created {
-		fmt.Fprintf(out(cmd), "  created   %s\n", p)
+	created := slices.Sorted(maps.Keys(rep.Created))
+	for _, p := range created {
+		fmt.Fprintf(out(cmd), "  created   %s from %s\n", p, rep.Created[p])
 	}
 	for _, f := range rep.WriteBackFailures {
 		fmt.Fprintf(errOut(cmd), "warning: on-disk write-back skipped for %s: %s\n", f.Path, f.Reason)

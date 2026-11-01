@@ -37,6 +37,11 @@ type Library struct {
 	FolderFallback bool
 }
 
+// ReasonLibraryReadOnly is the reason an organize, delete or import plan gives an action
+// held by a read-only library, when planned and when a plan applied after the flag rechecks
+// it.
+const ReasonLibraryReadOnly = "library is read-only"
+
 // RootPath is the library root as a path to open: DisplayRoot, or Root when that is empty.
 func (l *Library) RootPath() string {
 	if l.DisplayRoot != "" {
@@ -108,6 +113,26 @@ type File struct {
 	ScanState ScanState
 	FirstSeen int64 // unix nanoseconds
 	LastSeen  int64 // unix nanoseconds
+}
+
+// FileOccupant is a cataloged file as an import weighs it: what stands at a destination,
+// or what already holds a staged file's audio. ItemPID is the item the file backs, its
+// primary edge first (for a cue rip, its first track), with that item's Kind and State; all
+// three are empty for a file that backs none. OnDisk says the file was there when the store
+// looked, and Reachable that its library root was, so a file not on disk under a reachable
+// root is gone, while one under a root that is not there (an unplugged drive) is only out of
+// sight.
+type FileOccupant struct {
+	Path        []byte
+	DisplayPath string
+	FilePID     PID
+	LibraryID   int64
+	ItemPID     PID
+	Kind        Kind
+	State       ItemState
+	Essence     string
+	OnDisk      bool
+	Reachable   bool
 }
 
 // PlayableItem is the logical supertype shared by track/book/episode. Its PK is

@@ -29,6 +29,20 @@ CREATE INDEX item_kind_release_year ON playable_item(kind, release_year, pid) WH
 CREATE UNIQUE INDEX item_identity ON playable_item(kind, identity_key)
   WHERE identity_key IS NOT NULL;
 
+-- Where an item a kind change's write folded away went (absorbed = 1) and which item's
+-- file an item it made came from (absorbed = 0), recorded under the change's job in the
+-- write's own transaction, so a change a crash or a cancel cuts off can still say both. A
+-- change that finishes drops its rows. Pids, not ids: a folded item is deleted.
+CREATE TABLE item_lineage (
+  pid       TEXT    NOT NULL,
+  absorbed  INTEGER NOT NULL,
+  job_pid   TEXT    NOT NULL,
+  other_pid TEXT    NOT NULL,
+  at        INTEGER NOT NULL,          -- unix nanoseconds
+  PRIMARY KEY (pid, absorbed, job_pid)
+) WITHOUT ROWID;
+CREATE INDEX item_lineage_job ON item_lineage(job_pid, absorbed, other_pid);
+
 -- Item <-> file graph with offsets (a file can back multiple items).
 -- start_frames/end_frames are the virtual-track window in CD frames (75/sec), the
 -- unit the .cue sheet that carved it is written in, and NULL for a whole-file edge.

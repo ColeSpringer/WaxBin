@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -91,6 +92,10 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		// sheet still declares one takes it over (handVirtualTrackOverTx); one only this
 		// file backs is deleted outright.
 		lostEdges, _, err := itemLostEdgesTx(ctx, tx, fileID, in.File.EssenceHash)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		source, err := wholeFileHolderTx(ctx, tx, lostEdges)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -186,7 +191,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 					if err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
-					joined = joined || changed
+					joined, res.Revived = joined || changed, res.Revived || revived
 					if changed || revived {
 						if err := appendChange(ctx, tx, "item", primary.itemPID, model.OpUpdate); err != nil {
 							return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -231,15 +236,16 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 					if err := appendItemUpdateTx(ctx, tx, ex.itemID); err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
-					setChanged = true
+					setChanged, res.Revived = true, true
 				}
 				continue
 			}
 
-			itemID, itemPID, created, _, was, err := upsertItem(ctx, tx, s.log, vt.Item, vt.Track.Year, bookAdoptKey{}, now, "", keys[vt.Item.IdentityKey])
+			itemID, itemPID, created, stateChanged, was, err := upsertItem(ctx, tx, s.log, vt.Item, vt.Track.Year, bookAdoptKey{}, now, "", keys[vt.Item.IdentityKey])
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+			res.Revived = res.Revived || stateChanged
 			if created {
 				anyCreated = true
 				fresh[itemID] = itemPID
@@ -295,7 +301,39 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			}
 		}
 
-		if err := foldIntoRipTx(ctx, tx, gone, fileID, fresh, in.PreserveLocks, affected); err != nil {
+		absorbed, handedRow, err := foldIntoRipTx(ctx, tx, gone, fileID, fresh, in.PreserveLocks, affected)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if len(absorbed) > 0 {
+			res.Absorbed = absorbed
+		}
+		// The tracks made from nothing: not the opener that took a folded item's pid, nor one
+		// a folded item went into.
+		took := map[model.PID]bool{}
+		for _, into := range absorbed {
+			took[into] = true
+		}
+		for id, pid := range fresh {
+			if id != handedRow && !took[pid] {
+				res.Made = append(res.Made, pid)
+			}
+		}
+		slices.Sort(res.Made)
+		// The tracks a sheet carves out of a file an item held whole are minted from that
+		// item, the opener that took its pid aside.
+		if source != "" {
+			for id, pid := range fresh {
+				if id == handedRow {
+					continue
+				}
+				if res.Minted == nil {
+					res.Minted = map[model.PID]model.PID{}
+				}
+				res.Minted[pid] = source
+			}
+		}
+		if err := recordLineageTx(ctx, tx, in.Job, res.Absorbed, res.Minted); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -599,8 +637,8 @@ func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence
 			gone = append(gone, id)
 		}
 	}
-	promoted, _, _, err := reconcileOrphansTx(ctx, tx, kept, dep, affected)
-	return true, promoted, gone, err
+	o, err := reconcileOrphansTx(ctx, tx, kept, dep, affected)
+	return true, o.promoted, gone, err
 }
 
 // ripWindow is one track's window on a rip's file, in milliseconds; end is -1 for the
@@ -636,17 +674,19 @@ func holding(ws []ripWindow, pos int64) (ripWindow, int64) {
 // an offset into it; everything else foldItemIntoTx carries (plays, stars, the rating,
 // sessions, queue and playlist entries, acquisition, kept custom tags) goes to the track
 // that opens the file, which also takes the item's pid when this put made it (fresh), so
-// a reference to the item names that track from then on. Then each item goes.
-func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, fresh map[int64]model.PID, preserveLocks bool, affected *affectedRollups) error {
+// a reference to the item names that track from then on. Then each item goes. It returns
+// each item folded away with the track that took it in, and the row of the opener that
+// took an item's pid instead, 0 for none.
+func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, fresh map[int64]model.PID, preserveLocks bool, affected *affectedRollups) (map[model.PID]model.PID, int64, error) {
 	if len(gone) == 0 {
-		return nil
+		return nil, 0, nil
 	}
 	// A copy of a rip backs its tracks through alternate edges over the same windows, so
 	// every windowed edge counts.
 	rows, err := tx.QueryContext(ctx, `SELECT item_id, MIN(start_frames), COALESCE(MAX(end_frames), -1) FROM item_file
 		WHERE file_id = ? AND start_frames IS NOT NULL GROUP BY item_id ORDER BY 2`, fileID)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	var ws []ripWindow
 	for rows.Next() {
@@ -654,7 +694,7 @@ func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, 
 		var start, end int64
 		if err := rows.Scan(&w.item, &start, &end); err != nil {
 			rows.Close()
-			return err
+			return nil, 0, err
 		}
 		w.start, w.end = model.FramesToMS(start), -1
 		if end > 0 {
@@ -664,67 +704,96 @@ func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, 
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, 0, err
 	}
 	var batch entryHolders
 	if len(ws) == 0 {
 		// Nothing to fold into: the items go as they did before a rip could take them.
 		for _, id := range gone {
 			if err := affected.collect(ctx, tx, id); err != nil {
-				return err
+				return nil, 0, err
 			}
 			pid, err := deleteItemCascade(ctx, tx, id, &batch)
 			if err != nil {
-				return err
+				return nil, 0, err
 			}
 			if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
-				return err
+				return nil, 0, err
 			}
 		}
-		return batch.settleTx(ctx, tx)
+		return nil, 0, batch.settleTx(ctx, tx)
 	}
 	opener := ws[0].item
+	openerPID, made := fresh[opener]
+	if !made {
+		if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", opener).Scan(&openerPID); err != nil {
+			return nil, 0, err
+		}
+	}
+	absorbed := map[model.PID]model.PID{}
+	handedRow := int64(0)
 	tracks := make([]int64, len(ws))
 	for i, w := range ws {
 		tracks[i] = w.item
 	}
 	for i, id := range gone {
 		if err := movePlacesIntoRipTx(ctx, tx, id, ws); err != nil {
-			return err
+			return nil, 0, err
 		}
 		// A whole heard to its end heard every track of it; its plays stay with the opener.
 		by, err := finishedByTx(ctx, tx, []int64{id})
 		if err != nil {
-			return err
+			return nil, 0, err
 		}
 		if err := finishTx(ctx, tx, tracks, by, nowNS()); err != nil {
-			return err
+			return nil, 0, err
 		}
 		if err := foldItemIntoTx(ctx, tx, id, opener, fileID, partSpan{}, preserveLocks, &batch); err != nil {
-			return err
+			return nil, 0, err
 		}
 		if err := affected.collect(ctx, tx, id); err != nil {
-			return err
+			return nil, 0, err
 		}
 		pid, err := deleteItemCascade(ctx, tx, id, &batch)
 		if err != nil {
-			return err
+			return nil, 0, err
 		}
-		freshPID, made := fresh[opener]
-		if i > 0 || !made {
-			if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
-				return err
+		if i == 0 && made {
+			took, err := handPIDTx(ctx, tx, openerPID, pid, true)
+			if err != nil {
+				return nil, 0, err
 			}
-			continue
+			if took {
+				openerPID, handedRow = pid, opener
+				if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
+					return nil, 0, err
+				}
+				continue
+			}
 		}
-		if _, err := handPIDTx(ctx, tx, freshPID, pid, true); err != nil {
-			return err
-		}
-		if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
-			return err
+		absorbed[pid] = openerPID
+		if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
+			return nil, 0, err
 		}
 	}
-	return batch.settleTx(ctx, tx)
+	return absorbed, handedRow, batch.settleTx(ctx, tx)
+}
+
+// wholeFileHolderTx is the pid of the item that held a file whole as its primary or a part
+// before this put (the lowest row when several did), or "" for none.
+func wholeFileHolderTx(ctx context.Context, tx *sql.Tx, lost map[int64]lostEdge) (model.PID, error) {
+	holder := int64(0)
+	for id, e := range lost {
+		if e.role != alternateRole && !e.start.Valid && (holder == 0 || id < holder) {
+			holder = id
+		}
+	}
+	if holder == 0 {
+		return "", nil
+	}
+	var pid model.PID
+	err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", holder).Scan(&pid)
+	return pid, err
 }
 
 // movePlacesIntoRipTx moves an item's resume positions and bookmarks onto the rip

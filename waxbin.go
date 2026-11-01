@@ -132,6 +132,11 @@ type Library struct {
 	reopenMu       sync.Mutex
 	reopenOwed     bool
 	reopenReplaced bool
+
+	// kindCheckpointEvery and kindCheckpointAfter override a kind change's checkpoint
+	// cadence when set (kindCheckpointEvery, kindCheckpointAfter in kind.go).
+	kindCheckpointEvery int
+	kindCheckpointAfter time.Duration
 }
 
 // Open opens (creating if needed) the catalog and wires the subsystems. A
@@ -233,8 +238,18 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		}
 		l.ensurePodcastLibrary(ctx)
 		l.warnUnknownProfiles(ctx)
+		l.completeCutOffWork(ctx)
 	}
 	return l, nil
+}
+
+// completeCutOffWork completes the reports of the jobs the store reclaimed as crashed that
+// can be completed from what the catalog recorded (completeCutOffKindChanges). A failure
+// only warns: the reports stay their last checkpoints, and the next open tries again.
+func (l *Library) completeCutOffWork(ctx context.Context) {
+	if err := l.completeCutOffKindChanges(ctx); err != nil {
+		l.log.Warn("could not complete the report of a kind change a crash cut off", "err", err)
+	}
 }
 
 // knownProfile refuses a managed root whose profile the set does not define. Only
@@ -1167,16 +1182,17 @@ type ScanResult struct {
 	Runs   []scan.Result
 }
 
-// Scan indexes the selected libraries under a single "scan"-scoped job. Rollups are
-// maintained transactionally per scanned track, so no whole-catalog refresh is needed
-// here. StartScan is the asynchronous variant a server exposes.
+// Scan indexes the selected libraries under a single "scan"-scoped job, whose row records
+// the result when the scan changed the catalog or ended early. Rollups are maintained
+// transactionally per scanned track, so no whole-catalog refresh is needed here.
+// StartScan is the asynchronous variant a server exposes.
 func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error) {
 	libs, err := l.resolveLibraries(ctx, req.LibraryPID)
 	if err != nil {
 		return nil, err
 	}
 	out := &ScanResult{}
-	job, runErr := l.jobs.Run(ctx, scanSpec(req), l.scanWork(libs, req, out))
+	job, runErr := l.jobs.Run(ctx, scanSpec(req), l.scanWork(libs, req, out, false))
 	if job != nil {
 		out.JobPID = job.PID
 	}
@@ -1313,13 +1329,10 @@ func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath stri
 	if err != nil {
 		return false, err
 	}
-	t := res.Total
 	// A live .lrc/.cue edit mutates the catalog without touching the audio bytes, so it
-	// bumps SidecarsUpdated but not ItemsUpdated. Include it, or a sidecar-only change
-	// reports changed=false and every downstream scheduler is silently skipped.
-	changed := t.ItemsCreated > 0 || t.ItemsUpdated > 0 || t.Relinked > 0 || t.Missing > 0 || t.SidecarsUpdated > 0 ||
-		t.Copies > 0 || t.Promoted > 0 || t.Dropped > 0
-	return changed, nil
+	// counts as a sidecar update, not an item update; Changed includes it, or a sidecar-only
+	// change would skip every downstream scheduler.
+	return res.Total.Changed(), nil
 }
 
 func (e *watchEngine) Analyze(ctx context.Context) error {
@@ -2961,7 +2974,7 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 		for i := range live.Actions {
 			a := &live.Actions[i]
 			if !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
-				a.Skip, a.Code, a.Reason = true, organize.HoldReadOnly, readOnlySinceThePlan
+				a.Skip, a.Code, a.Reason = true, organize.HoldReadOnly, model.ReasonLibraryReadOnly
 			}
 			// A plan built without roots (by hand, or before actions carried them) takes
 			// each file's library, which the cover pass and the prune need.
@@ -3158,7 +3171,7 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 		for i := range live.Actions {
 			a := &live.Actions[i]
 			if !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
-				a.Skip, a.Reason = true, readOnlySinceThePlan
+				a.Skip, a.Code, a.Reason = true, trash.SkipReadOnly, model.ReasonLibraryReadOnly
 			}
 			// A plan built without roots (by hand, or before actions carried them) takes
 			// each file's library, which the prune needs to bound itself and to know
@@ -3180,10 +3193,6 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 	})
 	return rep, err
 }
-
-// readOnlySinceThePlan is why an applied plan skips an action whose library was
-// flagged read-only after the plan was built.
-const readOnlySinceThePlan = "library is read-only"
 
 // libraryAt returns the library whose root holds the raw path, or nil.
 func libraryAt(libs []*model.Library, raw []byte) *model.Library {
@@ -3806,7 +3815,7 @@ func quarantineReadOnlySources(libs []*model.Library, plan *inbox.Plan) {
 			continue
 		}
 		if reason := hold(a.Src); reason != "" {
-			a.Outcome, a.Reason = inbox.OutcomeQuarantine, reason
+			a.Refuse(inbox.OutcomeQuarantine, inbox.HoldReadOnlySource, reason, nil)
 			plan.TotalBytes -= a.Size
 		}
 	}
@@ -3823,13 +3832,17 @@ func firstMixedOrFirst(managed []*model.Library) *model.Library {
 	return managed[0]
 }
 
-// ApplyImport executes an import plan under an "import"-scoped job. A file bound for
-// a library flagged read-only since the plan was built is quarantined in place, and
-// under DupSkip a file whose audio reached the catalog since the plan was built (another
-// import applied first) is skipped as a duplicate; a book one of whose parts no longer
-// lands stays where it is with it.
+// ApplyImport executes an import plan under an "import"-scoped job. Each importable file
+// is checked again first: one bound for a library flagged read-only since the plan was
+// built, or staged in one, is quarantined in place, as is one whose destination something
+// took since, by the plan's own check (inbox.DestinationHold: a file there or apart only by
+// case, or a cataloged file the catalog holds the path for); under DupSkip a file whose
+// audio reached the catalog since (another import applied first) is skipped as a
+// duplicate; and a book one of whose parts no longer lands stays where it is with it. The report names each of them (inbox.Report.Holds). It is never nil: a run that
+// could not start (its lease held, its preflight refused) returns an empty one with the
+// error.
 func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Report, error) {
-	var rep *inbox.Report
+	rep := &inbox.Report{}
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "import", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
 		libs, err := l.store.Libraries(ctx)
 		if err != nil {
@@ -3838,28 +3851,46 @@ func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Rep
 		readOnly := readOnlyIDs(libs)
 		live := *plan
 		live.Actions = slices.Clone(plan.Actions)
+		ls := fsx.NewLister()
 		for i := range live.Actions {
 			a := &live.Actions[i]
+			if a.Outcome != inbox.OutcomeImport {
+				continue
+			}
 			target := a.Library
 			if target == nil {
 				target = plan.Library
 			}
-			if a.Outcome == inbox.OutcomeImport && target != nil && readOnly[target.ID] {
-				a.Outcome, a.Reason = inbox.OutcomeQuarantine, readOnlySinceThePlan
+			if target != nil && readOnly[target.ID] {
+				a.Refuse(inbox.OutcomeQuarantine, inbox.HoldReadOnlyLibrary, model.ReasonLibraryReadOnly, nil)
+				continue
 			}
-			if a.Outcome == inbox.OutcomeImport && plan.DupPolicy == model.DupSkip && a.Essence != "" {
-				switch _, err := l.store.FileByEssence(ctx, a.Essence); {
-				case err == nil:
-					a.Outcome, a.Reason = inbox.OutcomeDuplicate, "audio reached the catalog since the plan"
-				case !waxerr.Is(err, waxerr.CodeNotFound):
+			if plan.DupPolicy == model.DupSkip && a.Essence != "" && target != nil {
+				occ, err := l.store.FilesByEssence(ctx, a.Essence)
+				if err != nil {
 					return err
 				}
+				if o := inbox.HeldAudio(occ, a.Kind, target.ID); o != nil {
+					a.Refuse(inbox.OutcomeDuplicate, inbox.HoldLandedSince, "audio reached the catalog since the plan",
+						&inbox.Occupant{Path: o.DisplayPath, FilePID: o.FilePID, ItemPID: o.ItemPID})
+					continue
+				}
+			}
+			occ, err := l.store.FileOccupants(ctx, a.Dst)
+			if err != nil {
+				a.Refuse(inbox.OutcomeQuarantine, inbox.HoldCollisionCheck, "collision check failed: "+err.Error(), nil)
+				continue
+			}
+			if code, reason, o := inbox.DestinationHold(ls, a, occ); code != "" {
+				a.Refuse(inbox.OutcomeQuarantine, code, reason, o)
 			}
 		}
 		quarantineReadOnlySources(libs, &live)
-		inbox.HoldBooks(live.Actions)
+		inbox.HoldUnits(live.Actions)
 		r, err := l.importer.Execute(ctx, &live)
-		rep = r
+		if r != nil {
+			rep = r
+		}
 		return err
 	})
 	return rep, err
@@ -3897,6 +3928,9 @@ type AcquiredMeta struct {
 	Profile   string          // organization profile override (empty = the target library's)
 	Copy      bool            // copy instead of move the source file
 	DupPolicy model.DupPolicy // catalog-duplicate policy (default skip)
+	// HoldUnits keeps an album's tracks of ImportAcquiredUnit, those naming one album
+	// title, where they are when one of them cannot land, as a book's parts always are.
+	HoldUnits bool
 
 	// Episode ingest.
 	ShowPID   model.PID // existing show to add the episode under; empty creates a manual show
@@ -3928,6 +3962,10 @@ type AcquiredResult struct {
 	// another identity (a different recording id) starts an item of its own instead, so
 	// the applied report's Files say what happened.
 	AttachedTo model.PID
+	// Restores names the item whose gone file held this audio, which the import brings
+	// back (inbox.Action.Restores); AlreadyPresent is false then, no file of it being on
+	// disk.
+	Restores model.PID
 }
 
 // ImportAcquired routes an acquired or manual file by kind. Tracks and books go through
@@ -3939,7 +3977,13 @@ type AcquiredResult struct {
 func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
 	switch kind {
 	case model.KindTrack, model.KindBook:
-		return l.importAcquiredMedia(ctx, file, kind, meta)
+		unit, err := l.importAcquiredUnit(ctx, "Library.ImportAcquired", []AcquiredFile{file}, kind, meta)
+		if err != nil {
+			return nil, err
+		}
+		f := unit.Files[0]
+		return &AcquiredResult{Kind: kind, Plan: unit.Plan, AlreadyPresent: f.AlreadyPresentPID != "",
+			AlreadyPresentPID: f.AlreadyPresentPID, AttachedTo: f.AttachedTo, Restores: f.Restores}, nil
 	case model.KindEpisode:
 		return l.importAcquiredEpisode(ctx, file, meta)
 	default:
@@ -3947,13 +3991,53 @@ func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind mo
 	}
 }
 
-// importAcquiredMedia plans one acquired track or book into the matching managed
-// library. The returned plan is still dry-run; ApplyImport performs the move/copy and
-// records the acquisition row.
-func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
-	const op = "Library.ImportAcquired"
-	if strings.TrimSpace(file.Path) == "" {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "no acquired file path")
+// AcquiredUnitResult is ImportAcquiredUnit's answer: the one reviewable plan of the unit's
+// files (apply it with ApplyImport) and what it would do with each file, in the order the
+// files were given.
+type AcquiredUnitResult struct {
+	Plan  *inbox.Plan
+	Files []AcquiredFileResult
+}
+
+// AcquiredFileResult is what a unit's plan would do with one of its files: its outcome and
+// hold code, the item it restores, and AcquiredResult's already-present and attach answers.
+type AcquiredFileResult struct {
+	Path              string
+	Outcome           inbox.Outcome
+	Code              inbox.HoldCode
+	Restores          model.PID
+	AlreadyPresentPID model.PID
+	AttachedTo        model.PID
+}
+
+// ImportAcquiredUnit plans files a host acquired together (an album's tracks, a book's
+// parts) as one import of kind, track or book: one pass reads each file once, and the
+// folder rule, the book numbering and the claims on destinations and audio see every file
+// of the unit at once, so a book's parts number among each other and two files bound for
+// one place are told apart before either lands. With meta.HoldUnits an album one of whose
+// tracks cannot land stays where it is whole, as a book always does. ApplyImport applies
+// the plan, checking it again first. ImportAcquired is the one-file form.
+func (l *Library) ImportAcquiredUnit(ctx context.Context, files []AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredUnitResult, error) {
+	const op = "Library.ImportAcquiredUnit"
+	if kind != model.KindTrack && kind != model.KindBook {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "a unit is tracks or a book, not "+string(kind))
+	}
+	return l.importAcquiredUnit(ctx, op, files, kind, meta)
+}
+
+// importAcquiredUnit plans acquired tracks or books into the matching managed library. The
+// returned plan is still dry-run; ApplyImport performs the moves and records the
+// acquisition rows.
+func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredUnitResult, error) {
+	if len(files) == 0 {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no acquired files")
+	}
+	paths := make([]string, len(files))
+	for i, f := range files {
+		if strings.TrimSpace(f.Path) == "" {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "no acquired file path")
+		}
+		paths[i] = f.Path
 	}
 	lib, err := l.managedLibraryForKind(ctx, kind)
 	if err != nil {
@@ -3967,26 +4051,40 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	if err != nil {
 		return nil, err
 	}
-	plan, err := l.importer.PlanFile(ctx, inbox.Request{
+	plan, err := l.importer.PlanPaths(ctx, inbox.Request{
 		Library: lib, Profile: prof, DupPolicy: meta.DupPolicy, Copy: meta.Copy,
 		ReserveBytes: l.opts.FreeSpaceReserveBytes, Acquisition: acquisitionInput(meta),
-		Hold: readOnlySources(libs, meta.Copy),
-	}, file.Path, kind)
+		Hold: readOnlySources(libs, meta.Copy), HoldUnits: meta.HoldUnits, Acquired: true,
+	}, paths, kind)
 	if err != nil {
 		return nil, err
 	}
-	res := &AcquiredResult{Kind: kind, Plan: plan}
-	// Report already-present independent of DupPolicy. The plan sets Action.Essence before
-	// the dup gate, so resolving by essence here surfaces the existing item even for a
-	// DupAllow import that will go ahead anyway. The guard covers a quarantine or
-	// zero-action plan, and a resolve error is non-fatal.
-	if len(plan.Actions) > 0 && plan.Actions[0].Essence != "" {
-		if item, _, err := l.ResolveRef(ctx, model.PortableRef{Essence: plan.Actions[0].Essence}); err == nil && item != nil {
-			res.AlreadyPresent, res.AlreadyPresentPID = true, item.PID
-			if plan.Actions[0].Outcome == inbox.OutcomeImport && item.Kind == kind {
-				res.AttachedTo = item.PID
+	bySrc := make(map[string]*inbox.Action, len(plan.Actions))
+	for i := range plan.Actions {
+		bySrc[plan.Actions[i].Src] = &plan.Actions[i]
+	}
+	res := &AcquiredUnitResult{Plan: plan, Files: make([]AcquiredFileResult, len(files))}
+	for i, f := range files {
+		r := AcquiredFileResult{Path: f.Path}
+		src := f.Path
+		if abs, err := filepath.Abs(src); err == nil {
+			src = abs
+		}
+		if a := bySrc[src]; a != nil {
+			r.Outcome, r.Code, r.Restores = a.Outcome, a.Code, a.Restores
+			// Already-present is reported whatever the policy, so a DupAllow import of a
+			// genuine duplicate still says so; audio whose only file is gone is not present
+			// but restored. A resolve error is not fatal.
+			if a.Restores == "" && a.Essence != "" {
+				if item, _, err := l.ResolveRef(ctx, model.PortableRef{Essence: a.Essence}); err == nil && item != nil {
+					r.AlreadyPresentPID = item.PID
+					if a.Outcome == inbox.OutcomeImport && item.Kind == kind {
+						r.AttachedTo = item.PID
+					}
+				}
 			}
 		}
+		res.Files[i] = r
 	}
 	return res, nil
 }
@@ -4604,4 +4702,5 @@ func addResult(dst *scan.Result, src *scan.Result) {
 	dst.WalkErrors += src.WalkErrors
 	dst.SubPathGone = dst.SubPathGone || src.SubPathGone
 	dst.RootUnreachable = dst.RootUnreachable || src.RootUnreachable
+	dst.MergeIdentities(src)
 }

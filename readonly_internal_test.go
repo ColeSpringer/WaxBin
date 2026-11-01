@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
@@ -178,5 +179,29 @@ func TestWatchInboxQuietWhileEveryLibraryIsReadOnly(t *testing.T) {
 	}
 	if len(logs.warns) != 0 {
 		t.Fatalf("warnings = %q, want none for a read-only library", logs.warns)
+	}
+}
+
+// TestApplyImportReportsWhenTheLeaseIsHeld: an import that cannot start because another
+// job holds the file lease returns an empty report beside the held-lease error, never nil.
+func TestApplyImportReportsWhenTheLeaseIsHeld(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root, staging := t.TempDir(), t.TempDir()
+	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	writeRaw(t, filepath.Join(staging, "song.mp3"), testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(72)))
+	plan, err := lib.PlanImport(ctx, ImportRequest{Source: staging})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdScope(t, lib, fsMutateScope)
+	rep, err := lib.ApplyImport(ctx, plan)
+	if !jobs.IsLeaseHeld(err) || rep == nil || rep.Imported != 0 {
+		t.Errorf("apply under a held lease = %+v (err %v), want an empty report and the held lease", rep, err)
 	}
 }

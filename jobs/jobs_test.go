@@ -220,3 +220,103 @@ func TestRunLeasedWaitRetriesAHeldLease(t *testing.T) {
 		t.Fatalf("wait = %v, ran %v; want the work run once the lease freed", err, ran)
 	}
 }
+
+// TestAFailedJobKeepsItsErrorClass: a job's row keeps the class and reason of the error
+// that ended it beside its message, so a client tailing it can answer with the same class;
+// a panic is internal and a cancel canceled, and a job that finished carries none.
+func TestAFailedJobKeepsItsErrorClass(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	stored := func(fn func(context.Context, *jobs.Handle) error) *model.Job {
+		t.Helper()
+		job, _ := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, fn)
+		got, err := st.JobByPID(ctx, job.PID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	locked := stored(func(context.Context, *jobs.Handle) error {
+		return waxerr.New(waxerr.CodeLocked, "test", "item is locked").WithReason("kind_locked")
+	})
+	if locked.State != model.JobFailed || locked.ErrorCode != waxerr.CodeLocked || locked.ErrorReason != "kind_locked" || locked.Error == "" {
+		t.Errorf("failed job = %+v, want its class and reason kept", locked)
+	}
+	if p := stored(func(context.Context, *jobs.Handle) error { panic("boom") }); p.ErrorCode != waxerr.CodeInternal || p.ErrorReason != "" {
+		t.Errorf("panicked job = %+v, want internal", p)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	job, _ := m.Run(cctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, _ *jobs.Handle) error {
+		cancel()
+		return waxerr.FromContext("test", ctx.Err(), waxerr.CodeIO)
+	})
+	if c, err := st.JobByPID(ctx, job.PID); err != nil || c.State != model.JobCanceled || c.ErrorCode != waxerr.CodeCanceled {
+		t.Errorf("canceled job = %+v (err %v), want canceled", c, err)
+	}
+	if ok := stored(func(context.Context, *jobs.Handle) error { return nil }); ok.ErrorCode != "" || ok.ErrorReason != "" {
+		t.Errorf("done job = %+v, want no class", ok)
+	}
+}
+
+// TestCheckpointSavesTheResultWhileRunning: a checkpoint is the job row's result while the
+// job runs, the result it finishes with unless SetResult replaces it, and writes no change
+// row (a tailer reads the row; a change consumer has nothing to refresh).
+func TestCheckpointSavesTheResultWhileRunning(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	job, err := m.Run(ctx, jobs.Spec{Kind: "set-kind", Scope: "set-kind"}, func(ctx context.Context, h *jobs.Handle) error {
+		seq, err := st.LatestChangeSeq(ctx)
+		if err != nil {
+			return err
+		}
+		if err := h.Checkpoint(ctx, map[string]int{"reads": 1}); err != nil {
+			return err
+		}
+		row, err := st.JobByPID(ctx, h.JobPID())
+		if err != nil {
+			return err
+		}
+		if row.State != model.JobRunning || row.Result != `{"reads":1}` {
+			t.Errorf("row during the run = %+v, want the checkpoint", row)
+		}
+		if after, err := st.LatestChangeSeq(ctx); err != nil || after != seq {
+			t.Errorf("change seq %d -> %d (err %v), want no change row", seq, after, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, err := st.JobByPID(ctx, job.PID); err != nil || row.Result != `{"reads":1}` {
+		t.Errorf("finished row = %+v (err %v), want the checkpoint kept", row, err)
+	}
+}
+
+// TestSetParamsRecordsTheJobsRequest: a job writes what it was asked to do to its row once
+// it knows it, with no change row.
+func TestSetParamsRecordsTheJobsRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	job, err := m.Run(ctx, jobs.Spec{Kind: "set-kind", Scope: "set-kind"}, func(ctx context.Context, h *jobs.Handle) error {
+		seq, err := st.LatestChangeSeq(ctx)
+		if err != nil {
+			return err
+		}
+		if err := h.SetParams(ctx, map[string]any{"kind": "book"}); err != nil {
+			return err
+		}
+		if after, err := st.LatestChangeSeq(ctx); err != nil || after != seq {
+			t.Errorf("change seq %d -> %d (err %v), want no change row", seq, after, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, err := st.JobByPID(ctx, job.PID); err != nil || row.Params != `{"kind":"book"}` {
+		t.Errorf("row = %+v (err %v), want the params kept", row, err)
+	}
+}

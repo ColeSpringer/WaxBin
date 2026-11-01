@@ -165,6 +165,7 @@ func (l *Library) finishReopenLocked(ctx context.Context) error {
 	// A restore can bring in a catalog with no podcast library.
 	l.ensurePodcastLibrary(ctx)
 	l.warnUnknownProfiles(ctx)
+	l.completeCutOffWork(ctx)
 	var seq int64
 	var err error
 	if l.reopenReplaced {

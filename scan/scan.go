@@ -167,7 +167,8 @@ type Request struct {
 // Relinked and Reread ride alongside whichever outcome a file took. Missing counts
 // items, Promoted and Dropped count files reconciliation and the scan's writes settled
 // outside the walk, and WalkErrors counts entries the walk could not read at all, which
-// are in none of the others.
+// are in none of the others. Converted, Absorbed and Created sit outside the partition
+// too: they say what the scan's writes did to items' pids.
 type Result struct {
 	FilesSeen int
 	// AudioFiles is every audio file the scan visited, an errored one included.
@@ -176,9 +177,9 @@ type Result struct {
 	// created twelve virtual tracks counts once).
 	ItemsCreated int
 	// ItemsUpdated is audio files whose content changed, whose rescan re-derived a
-	// stored field over unchanged bytes (a forced rescan of a catalog-only edit), or
-	// that joined an existing item as a new file of it (a book's next part, a better
-	// encoding taking the item over).
+	// stored field over unchanged bytes (a forced rescan of a catalog-only edit), that
+	// joined an existing item as a new file of it (a book's next part, a better encoding
+	// taking the item over), or that brought a missing item back.
 	ItemsUpdated int
 	// SidecarsUpdated is audio files whose .lrc/.cue or cover change was applied
 	// without the audio changing.
@@ -221,6 +222,17 @@ type Result struct {
 	// root; a total over several libraries leaves them empty.
 	LibraryPID  model.PID
 	LibraryName string
+
+	// Converted lists the items the scan turned into another kind in place, keeping their
+	// pids (a track read as a book, a book's last part read as a track). Absorbed maps
+	// each item it folded away to the item that took it in, followed through any chain to
+	// where it ended (the tracks a book's root now reads as its parts, the tracks a cue
+	// sheet's removal folds back into the whole file). Created maps each item it minted for
+	// a file another item held to that item (a part leaving its book, the tracks a sheet
+	// carves out of a whole file). An item absorbed in the end is in neither of the others.
+	Converted []model.PID
+	Absorbed  map[model.PID]model.PID
+	Created   map[model.PID]model.PID
 }
 
 // Heartbeat is the progress callback invoked periodically during a scan. progress is the
@@ -285,10 +297,12 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		return res, nil
 	}
 	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
-		folders: map[string]*folderState{}, adoption: req.Adoption}
+		folders: map[string]*folderState{}, adoption: req.Adoption, ids: &identities{}}
 	if sc.adopt && sc.adoption == nil {
 		sc.adoption = &Adoption{}
 	}
+	// A canceled or failed scan reports what its writes did to pids too.
+	defer sc.ids.fill(res)
 	every := s.RollupSettleEvery
 	if every <= 0 {
 		every = 2000
@@ -432,12 +446,18 @@ type scanCtx struct {
 	open               []string
 	adoptOnly, unadopt bool
 	albums             map[string]string
-	// album and position are FileOptions', for a single-file scan.
+	// album, position, pin and job are FileOptions', for a single-file scan; job reaches
+	// the re-reads of the files its puts promote too.
 	album    string
 	position *int
+	pin      bool
+	job      model.PID
 	// rollups is the walk's settle cadence, nil outside a walk, where a put recomputes the
 	// rollups it touches itself.
 	rollups *rollupCadence
+	// ids gathers what the scan's puts did to items' pids (Result.Converted, Absorbed,
+	// Created), nil where nobody reads it.
+	ids *identities
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
@@ -518,7 +538,7 @@ func (s *Scanner) reconcileMissing(ctx context.Context, root, walkRoot string, s
 // result: each was counted on its own visit or belongs to another library, so they take
 // no outcome of their own.
 func (s *Scanner) rereadPromoted(ctx context.Context, sc *scanCtx, res *Result) {
-	res.Promoted += s.reread(ctx, sc.promoted, sc.preserveLocks, sc.rollups)
+	res.Promoted += s.reread(ctx, sc.promoted, sc.preserveLocks, sc.rollups, sc.ids, sc.job)
 	sc.promoted = nil
 }
 
@@ -528,10 +548,10 @@ func (s *Scanner) rereadPromoted(ctx context.Context, sc *scanCtx, res *Result) 
 // skipped (a later action took it too), and a failure is logged; the promotion cleared
 // each file's stamp, so the next scan reads it in full either way.
 func (s *Scanner) RereadPromoted(ctx context.Context, promoted []model.PromotedFile) int {
-	return s.reread(ctx, promoted, true, nil)
+	return s.reread(ctx, promoted, true, nil, nil, "")
 }
 
-func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, preserveLocks bool, rollups *rollupCadence) int {
+func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, preserveLocks bool, rollups *rollupCadence, ids *identities, job model.PID) int {
 	seen := map[string]bool{}
 	var files []model.PromotedFile
 	for _, p := range promoted {
@@ -558,7 +578,7 @@ func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, pre
 			continue
 		}
 		lib := libs[i]
-		reread := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: preserveLocks, rollups: rollups}
+		reread := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: preserveLocks, rollups: rollups, ids: ids, job: job}
 		if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, &Result{}, reread, ""); err != nil {
 			s.log.Warn("re-reading a promoted file", "path", path, "err", err)
 		}
@@ -592,10 +612,16 @@ func (s *Scanner) ScanFileAs(ctx context.Context, lib *model.Library, path strin
 // way a file whose ALBUM names it does, and a book file takes it as its title. Position
 // is a book part's position as the staged file gave it (PartPosition), for the disc or
 // place the name it was placed under no longer states.
+//
+// Pin and Job are a kind change's: Pin pins the kind of the item a forced read lands the
+// file on in the write that lands it, whatever the library's rule says, and Job names the
+// change, under which the store records what the read's writes fold away and make.
 type FileOptions struct {
 	Kind     model.Kind
 	Album    string
 	Position *int
+	Pin      bool
+	Job      model.PID
 }
 
 // ScanFileWith is ScanFileAs with the options an import passes.
@@ -611,12 +637,14 @@ func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path str
 	res.AudioFiles++
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
-	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position}
+	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position,
+		pin: opts.Pin, job: opts.Job, ids: &identities{}}
 	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, opts.Kind); err != nil {
 		res.Errored++
 		return res, nil, err
 	}
 	s.rereadPromoted(ctx, sc, res)
+	sc.ids.fill(res)
 	return res, sc.last, nil
 }
 
@@ -749,7 +777,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 				rule = model.KindBook
 			}
 		}
-		lockKind = forceKind != rule
+		lockKind = sc.pin || forceKind != rule
 	}
 	if adopt != nil {
 		kind = model.KindBook
@@ -917,7 +945,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		out, err = s.cat.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
 			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, AuxObservations: aux,
 			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
-			DeferRollups: sc.rollups != nil,
+			DeferRollups: sc.rollups != nil, Job: sc.job,
 		})
 	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover, partPlace(&tags, root, path, lib.Mode == model.ModeManaged, sc.position))
@@ -938,20 +966,21 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.PreserveLocks = sc.preserveLocks
 		bin.Derived = derived
 		bin.LockKind, bin.KindForced = lockKind, forceKind != ""
-		bin.DeferRollups = sc.rollups != nil
+		bin.DeferRollups, bin.Job = sc.rollups != nil, sc.job
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		in := trackInput(lib.ID, file, tags, essenceHash)
 		in.Lyrics, in.CoverArt, in.AuxObservations = lyrics, cover, aux
 		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
 		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
-		in.DeferRollups = sc.rollups != nil
+		in.DeferRollups, in.Job = sc.rollups != nil, sc.job
 		out, err = s.cat.PutScannedTrack(ctx, in)
 	}
 	if err != nil {
 		return err
 	}
 	sc.rollups.put(ctx)
+	sc.ids.note(out)
 	if sc.adopt && len(rip) == 0 {
 		if err := s.settleAdoption(ctx, sc, out, adoptedPID(sc, fm)); err != nil {
 			return err
@@ -991,30 +1020,23 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	return nil
 }
 
-// countOutcome adds a put's outcome to the result and returns the counter it took. The
-// outcomes partition the files (see Result).
+// countOutcome adds a put's outcome to the result under its verdict's counter and returns
+// the counter it took. The outcomes partition the files (see Result).
 func countOutcome(res *Result, out *model.ScanItemResult) *int {
-	switch {
-	case out.ItemCreated:
+	switch VerdictOf(out) {
+	case VerdictCreated:
 		res.ItemsCreated++
 		return &res.ItemsCreated
-	case out.AttachedAsCopy && out.Joined:
+	case VerdictCopy:
 		res.Copies++
 		return &res.Copies
-	case out.AttachedAsCopy && out.ContentChanged:
+	case VerdictJoined, VerdictRevived, VerdictUpdated:
 		res.ItemsUpdated++
 		return &res.ItemsUpdated
-	case out.AttachedAsCopy:
-		res.Unchanged++
-		return &res.Unchanged
-	case out.ContentChanged, out.MetadataChanged, out.FileCreated, out.Joined:
-		res.ItemsUpdated++
-		return &res.ItemsUpdated
-	case out.SidecarsChanged:
+	case VerdictSidecars:
 		// A sidecar-only change (an edited .lrc, a new cover) reaches the full path but
-		// changes no audio bytes, so ItemCreated and ContentChanged are both false.
-		// Without this case the scan reports changed=false, and watch mode's downstream
-		// schedulers are silently skipped.
+		// changes no audio bytes. Without its own counter the scan would report
+		// changed=false, and watch mode's downstream schedulers would be skipped.
 		res.SidecarsUpdated++
 		return &res.SidecarsUpdated
 	}
@@ -1108,6 +1130,7 @@ func (s *Scanner) settleAdoption(ctx context.Context, sc *scanCtx, out *model.Sc
 
 // repid renames an item in the folder states the walk holds.
 func (sc *scanCtx) repid(from, to model.PID) {
+	sc.ids.repid(from, to)
 	for _, f := range sc.folders {
 		for i := range f.books {
 			if f.books[i].ItemPID == from {

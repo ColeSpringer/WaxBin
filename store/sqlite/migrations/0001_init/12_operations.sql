@@ -20,6 +20,7 @@ CREATE TABLE job (
   error        TEXT    NOT NULL DEFAULT '',
   error_code   TEXT    NOT NULL DEFAULT '',  -- the failing error's waxerr code and reason, '' when none
   error_reason TEXT    NOT NULL DEFAULT '',
+  params       TEXT    NOT NULL DEFAULT '',  -- JSON of what a job was asked to do, written when it starts
   result       TEXT    NOT NULL DEFAULT '',  -- JSON result summary of a completed job, for a tailer
   target_type  TEXT    NOT NULL DEFAULT '',  -- what a targeted job ran on (model.Job.TargetType), '' for a whole-catalog pass
   target_pid   TEXT    NOT NULL DEFAULT '',

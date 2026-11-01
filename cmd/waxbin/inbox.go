@@ -174,10 +174,16 @@ func emitImportPlan(cmd *cobra.Command, g *globals, plan *inbox.Plan) error {
 		switch a.Outcome {
 		case inbox.OutcomeImport:
 			fmt.Fprintf(w, "  import     %s\n             -> %s\n", a.Src, a.Dst)
+			if a.Restores != "" {
+				fmt.Fprintf(w, "             restores item %s\n", a.Restores)
+			}
 		case inbox.OutcomeDuplicate:
-			fmt.Fprintf(w, "  duplicate  %s\n", a.Src)
+			fmt.Fprintf(w, "  duplicate  %s [%s] (%s)\n", a.Src, a.Code, a.Reason)
 		case inbox.OutcomeQuarantine:
-			fmt.Fprintf(w, "  quarantine %s (%s)\n", a.Src, a.Reason)
+			fmt.Fprintf(w, "  quarantine %s [%s] (%s)\n", a.Src, a.Code, a.Reason)
+			if a.Dst != "" {
+				fmt.Fprintf(w, "             -> %s\n", a.Dst)
+			}
 		}
 	}
 	fmt.Fprintln(w, "(review; pass --apply to import)")
@@ -196,19 +202,35 @@ func emitImportReport(cmd *cobra.Command, g *globals, src string, rep *inbox.Rep
 			Sidecars    int             `json:"sidecars"`
 			DirsPruned  int             `json:"dirsPruned"`
 			Bytes       int64           `json:"bytes"`
+			Holds       []inbox.Held    `json:"holds"`
 			Failures    []inbox.Failure `json:"failures,omitempty"`
 			Files       []importedFile  `json:"files"`
 		}{string(rep.BatchPID), src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.DirsPruned, rep.Bytes,
-			rep.Failures, importedFiles(rep.Files)})
+			nonNil(rep.Holds), rep.Failures, importedFiles(rep.Files)})
 	}
 	fmt.Fprintf(out(cmd), "Imported %s: %d imported, %d duplicate, %d quarantined, %d errored, %d sidecars (%d bytes), pruned %s\n",
 		src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes, plural(rep.DirsPruned, "folder"))
 	for _, f := range rep.Files {
-		if f.AttachedAsCopy {
-			fmt.Fprintf(out(cmd), "  copy %s: joined item %s\n", f.Path, f.ItemPID)
+		// A cue rip's file names no one item.
+		item := ""
+		if f.ItemPID != "" {
+			item = ": item " + string(f.ItemPID)
+		}
+		switch {
+		case f.Restores != "" && f.Verdict != scan.VerdictRevived:
+			fmt.Fprintf(out(cmd), "  restored %s: item %s\n", f.Path, f.Restores)
+		case f.Verdict != scan.VerdictCreated:
+			fmt.Fprintf(out(cmd), "  %s %s%s\n", f.Verdict, f.Path, item)
 		}
 	}
+	for _, h := range rep.Holds {
+		fmt.Fprintf(out(cmd), "  %s %s [%s] (%s)\n", h.Outcome, h.Src, h.Code, h.Reason)
+	}
 	for _, f := range rep.Failures {
+		if f.Dst != "" {
+			fmt.Fprintf(out(cmd), "  FAIL %s (now at %s): %s\n", f.Src, f.Dst, f.Err)
+			continue
+		}
 		fmt.Fprintf(out(cmd), "  FAIL %s: %s\n", f.Src, f.Err)
 	}
 	return nil
@@ -216,29 +238,38 @@ func emitImportReport(cmd *cobra.Command, g *globals, src string, rep *inbox.Rep
 
 // importedFile is one imported file's outcome in the JSON report.
 type importedFile struct {
-	Path           string `json:"path"`
-	ItemPID        string `json:"itemPid,omitempty"`
-	AttachedAsCopy bool   `json:"attachedAsCopy"`
+	Path           string            `json:"path"`
+	ItemPID        string            `json:"itemPid,omitempty"`
+	Verdict        string            `json:"verdict"`
+	AttachedAsCopy bool              `json:"attachedAsCopy"`
+	Relinked       bool              `json:"relinked"`
+	Absorbed       map[string]string `json:"absorbed,omitempty"`
+	Restores       string            `json:"restores,omitempty"`
 }
 
 func importedFiles(fs []inbox.FileOutcome) []importedFile {
 	out := make([]importedFile, len(fs))
 	for i, f := range fs {
-		out[i] = importedFile{Path: f.Path, ItemPID: string(f.ItemPID), AttachedAsCopy: f.AttachedAsCopy}
+		out[i] = importedFile{Path: f.Path, ItemPID: string(f.ItemPID), Verdict: string(f.Verdict),
+			AttachedAsCopy: f.AttachedAsCopy, Relinked: f.Relinked, Absorbed: pidMapStrings(f.Absorbed), Restores: string(f.Restores)}
 	}
 	return out
 }
 
 func importPlanJSON(plan *inbox.Plan) any {
 	type actionJSON struct {
-		Src     string `json:"src"`
-		Dst     string `json:"dst,omitempty"`
-		Outcome string `json:"outcome"`
-		Reason  string `json:"reason,omitempty"`
+		Src      string          `json:"src"`
+		Dst      string          `json:"dst,omitempty"`
+		Outcome  string          `json:"outcome"`
+		Code     string          `json:"code,omitempty"`
+		Reason   string          `json:"reason,omitempty"`
+		Occupant *inbox.Occupant `json:"occupant,omitempty"`
+		Restores string          `json:"restores,omitempty"`
 	}
 	actions := make([]actionJSON, 0, len(plan.Actions))
 	for _, a := range plan.Actions {
-		actions = append(actions, actionJSON{Src: a.Src, Dst: a.Dst, Outcome: string(a.Outcome), Reason: a.Reason})
+		actions = append(actions, actionJSON{Src: a.Src, Dst: a.Dst, Outcome: string(a.Outcome), Code: string(a.Code),
+			Reason: a.Reason, Occupant: a.Occupant, Restores: string(a.Restores)})
 	}
 	return struct {
 		Source     string `json:"source"`

@@ -146,7 +146,7 @@ func (s *Service) makeBook(req Request, f *staged, book *stagedBook, album strin
 		if reason == "" {
 			reason = "no unambiguous managed library for kind " + string(model.KindBook)
 		}
-		f.Outcome, f.Reason = OutcomeQuarantine, reason
+		f.Refuse(OutcomeQuarantine, HoldNoLibrary, reason, nil)
 		return
 	}
 	f.Library = lib
@@ -161,7 +161,7 @@ func (s *Service) makeBook(req Request, f *staged, book *stagedBook, album strin
 	f.prof = prof
 	rel, err := organize.RenderRelPath(prof, acquiredItemView(tags, f.Src, model.KindBook))
 	if err != nil {
-		f.Outcome, f.Reason = OutcomeQuarantine, "no destination: "+err.Error()
+		f.Refuse(OutcomeQuarantine, HoldNoDestination, "no destination: "+err.Error(), nil)
 		return
 	}
 	f.rel, f.RelDst = rel, rel

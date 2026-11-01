@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // TestJobsNamesWhatAJobTargeted: a scan of one library shows that library as its
@@ -63,5 +66,40 @@ func TestJobsNamesWhatAJobTargeted(t *testing.T) {
 	if len(lines) != 3 || !strings.Contains(lines[0], "TARGET") || !strings.Contains(lines[1], "library:"+pid) ||
 		strings.Contains(lines[2], "library:") {
 		t.Errorf("jobs text =\n%s\nwant a TARGET column naming library:%s on the scoped scan alone", stdout.String(), pid)
+	}
+}
+
+// TestJobErrorExitsWithTheJobsClass: a tailed job that failed answers with the class and
+// reason its row kept, so the CLI exits as the run itself would have; a row with none
+// (a crashed job) reads as internal.
+func TestJobErrorExitsWithTheJobsClass(t *testing.T) {
+	t.Parallel()
+	err := jobError(&model.Job{Kind: "set-kind", State: model.JobFailed, Error: "item is locked",
+		ErrorCode: waxerr.CodeLocked, ErrorReason: "kind_locked"})
+	if !waxerr.Is(err, waxerr.CodeLocked) || waxerr.ReasonOf(err) != "kind_locked" || !strings.Contains(err.Error(), "item is locked") {
+		t.Errorf("failed job error = %v (reason %q), want locked with its reason", err, waxerr.ReasonOf(err))
+	}
+	if got, want := exitCodeFor(err), exitCodeFor(waxerr.New(waxerr.CodeLocked, "x", "y")); got != want {
+		t.Errorf("exit = %d, want %d, the locked class's", got, want)
+	}
+	if err := jobError(&model.Job{Kind: "scan", State: model.JobCrashed, Error: "reclaimed: owner not live"}); !waxerr.Is(err, waxerr.CodeInternal) {
+		t.Errorf("crashed job error = %v, want internal", err)
+	}
+	if err := jobError(&model.Job{Kind: "scan", State: model.JobCanceled}); !waxerr.Is(err, waxerr.CodeCanceled) {
+		t.Errorf("canceled job error = %v, want canceled", err)
+	}
+}
+
+// TestJobsJSONCarriesTheErrorClass: the job listing's JSON names a failed job's class and
+// reason beside its message.
+func TestJobsJSONCarriesTheErrorClass(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(jobViews([]*model.Job{{PID: "J", Kind: "set-kind", State: model.JobFailed, Error: "locked",
+		ErrorCode: waxerr.CodeLocked, ErrorReason: "kind_locked"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); !strings.Contains(s, `"errorCode":"locked"`) || !strings.Contains(s, `"errorReason":"kind_locked"`) {
+		t.Errorf("jobs json = %s, want the error class and reason", s)
 	}
 }

@@ -556,6 +556,22 @@ func ctx(cmd *cobra.Command) context.Context {
 	return context.Background()
 }
 
+// nonNil is a list for JSON that prints [] rather than null when empty.
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
+// nonNilMap is a map for JSON that prints {} rather than null when empty.
+func nonNilMap[K comparable, V any](m map[K]V) map[K]V {
+	if m == nil {
+		return map[K]V{}
+	}
+	return m
+}
+
 // printJSON writes a versioned JSON envelope to the command's stdout.
 func printJSON(cmd *cobra.Command, data any) error {
 	env := struct {

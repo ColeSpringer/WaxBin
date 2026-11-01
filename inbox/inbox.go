@@ -25,11 +25,14 @@ import (
 
 // Store is the persistence the importer needs (satisfied by store/sqlite).
 type Store interface {
-	FileByEssence(ctx context.Context, essence string) (*model.File, error)
-	DisplayPathExistsFold(ctx context.Context, displayPath string) (bool, error)
+	// FilesByEssence returns the cataloged files holding an audio essence, and
+	// FileOccupants those at a display path folded for case, each saying whether it is on
+	// disk and which item it backs.
+	FilesByEssence(ctx context.Context, essence string) ([]model.FileOccupant, error)
+	FileOccupants(ctx context.Context, displayPath string) ([]model.FileOccupant, error)
 	CreateImportBatch(ctx context.Context, b *model.ImportBatch) error
 	UpdateImportBatch(ctx context.Context, b *model.ImportBatch) error
-	PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) (model.PID, error)
+	PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput, made []model.PID) (model.PID, error)
 	// BookByKey returns the book a library holds under an identity key, with its parts in
 	// reading order, or nil.
 	BookByKey(ctx context.Context, libraryID int64, key string) (*model.ItemView, []model.ItemFileRef, error)
@@ -79,10 +82,44 @@ const (
 	OutcomeQuarantine Outcome = "quarantine" // unreadable / undestinable / would collide; left in place
 )
 
-// Action is one planned import.
+// HoldCode says why a staged file does not import, beside the reason that says it in
+// words. A duplicate carries one too.
+type HoldCode string
+
+const (
+	HoldUnreadable       HoldCode = "unreadable"         // its tags or audio could not be read
+	HoldNoLibrary        HoldCode = "no-library"         // no one managed library takes its kind
+	HoldDedupFailed      HoldCode = "dedup-failed"       // the duplicate check could not run
+	HoldReadOnlySource   HoldCode = "read-only-source"   // a move would take it out of a read-only library
+	HoldNoDestination    HoldCode = "no-destination"     // the layout renders no path for it
+	HoldDuplicateCatalog HoldCode = "duplicate"          // a cataloged file on disk holds its audio
+	HoldDuplicateBatch   HoldCode = "duplicate-in-batch" // an earlier file of the import holds its audio
+	HoldClaimed          HoldCode = "claimed"            // an earlier file of the import takes its destination
+	HoldExists           HoldCode = "exists"             // a file stands at its destination
+	HoldOccupiedCase     HoldCode = "occupied-case"      // a file named apart only by case or Unicode form stands there
+	HoldCataloged        HoldCode = "cataloged"          // the catalog holds its destination for a file not on disk
+	HoldCollisionCheck   HoldCode = "collision-check"    // its destination could not be looked at
+	HoldBook             HoldCode = "book-held"          // its book's own part will not land
+	HoldAlbum            HoldCode = "album-held"         // a track of its album will not land, and the request holds units
+	HoldReadOnlyLibrary  HoldCode = "read-only-library"  // its library was flagged read-only since the plan
+	HoldLandedSince      HoldCode = "landed-since"       // its audio reached the catalog since the plan
+)
+
+// Occupant is what turned an action away: the file at Path (with the catalog's file and
+// item when it holds one), or a staged file of the same import, StagedSrc.
+type Occupant struct {
+	Path      string    `json:"path,omitempty"`
+	FilePID   model.PID `json:"filePid,omitempty"`
+	ItemPID   model.PID `json:"itemPid,omitempty"`
+	StagedSrc string    `json:"stagedSrc,omitempty"`
+}
+
+// Action is one planned import. A quarantine keeps the destination it would have taken
+// when one was rendered; a duplicate, and a file held with its book or album (HoldUnits),
+// have none.
 type Action struct {
 	Src     string
-	Dst     string // destination under the library (import outcome only)
+	Dst     string // destination under the library
 	RelDst  string
 	Size    int64
 	Essence string
@@ -94,18 +131,26 @@ type Action struct {
 	Library    *model.Library // target managed library for this file (kind-routed)
 	Outcome    Outcome
 	Reason     string
+	// Code says why a duplicate or a quarantine does not import, and Occupant names what
+	// holds its audio or its destination, when something does.
+	Code     HoldCode
+	Occupant *Occupant
 	// Album is the book the import's folder rule found a file whose tags name no album a
 	// part of, which the cataloging scan joins it to (scan.FileOptions.Album).
 	Album string
-	// Book groups a book's staged files, which land together or not at all (HoldBooks);
-	// Joined marks one the folder rule made a part of the book, and Alternate a copy or
-	// another encoding of one of its parts.
-	Book              string
+	// Unit groups staged files that land together or not at all (HoldUnits): a book's
+	// files always, an album's tracks when the request holds units. Joined marks a file
+	// the folder rule made a part of a book, and Alternate a copy or another encoding of
+	// one of a book's parts.
+	Unit              string
 	Joined, Alternate bool
 	// Position is a book part's position in its book as the staged file gives it
 	// (scan.PartPosition), which the cataloging scan keeps where the name the file is
 	// placed under no longer states it.
 	Position int
+	// Restores names the item whose gone file held this audio, which the import brings
+	// back: no file of the audio is on disk, so it is no duplicate under either policy.
+	Restores model.PID
 }
 
 // Request configures an import.
@@ -138,6 +183,15 @@ type Request struct {
 	// Hold, when set, gives the reason a staged file stays where it is (a read-only
 	// library holds it), or "".
 	Hold func(src string) string
+	// HoldUnits keeps an album's tracks where they are when one of them is quarantined,
+	// before or after it has a destination, as a book's files always are when one of its
+	// parts will not land, and every file with a unit when a refused file's tags cannot be
+	// read (planUnits).
+	HoldUnits bool
+	// Acquired says the files were handed over by a host (ImportAcquired) rather than
+	// staged in a folder the import owns: their folders name no book, and the import
+	// carries nothing from them and removes none.
+	Acquired bool
 }
 
 // Plan is a reviewable set of import actions.
@@ -151,8 +205,9 @@ type Plan struct {
 	TotalBytes  int64 // bytes the importable actions would bring in
 	Actions     []Action
 	Acquisition *model.AcquisitionInput // recorded on each imported item when set
-	// Inbox says Source is a configured inbox folder (Request.Inbox).
-	Inbox bool
+	// Inbox says Source is a configured inbox folder (Request.Inbox), and Acquired that
+	// the files were handed over (Request.Acquired), Source being the folder they share.
+	Inbox, Acquired bool
 }
 
 // Importable returns the number of actions that would actually import.
@@ -166,35 +221,61 @@ func (p *Plan) Importable() int {
 	return n
 }
 
-// Report summarizes an applied import.
+// Report summarizes an applied import. Holds names each file counted in Duplicates and
+// Quarantined, the plan's refusals and those the apply's recheck made alike.
 type Report struct {
 	BatchPID    model.PID
 	Imported    int
 	Duplicates  int
 	Quarantined int
+	Holds       []Held
 	Errored     int
 	Sidecars    int // companion files (lyrics/art/...) carried in with the audio
 	// DirsPruned counts the staging folders the import emptied and removed.
 	DirsPruned int
 	Bytes      int64
 	Failures   []Failure
-	// Files says, for each file imported, the item it now backs and whether it joined an
-	// existing one as an alternate (a DupAllow import of audio the catalog held).
+	// Files says what importing each file did (FileOutcome).
 	Files []FileOutcome
 }
 
-// FileOutcome is what importing one file did. ItemPID is empty for a cue rip, whose
-// file backs a track per cue entry.
+// Held is a file an applied import did not bring in, with why and what held it.
+type Held struct {
+	Src      string    `json:"src"`
+	Dst      string    `json:"dst,omitempty"`
+	Outcome  Outcome   `json:"outcome"`
+	Code     HoldCode  `json:"code"`
+	Reason   string    `json:"reason"`
+	Occupant *Occupant `json:"occupant,omitempty"`
+}
+
+// FileOutcome is what importing one file did: the item it backs (empty for a cue rip, whose
+// file backs a track per cue entry), what cataloging it did by the scan's own rule
+// (scan.Verdict: a new item, a part or encoding joining a standing one, a copy of it, a
+// missing one back), whether it took back a gone file's row by its audio (Relinked), the
+// items it left with no file, each with the item that took it in (Absorbed), and the
+// alternates it promoted on an item it left, which the import read again. AttachedAsCopy
+// marks an alternate.
 type FileOutcome struct {
 	Path           string
 	ItemPID        model.PID
 	AttachedAsCopy bool
+	Verdict        scan.Verdict
+	Relinked       bool
+	Absorbed       map[model.PID]model.PID
+	Promoted       []model.PromotedFile
+	// Restores is the item the planned import named (Action.Restores) whose gone file this
+	// one brought back, set only when the file landed on that item, its verdict saying what
+	// else the put did.
+	Restores model.PID
 }
 
-// Failure records one import that could not be applied.
+// Failure records one import that could not be applied. Dst names where the file landed
+// when it failed after the move, and is empty when it never left Src.
 type Failure struct {
-	Src string
-	Err string
+	Src string `json:"src"`
+	Dst string `json:"dst,omitempty"`
+	Err string `json:"error"`
 }
 
 // Plan walks the source folder and classifies every audio file: importable (with
@@ -202,25 +283,13 @@ type Failure struct {
 // destination, or a destination that would collide). It does not touch disk.
 func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 	const op = "inbox.Plan"
-	if req.Library == nil || req.Library.Mode != model.ModeManaged {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "import target must be a managed library")
-	}
-	if req.DupPolicy == "" {
-		req.DupPolicy = model.DupSkip
-	}
-	if !req.DupPolicy.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid duplicate policy: "+string(req.DupPolicy))
+	if err := checkRequest(op, &req); err != nil {
+		return nil, err
 	}
 	if abs, err := filepath.Abs(req.Source); err == nil {
 		req.Source = abs
 	}
-	plan := &Plan{
-		Source: req.Source, Inbox: req.Inbox, Library: req.Library, Profile: req.Profile.Name,
-		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes,
-		Acquisition: req.Acquisition,
-	}
-
-	var files []*staged
+	var paths []string
 	walkErr := filepath.WalkDir(req.Source, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries; the walk continues
@@ -231,30 +300,15 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 || !d.Type().IsRegular() {
 			return nil
 		}
-		if !isAudio(path) {
-			return nil
+		if isAudio(path) {
+			paths = append(paths, path)
 		}
-		files = append(files, s.classify(ctx, req, path))
 		return nil
 	})
 	if walkErr != nil {
 		return nil, waxerr.FromContext(op, walkErr, waxerr.CodeIO)
 	}
-	s.joinFolders(req, files)
-	spelling, err := s.spellings(ctx, files)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.alignAlbums(ctx, req, files, spelling); err != nil {
-		return nil, err
-	}
-	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files, spelling))
-	for i := range plan.Actions {
-		if plan.Actions[i].Outcome == OutcomeImport {
-			plan.TotalBytes += plan.Actions[i].Size
-		}
-	}
-	return plan, nil
+	return s.PlanPaths(ctx, req, paths, req.ForceKind)
 }
 
 // PlanFile plans a single acquired file (not a folder) into the request's target
@@ -263,26 +317,56 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 // and Execute records the request's acquisition provenance. The caller has already
 // chosen the library, so this targets req.Library directly.
 func (s *Service) PlanFile(ctx context.Context, req Request, path string, kind model.Kind) (*Plan, error) {
-	const op = "inbox.PlanFile"
-	if req.Library == nil || req.Library.Mode != model.ModeManaged {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "import target must be a managed library")
+	req.Acquired = true
+	return s.PlanPaths(ctx, req, []string{path}, kind)
+}
+
+// PlanPaths plans the files at paths as one import, forcing kind unless it is empty: the
+// body Plan and PlanFile share, and the way a host plans a unit it acquired (an album's
+// tracks, a book's parts) so its files see each other. The folder rule, the artist and
+// album spellings, the book numbering and the claims on destinations and audio each read
+// every file of the plan at once. Source is req.Source, or for handed-over files
+// (req.Acquired) the one file or the deepest folder holding them all. A path that is not
+// audio, or is named twice, is refused.
+func (s *Service) PlanPaths(ctx context.Context, req Request, paths []string, kind model.Kind) (*Plan, error) {
+	const op = "inbox.PlanPaths"
+	if err := checkRequest(op, &req); err != nil {
+		return nil, err
 	}
-	if !isAudio(path) {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "not a recognized audio file: "+path)
+	if kind != "" {
+		req.ForceKind = kind
 	}
-	if req.DupPolicy == "" {
-		req.DupPolicy = model.DupSkip
+	if req.Acquired {
+		req.Source, req.Inbox = "", false
 	}
-	if !req.DupPolicy.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid duplicate policy: "+string(req.DupPolicy))
-	}
-	req.ForceKind = kind
 	plan := &Plan{
-		Source: path, Library: req.Library, Profile: req.Profile.Name,
-		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes,
-		Acquisition: req.Acquisition,
+		Source: req.Source, Inbox: req.Inbox, Acquired: req.Acquired, Library: req.Library, Profile: req.Profile.Name,
+		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes, Acquisition: req.Acquisition,
 	}
-	files := []*staged{s.classify(ctx, req, path)}
+	files := make([]*staged, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		if ctx.Err() != nil {
+			return nil, waxerr.FromContext(op, ctx.Err(), waxerr.CodeIO)
+		}
+		if !isAudio(path) {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "not a recognized audio file: "+path)
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		if seen[path] {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "a file is named twice: "+path)
+		}
+		seen[path] = true
+		files = append(files, s.classify(ctx, req, path))
+	}
+	if req.Acquired {
+		plan.Source = sharedFolder(files)
+		if len(files) == 1 {
+			plan.Source = files[0].Src
+		}
+	}
 	s.joinFolders(req, files)
 	spelling, err := s.spellings(ctx, files)
 	if err != nil {
@@ -291,9 +375,15 @@ func (s *Service) PlanFile(ctx context.Context, req Request, path string, kind m
 	if err := s.alignAlbums(ctx, req, files, spelling); err != nil {
 		return nil, err
 	}
-	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files, spelling))
-	if a := plan.Actions[0]; a.Outcome == OutcomeImport {
-		plan.TotalBytes += a.Size
+	numbered := s.numberBooks(ctx, files, spelling)
+	if req.HoldUnits {
+		s.planUnits(ctx, numbered)
+	}
+	plan.Actions = s.settle(ctx, req, numbered)
+	for i := range plan.Actions {
+		if plan.Actions[i].Outcome == OutcomeImport {
+			plan.TotalBytes += plan.Actions[i].Size
+		}
 	}
 	return plan, nil
 }
@@ -309,11 +399,34 @@ func resolveLibrary(req Request, kind model.Kind) (*model.Library, string) {
 	return req.Library, ""
 }
 
-// batchClaims tracks the destinations and essences already claimed by earlier
-// actions in one import plan.
+// Refuse turns an action away under outcome for code, naming what holds it. A refused
+// action restores nothing, and it keeps the destination it rendered only when held there
+// or by its library or source (keepsDestination), so the plan still says where it would
+// have landed; a duplicate, a file held with its unit, and one with no library or no
+// destination keep none.
+func (a *Action) Refuse(outcome Outcome, code HoldCode, reason string, occ *Occupant) {
+	a.Outcome, a.Code, a.Reason, a.Occupant, a.Restores = outcome, code, reason, occ, ""
+	if !code.keepsDestination() {
+		a.Dst, a.RelDst = "", ""
+	}
+}
+
+// keepsDestination says whether an action held for c keeps the destination it rendered:
+// held by what stands there or the check of it, or by a read-only library or source.
+func (c HoldCode) keepsDestination() bool {
+	switch c {
+	case HoldClaimed, HoldExists, HoldOccupiedCase, HoldCataloged, HoldCollisionCheck, HoldReadOnlySource, HoldReadOnlyLibrary:
+		return true
+	}
+	return false
+}
+
+// batchClaims tracks the destinations and essences earlier actions of one import plan
+// claimed, each with the staged file that claimed it, and lists destination folders once.
 type batchClaims struct {
-	dst     map[string]bool
-	essence map[string]bool
+	dst     map[string]string
+	essence map[string]string
+	ls      *fsx.Lister
 }
 
 // file is the staged file as model.OtherEncoding and model.CompareQuality read it.
@@ -340,10 +453,18 @@ type staged struct {
 func (s *Service) classify(ctx context.Context, req Request, path string) *staged {
 	st := &staged{Action: Action{Src: path, Size: onDiskSize(path)}}
 	a := &st.Action
+	if info, err := os.Stat(pathx.Long(path)); err != nil || !info.Mode().IsRegular() {
+		reason := "unreadable: not a file"
+		if err != nil {
+			reason = "unreadable: " + err.Error()
+		}
+		a.Refuse(OutcomeQuarantine, HoldUnreadable, reason, nil)
+		return st
+	}
 
 	fm, err := s.reader.Read(ctx, path)
 	if err != nil {
-		a.Outcome, a.Reason = OutcomeQuarantine, "unreadable: "+err.Error()
+		a.Refuse(OutcomeQuarantine, HoldUnreadable, "unreadable: "+err.Error(), nil)
 		return st
 	}
 	// Determine the media kind (forced for an acquired file, else by the scan's rule, with
@@ -375,7 +496,7 @@ func (s *Service) classify(ctx context.Context, req Request, path string) *stage
 		if reason == "" {
 			reason = "no unambiguous managed library for kind " + string(kind)
 		}
-		a.Outcome, a.Reason = OutcomeQuarantine, reason
+		a.Refuse(OutcomeQuarantine, HoldNoLibrary, reason, nil)
 		return st
 	}
 	a.Library = lib
@@ -390,18 +511,26 @@ func (s *Service) classify(ctx context.Context, req Request, path string) *stage
 	}
 	a.Essence = essence
 
-	if essence != "" && req.DupPolicy == model.DupSkip {
-		if _, err := s.store.FileByEssence(ctx, essence); err == nil {
-			a.Outcome, a.Reason = OutcomeDuplicate, "audio already in the catalog"
+	// A cataloged file of the audio on disk makes this a duplicate under DupSkip; one that
+	// is gone is the file of an item the import restores, under either policy.
+	if essence != "" {
+		occ, err := s.store.FilesByEssence(ctx, essence)
+		if err != nil {
+			a.Refuse(OutcomeQuarantine, HoldDedupFailed, "dedup check failed: "+err.Error(), nil)
 			return st
-		} else if !waxerr.Is(err, waxerr.CodeNotFound) {
-			a.Outcome, a.Reason = OutcomeQuarantine, "dedup check failed: "+err.Error()
+		}
+		held, gone := heldAudio(occ, kind, lib.ID)
+		switch {
+		case held != nil && req.DupPolicy == model.DupSkip:
+			a.Refuse(OutcomeDuplicate, HoldDuplicateCatalog, "audio already in the catalog", occupantOf(*held))
 			return st
+		case held == nil && gone != nil:
+			a.Restores = gone.ItemPID
 		}
 	}
 	if req.Hold != nil {
 		if reason := req.Hold(path); reason != "" {
-			a.Outcome, a.Reason = OutcomeQuarantine, reason
+			a.Refuse(OutcomeQuarantine, HoldReadOnlySource, reason, nil)
 			return st
 		}
 	}
@@ -416,7 +545,7 @@ func (s *Service) classify(ctx context.Context, req Request, path string) *stage
 	st.prof = prof
 	rel, err := organize.RenderRelPath(prof, acquiredItemView(fm.Tags, path, kind))
 	if err != nil {
-		a.Outcome, a.Reason = OutcomeQuarantine, "no destination: "+err.Error()
+		a.Refuse(OutcomeQuarantine, HoldNoDestination, "no destination: "+err.Error(), nil)
 		return st
 	}
 	st.rel, a.RelDst, a.Outcome = rel, rel, OutcomeImport
@@ -425,26 +554,23 @@ func (s *Service) classify(ctx context.Context, req Request, path string) *stage
 
 // settle decides each staged file's destination in the order the files will land: a
 // second staged copy of audio another file claimed is a duplicate under DupSkip, and a
-// destination another staged file claimed, one already on disk, or one a cataloged file
-// holds under another case is quarantined.
+// destination another staged file claimed, one a file stands at or beside under another
+// case, or one the catalog holds for other audio is quarantined, keeping the destination.
 func (s *Service) settle(ctx context.Context, req Request, files []*staged) []Action {
 	// Claims made within this import: destinations (so two staged files never
 	// target the same path) and audio essences (so under DupSkip two staged copies
 	// of the same recording don't both import even when their tags, and thus their
 	// destinations, differ).
-	claims := &batchClaims{dst: map[string]bool{}, essence: map[string]bool{}}
+	claims := &batchClaims{dst: map[string]string{}, essence: map[string]string{}, ls: fsx.NewLister()}
 	out := make([]Action, len(files))
 	for i, f := range files {
 		a := f.Action
 		if a.Outcome == OutcomeImport {
 			s.claim(ctx, req, &a, claims)
 		}
-		if a.Outcome != OutcomeImport {
-			a.Dst, a.RelDst = "", ""
-		}
 		out[i] = a
 	}
-	HoldBooks(out)
+	HoldUnits(out)
 	return out
 }
 
@@ -453,34 +579,87 @@ func (s *Service) settle(ctx context.Context, req Request, files []*staged) []Ac
 func (s *Service) claim(ctx context.Context, req Request, a *Action, claims *batchClaims) {
 	// A second staged copy of the same recording (possibly tagged differently, so a
 	// different destination) is still a duplicate under skip.
-	if a.Essence != "" && req.DupPolicy == model.DupSkip && claims.essence[a.Essence] {
-		a.Outcome, a.Reason = OutcomeDuplicate, "duplicate of another file in this import"
+	if first, ok := claims.essence[a.Essence]; ok && a.Essence != "" && req.DupPolicy == model.DupSkip {
+		a.Refuse(OutcomeDuplicate, HoldDuplicateBatch, "duplicate of another file in this import", &Occupant{StagedSrc: first})
 		return
 	}
-	dst := filepath.Join(string(a.Library.Root), a.RelDst)
-	key := pathx.CollisionKey(dst)
-	if claims.dst[key] {
-		a.Outcome, a.Reason = OutcomeQuarantine, "destination already claimed by another staged file"
+	a.Dst = filepath.Join(string(a.Library.Root), a.RelDst)
+	key := pathx.CollisionKey(a.Dst)
+	if first, ok := claims.dst[key]; ok {
+		a.Refuse(OutcomeQuarantine, HoldClaimed, "destination already claimed by another staged file", &Occupant{Path: a.Dst, StagedSrc: first})
 		return
 	}
-	if pathExists(dst) {
-		a.Outcome, a.Reason = OutcomeQuarantine, "destination already exists in the library"
+	occ, err := s.store.FileOccupants(ctx, a.Dst)
+	if err != nil {
+		a.Refuse(OutcomeQuarantine, HoldCollisionCheck, "collision check failed: "+err.Error(), nil)
 		return
 	}
-	// A cataloged file whose path differs only by case would coexist here on Linux
-	// but collide on a case-insensitive filesystem, so refuse it for portability.
-	if exists, err := s.store.DisplayPathExistsFold(ctx, dst); err != nil {
-		a.Outcome, a.Reason = OutcomeQuarantine, "collision check failed: "+err.Error()
-		return
-	} else if exists {
-		a.Outcome, a.Reason = OutcomeQuarantine, "destination case-collides with a cataloged file"
+	if code, reason, o := DestinationHold(claims.ls, a, occ); code != "" {
+		a.Refuse(OutcomeQuarantine, code, reason, o)
 		return
 	}
-	claims.dst[key] = true
+	claims.dst[key] = a.Src
 	if a.Essence != "" {
-		claims.essence[a.Essence] = true
+		claims.essence[a.Essence] = a.Src
 	}
-	a.Dst = dst
+}
+
+// restored is the item an import planned to restore (Action.Restores) when its file landed
+// on it: the item the put names, or for a cue rip's file, whose put names no one item, an
+// item the file backs now.
+func (s *Service) restored(ctx context.Context, a *Action, out *model.ScanItemResult) model.PID {
+	if a.Restores == "" {
+		return ""
+	}
+	if out.ItemPID != "" {
+		if out.ItemPID == a.Restores {
+			return a.Restores
+		}
+		return ""
+	}
+	occ, err := s.store.FileOccupants(ctx, a.Dst)
+	if err != nil {
+		s.log.Warn("import: reading what a restored rip backs", "dst", a.Dst, "err", err)
+		return ""
+	}
+	for _, o := range occ {
+		if o.ItemPID == a.Restores {
+			return a.Restores
+		}
+	}
+	return ""
+}
+
+// DestinationHold says what holds an action's destination, given the cataloged files at
+// it folded for case (Store.FileOccupants): a file standing there or beside it under
+// another case, which its folder's listing shows on any filesystem, or a cataloged file
+// whose path differs only by case, which would coexist here on Linux but collide on a
+// case-insensitive filesystem. A gone file of the staged file's own audio is the row the
+// import takes back, while another item's gone file still holds its path, which a
+// different file landing there would take over. A plan and its apply check alike by it.
+func DestinationHold(ls *fsx.Lister, a *Action, occ []model.FileOccupant) (HoldCode, string, *Occupant) {
+	if fsx.SameFile(a.Src, a.Dst) {
+		return HoldExists, "the file is already at its destination", occupantAt(a.Dst, occ)
+	}
+	path, exact, err := ls.Occupant(a.Src, a.Dst)
+	switch {
+	case err != nil:
+		return HoldCollisionCheck, "destination cannot be looked at: " + err.Error(), &Occupant{Path: a.Dst}
+	case path != "" && exact:
+		return HoldExists, "destination already exists in the library", occupantAt(path, occ)
+	case path != "":
+		return HoldOccupiedCase, "destination differs only by case from " + path, occupantAt(path, occ)
+	}
+	for _, o := range occ {
+		switch {
+		case !o.OnDisk && a.Essence != "" && o.Essence == a.Essence:
+		case o.OnDisk:
+			return HoldOccupiedCase, "destination case-collides with the cataloged file " + o.DisplayPath, occupantOf(o)
+		default:
+			return HoldCataloged, "destination is held in the catalog by " + heldBy(o) + ", which is not on disk", occupantOf(o)
+		}
+	}
+	return "", "", nil
 }
 
 // Execute applies a plan: a free-space preflight first, then each importable file is
@@ -507,13 +686,16 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	// The staging directories' covers are planned once the audio has landed, so a folder
 	// routed to more than one library leaves a cover in each destination. The album
 	// folders are the source and the folders below it, or only those below a configured
-	// inbox, which holds staged imports; a file handed over alone carries nothing from its
-	// folder. It runs on the cancellation path too, before the batch is finalized: the audio
+	// inbox, which holds staged imports; files a host handed over carry nothing from their
+	// folders. It runs on the cancellation path too, before the batch is finalized: the audio
 	// already landed, so a staging directory emptied before the cancel would otherwise
 	// keep a cover with nothing to hold it. The staging folders the import emptied are
 	// then removed; a copier still writing into one has a file there, which keeps it.
 	var placed []organize.SidecarMove
 	placeCovers := func() {
+		if plan.Acquired {
+			return
+		}
 		root := filepath.Dir(plan.Source)
 		if plan.Inbox {
 			root = plan.Source
@@ -540,10 +722,13 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 		}
 		a := &plan.Actions[i]
 		switch a.Outcome {
-		case OutcomeDuplicate:
-			rep.Duplicates++
-		case OutcomeQuarantine:
-			rep.Quarantined++
+		case OutcomeDuplicate, OutcomeQuarantine:
+			if a.Outcome == OutcomeDuplicate {
+				rep.Duplicates++
+			} else {
+				rep.Quarantined++
+			}
+			rep.Holds = append(rep.Holds, Held{Src: a.Src, Dst: a.Dst, Outcome: a.Outcome, Code: a.Code, Reason: a.Reason, Occupant: a.Occupant})
 		case OutcomeImport:
 			lib := a.Library
 			if lib == nil {
@@ -552,7 +737,7 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			sidecars, outcome, err := s.importOne(ctx, plan, a, lib, speller(lib), sib)
 			if err != nil {
 				rep.Errored++
-				rep.Failures = append(rep.Failures, Failure{Src: a.Src, Err: err.Error()})
+				rep.Failures = append(rep.Failures, Failure{Src: a.Src, Dst: outcome.Path, Err: err.Error()})
 				s.log.Warn("import failed", "src", a.Src, "dst", a.Dst, "err", err)
 				continue
 			}
@@ -604,15 +789,17 @@ func (s *Service) pruneStaging(root string, placed []organize.SidecarMove) int {
 
 // importOne places one file in the managed tree, catalogs it under its target
 // library, records any acquisition provenance, and carries its sidecars in alongside
-// it. It returns the number of sidecars placed and what cataloging the file did.
+// it. It returns the number of sidecars placed and what cataloging the file did, whose
+// Path is set once the file has landed, a failure after the move included.
 func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *model.Library, sp *fsx.Speller, sib *organize.Siblings) (int, FileOutcome, error) {
-	outcome := FileOutcome{Path: a.Dst}
+	var outcome FileOutcome
 	if err := os.MkdirAll(pathx.Long(filepath.Dir(a.Dst)), 0o755); err != nil {
 		return 0, outcome, waxerr.Wrap(waxerr.CodeIO, "inbox.import", err)
 	}
 	if err := placeFile(sp, a.Src, a.Dst, plan.Copy); err != nil {
 		return 0, outcome, err
 	}
+	outcome.Path = a.Dst
 	var forced model.Kind
 	if a.KindForced {
 		forced = a.Kind
@@ -621,24 +808,35 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	if a.Kind == model.KindBook {
 		opts.Position = &a.Position
 	}
-	_, out, err := s.cataloger.ScanFileWith(ctx, lib, a.Dst, opts)
+	res, out, err := s.cataloger.ScanFileWith(ctx, lib, a.Dst, opts)
 	if err != nil {
 		return 0, outcome, err
 	}
+	var made []model.PID
 	if out != nil {
 		outcome.ItemPID, outcome.AttachedAsCopy = out.ItemPID, out.AttachedAsCopy
+		outcome.Verdict, outcome.Relinked, outcome.Promoted = scan.VerdictOf(out), out.Relinked, out.Promoted
+		outcome.Restores = s.restored(ctx, a, out)
+		made = out.Made
+	}
+	// The scan's own result settles every fold it made, a promoted alternate's re-read
+	// included.
+	if res != nil {
+		outcome.Absorbed = res.Absorbed
 	}
 	// Record origin provenance on the item that now backs the placed file. This is
 	// attribution only: a failure to record it must not fail an import whose audio
 	// already landed and cataloged. A file that joined an existing item as a copy
-	// records none, since that item was acquired before it.
+	// records none, since that item was acquired before it, and an item that stood before
+	// the file, or took one in, only fills what its record lacks: every item the file backs
+	// but those the put made from nothing.
 	if plan.Acquisition != nil && !outcome.AttachedAsCopy {
-		copyOf, err := s.store.PutAcquisitionForFile(ctx, []byte(a.Dst), *plan.Acquisition)
+		copyOf, err := s.store.PutAcquisitionForFile(ctx, []byte(a.Dst), *plan.Acquisition, made)
 		if err != nil {
 			s.log.Warn("recording acquisition provenance", "dst", a.Dst, "err", err)
 		}
 		if copyOf != "" {
-			outcome.ItemPID, outcome.AttachedAsCopy = copyOf, true
+			outcome.ItemPID, outcome.AttachedAsCopy, outcome.Verdict = copyOf, true, scan.VerdictCopy
 		}
 	}
 	if !plan.Copy {

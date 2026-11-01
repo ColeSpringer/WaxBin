@@ -270,7 +270,7 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, entityRenameView{
 					EntityPID: string(rep.EntityPID), Outcome: string(rep.Outcome),
-					MergedInto: string(rep.MergedInto), MovedAlbums: movedAlbumStrings(rep.MovedAlbums),
+					MergedInto: string(rep.MergedInto), MovedAlbums: pidStrings(rep.MovedAlbums),
 					Members: rep.Members, Credits: rep.Credits,
 				})
 			}
@@ -296,8 +296,20 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
-// movedAlbumStrings renders the report's moved-album pids for JSON.
-func movedAlbumStrings(pids []model.PID) []string {
+// pidMapStrings renders a pid-to-pid map for JSON, nil for none.
+func pidMapStrings(m map[model.PID]model.PID) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[string(k)] = string(v)
+	}
+	return out
+}
+
+// pidStrings renders pids for JSON, nil for none.
+func pidStrings(pids []model.PID) []string {
 	if len(pids) == 0 {
 		return nil
 	}

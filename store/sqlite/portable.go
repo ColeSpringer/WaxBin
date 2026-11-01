@@ -19,7 +19,7 @@ import (
 // ItemsByEssence returns every item backed by a file with the given essence hash,
 // matching ANY of an item's files rather than only its primary edge. Matching any file
 // means a multi-file audiobook resolves from any of its parts, and it stays consistent
-// with the inbox duplicate gate (FileByEssence is also any-file). The result is
+// with the inbox duplicate gate (FilesByEssence is also any-file). The result is
 // 0, 1, or N items: a single-file rip whose bytes were shared to another catalog is
 // one; a single-file CUE album is N (each virtual track has its own primary edge to the
 // one shared file), which the caller disambiguates by kind then duration. Returns an

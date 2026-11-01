@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 
 	"github.com/colespringer/waxbin/model"
@@ -55,10 +56,10 @@ func (s *Store) CreateJob(ctx context.Context, j *model.Job) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		r, err := tx.ExecContext(ctx,
 			`INSERT INTO job(pid, kind, scope, state, owner, progress, message, error, target_type, target_pid,
-			   started_at, heartbeat_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			   params, started_at, heartbeat_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(pid), j.Kind, j.Scope, string(j.State), j.Owner, j.Progress, j.Message, j.Error,
-			j.TargetType, string(j.TargetPID), j.StartedAt, j.HeartbeatAt)
+			j.TargetType, string(j.TargetPID), j.Params, j.StartedAt, j.HeartbeatAt)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, "store.CreateJob", err)
 		}
@@ -75,8 +76,10 @@ func (s *Store) CreateJob(ctx context.Context, j *model.Job) error {
 func (s *Store) UpdateJob(ctx context.Context, j *model.Job) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`UPDATE job SET state=?, progress=?, message=?, error=?, result=?, heartbeat_at=?, finished_at=? WHERE id=?`,
-			string(j.State), j.Progress, j.Message, j.Error, j.Result, j.HeartbeatAt, nullInt64(j.FinishedAt), j.ID)
+			`UPDATE job SET state=?, progress=?, message=?, error=?, error_code=?, error_reason=?, result=?, heartbeat_at=?, finished_at=?
+			 WHERE id=?`,
+			string(j.State), j.Progress, j.Message, j.Error, string(j.ErrorCode), string(j.ErrorReason), j.Result, j.HeartbeatAt,
+			nullInt64(j.FinishedAt), j.ID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, "store.UpdateJob", err)
 		}
@@ -91,6 +94,45 @@ func (s *Store) Heartbeat(ctx context.Context, jobID, ts int64, progress float64
 			"UPDATE job SET heartbeat_at=?, progress=?, message=? WHERE id=?", ts, progress, msg, jobID)
 		return waxerr.Wrap(waxerr.CodeIO, "store.Heartbeat", err)
 	})
+}
+
+// SaveJobResult writes a running job's result so far, a checkpoint a job reclaimed after a
+// crash keeps. Like Heartbeat it emits no change row: a tailer reads the job row itself.
+func (s *Store) SaveJobResult(ctx context.Context, pid model.PID, result json.RawMessage) error {
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE job SET result = ? WHERE pid = ?", string(result), string(pid))
+		return waxerr.Wrap(waxerr.CodeIO, "store.SaveJobResult", err)
+	})
+}
+
+// SaveJobParams writes what a running job was asked to do, once it knows it, with no
+// change row.
+func (s *Store) SaveJobParams(ctx context.Context, pid model.PID, params json.RawMessage) error {
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE job SET params = ? WHERE pid = ?", string(params), string(pid))
+		return waxerr.Wrap(waxerr.CodeIO, "store.SaveJobParams", err)
+	})
+}
+
+// UnfinishedJobs returns the jobs of a kind that ended before they finished (failed,
+// canceled, or reclaimed as crashed), newest first.
+func (s *Store) UnfinishedJobs(ctx context.Context, kind string) ([]*model.Job, error) {
+	const op = "store.UnfinishedJobs"
+	rows, err := s.rdb().QueryContext(ctx, jobSelect+" WHERE kind = ? AND state IN (?, ?, ?) ORDER BY id DESC", kind,
+		string(model.JobFailed), string(model.JobCanceled), string(model.JobCrashed))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []*model.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
 
 // ListJobs returns recent jobs, newest first.
@@ -188,14 +230,15 @@ func (s *Store) ReclaimOrphans(ctx context.Context, ts int64) (int, error) {
 	return reclaimed, err
 }
 
-const jobSelect = `SELECT id, pid, kind, scope, state, owner, progress, message, error, result,
-	target_type, target_pid, started_at, heartbeat_at, finished_at FROM job`
+const jobSelect = `SELECT id, pid, kind, scope, state, owner, progress, message, error, error_code, error_reason, params,
+	result, target_type, target_pid, started_at, heartbeat_at, finished_at FROM job`
 
 func scanJob(sc rowScanner) (*model.Job, error) {
 	var j model.Job
 	var finished sql.NullInt64
 	if err := sc.Scan(&j.ID, &j.PID, &j.Kind, &j.Scope, &j.State, &j.Owner, &j.Progress,
-		&j.Message, &j.Error, &j.Result, &j.TargetType, &j.TargetPID, &j.StartedAt, &j.HeartbeatAt, &finished); err != nil {
+		&j.Message, &j.Error, &j.ErrorCode, &j.ErrorReason, &j.Params, &j.Result, &j.TargetType, &j.TargetPID, &j.StartedAt,
+		&j.HeartbeatAt, &finished); err != nil {
 		return nil, err
 	}
 	j.FinishedAt = finished.Int64

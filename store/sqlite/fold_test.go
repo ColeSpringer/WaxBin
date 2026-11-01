@@ -316,7 +316,7 @@ func TestFoldIntoABookAsACopyLandsAtItsPart(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := putBook(t, st, lib.ID, bookSpec{path: cp, essence: "ae2", content: "ac2b", title: "T", author: "A", position: 2, durationMS: 1000})
-	if !out.AttachedAsCopy || !slices.Equal(out.Folded, []model.PID{track}) {
+	if !out.AttachedAsCopy || len(out.Absorbed) != 1 || out.Absorbed[track] != book {
 		t.Fatalf("put = %+v, want a copy of part 2 folding the track", out)
 	}
 	if ps, err := st.PlayStateFor(ctx, "", book); err != nil || ps.PositionMS != 1300 {
@@ -716,7 +716,7 @@ func TestFoldIntoATrackKeepsTheLaterChanges(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if out := putTrackInput(t, st, enc(mp3Path, "lc-mp3", "mp3", mbid)); !slices.Equal(out.Folded, []model.PID{loser}) {
+	if out := putTrackInput(t, st, enc(mp3Path, "lc-mp3", "mp3", mbid)); len(out.Absorbed) != 1 || out.Absorbed[loser] != out.ItemPID {
 		t.Fatalf("mp3 under the recording id = %+v, want it folding its track into the FLAC's", out)
 	}
 	ps, err := st.PlayStateFor(ctx, "", survivor)

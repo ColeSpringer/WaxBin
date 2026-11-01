@@ -19,6 +19,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
@@ -1862,6 +1863,11 @@ func TestInboxQuarantinesCaseCollision(t *testing.T) {
 	if planB.Importable() != 0 {
 		t.Fatalf("case-colliding file should not be importable, got %d importable", planB.Importable())
 	}
+	for _, a := range planB.Actions {
+		if filepath.Base(a.Src) == "b.mp3" && (a.Code != inbox.HoldOccupiedCase || a.Occupant == nil || filepath.Base(a.Occupant.Path) != "01 - Song.mp3") {
+			t.Errorf("b.mp3 = %+v (occupant %+v), want it held by the cataloged 01 - Song.mp3 beside it", a, a.Occupant)
+		}
+	}
 	rep, err := lib.ApplyImport(ctx, planB)
 	if err != nil {
 		t.Fatalf("apply B: %v", err)
@@ -2746,5 +2752,86 @@ func TestSameAudioCopiesEndToEnd(t *testing.T) {
 	}
 	if st := stateOf(t, ctx, lib, track1); st != model.StateArchived {
 		t.Errorf("track 1 = %s, want archived", st)
+	}
+}
+
+// TestADestinationTakenSinceThePlanIsAQuarantineNotAFailure: a file that took a planned
+// destination after the plan was made holds the import back as a quarantine naming it,
+// rather than failing it when the move meets the file, and the staged file stays put.
+func TestADestinationTakenSinceThePlanIsAQuarantineNotAFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	staging := t.TempDir()
+	src := filepath.Join(staging, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(71)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: staging})
+	if err != nil || plan.Importable() != 1 {
+		t.Fatalf("plan = %+v (err %v), want one import", plan, err)
+	}
+	dst := plan.Actions[0].Dst
+	writeFile(t, dst, []byte("taken"))
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil || rep.Imported != 0 || rep.Errored != 0 || rep.Quarantined != 1 {
+		t.Fatalf("apply = %+v (err %v), want the file quarantined", rep, err)
+	}
+	if len(rep.Holds) != 1 || rep.Holds[0].Code != inbox.HoldExists || rep.Holds[0].Dst != dst ||
+		rep.Holds[0].Occupant == nil || rep.Holds[0].Occupant.Path != dst {
+		t.Errorf("holds = %+v, want the import held by the file at %s", rep.Holds, dst)
+	}
+	if !fileExists(src) {
+		t.Error("the staged file left staging")
+	}
+}
+
+// TestADestinationCatalogedSinceThePlanIsHeld: a destination the catalog came to hold
+// between plan and apply holds the import as the plan would have, here a file another
+// import cataloged under a path apart only by case, which a case-insensitive filesystem
+// would collide with.
+func TestADestinationCatalogedSinceThePlanIsHeld(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	first, second := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(first, "song.mp3"), testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(72)))
+	writeFile(t, filepath.Join(second, "song.mp3"), testaudio.BuildMP3WithAudio("song", "band", "record", 1, testaudio.AudioWithSeed(73)))
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: first})
+	if err != nil || plan.Importable() != 1 {
+		t.Fatalf("plan = %+v (err %v), want one import", plan, err)
+	}
+	other, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: second})
+	if err != nil || other.Importable() != 1 || !strings.EqualFold(other.Actions[0].Dst, plan.Actions[0].Dst) {
+		t.Fatalf("other plan = %+v (err %v), want one import apart only by case", other, err)
+	}
+	if rep, err := lib.ApplyImport(ctx, other); err != nil || rep.Imported != 1 {
+		t.Fatalf("apply the other = %+v (err %v)", rep, err)
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil || rep.Imported != 0 || rep.Quarantined != 1 {
+		t.Fatalf("apply = %+v (err %v), want the file quarantined", rep, err)
+	}
+	if len(rep.Holds) != 1 || rep.Holds[0].Code != inbox.HoldOccupiedCase {
+		t.Errorf("holds = %+v, want the import held by the file apart only by case", rep.Holds)
+	}
+}
+
+// TestAFileAlreadyAtItsDestinationIsHeld: a file staged where it would land, not yet in the
+// catalog, is held as the file at its destination, in move and copy mode alike, rather than
+// imported onto itself or failing when the copy meets it.
+func TestAFileAlreadyAtItsDestinationIsHeld(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, copyMode := range []bool{false, true} {
+		root := t.TempDir()
+		lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+		dir := filepath.Join(root, "Band", "Record")
+		writeFile(t, filepath.Join(dir, "01 - Song.mp3"), testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(33)))
+		plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: dir, Copy: copyMode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a := plan.Actions[0]; a.Outcome != inbox.OutcomeQuarantine || a.Code != inbox.HoldExists {
+			t.Errorf("copy %v: action = %+v, want it held as the file at its destination", copyMode, a)
+		}
 	}
 }

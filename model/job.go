@@ -1,5 +1,7 @@
 package model
 
+import "github.com/colespringer/waxbin/waxerr"
+
 // JobState is the lifecycle state of a job row.
 type JobState string
 
@@ -29,9 +31,18 @@ type Job struct {
 	Progress float64 // 0..1
 	Message  string
 	Error    string
-	// Result is a JSON summary a completed job records for a client tailing it
-	// (a server-run scan/analyze/enrich/organize the client did not run in-process).
-	// Empty while running and for jobs that record no summary.
+	// ErrorCode and ErrorReason are the class and reason of the error that ended a failed
+	// or canceled job, so a client tailing the row answers as the run would have; empty
+	// for a job that finished, and for one reclaimed after a crash (internal).
+	ErrorCode   waxerr.Code
+	ErrorReason waxerr.Reason
+	// Params is what the job was asked to do, as JSON, written when it starts; empty for a
+	// job that records none.
+	Params string
+	// Result is a JSON summary a job records for a client tailing it (a server-run
+	// scan/analyze/enrich/organize the client did not run in-process), empty for a job
+	// that records none. A job that checkpoints (a kind change) holds its result so far
+	// while it runs, and one reclaimed after a crash keeps its last checkpoint.
 	Result string
 	// TargetType and TargetPID name what a targeted job ran on: item, artist,
 	// release_group or album for a scoped enrichment, library for a single-library scan,

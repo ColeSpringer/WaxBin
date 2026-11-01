@@ -455,14 +455,18 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	res.Revived = revived
 	affected := newAffectedRollups()
 	affected.deferred = in.DeferRollups
-	promoted, folded, _, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
+	o, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	res.Promoted = append(res.Promoted, promoted...)
-	res.Folded = append(res.Folded, folded...)
+	res.Promoted = append(res.Promoted, o.promoted...)
+	res.Absorbed = absorbedInto(o.folded, itemPID)
+	if err := recordLineageTx(ctx, tx, in.Job, res.Absorbed, nil); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	if changed {
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -501,17 +505,37 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	return nil
 }
 
+// orphaned is what reconcileOrphansTx did: the files it promoted, the items it folded into
+// the joined item, less an opener whose pid the joined item took (handed), and the first
+// item that kept a file, which a put minting a new item for the file took it from.
+type orphaned struct {
+	promoted []model.PromotedFile
+	folded   []model.PID
+	handed   model.PID
+	kept     model.PID
+}
+
+// absorbedInto maps each folded item to the item that took it in, nil for none.
+func absorbedInto(folded []model.PID, into model.PID) map[model.PID]model.PID {
+	if len(folded) == 0 {
+		return nil
+	}
+	m := make(map[model.PID]model.PID, len(folded))
+	for _, p := range folded {
+		m[p] = into
+	}
+	return m
+}
+
 // reconcileOrphansTx settles the items a link detached a file from. One that still has a
 // file puts an alternate in the place the file left (promoteLostTx: a copy of a book's
 // part fills its gap) or otherwise keeps a primary, its rollups and book total are
 // recomputed, and it emits an update, marked missing when none of its files is on disk;
 // one left with none folds into the item the file joined (foldItemIntoTx) and is deleted.
-// It returns the files promoted, the pids of the items folded, less an opener whose pid
-// the joined item took, and that pid.
-func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, []model.PID, model.PID, error) {
+func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) (orphaned, error) {
 	var promoted []model.PromotedFile
 	var folded []model.PID
-	var handed model.PID
+	var handed, kept model.PID
 	// The playlists and queues the folds and deletes change are settled once at the end.
 	var batch entryHolders
 	// A rip's track that opens the file, folding into an item this put minted, hands it
@@ -540,23 +564,23 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 		if len(windows) > 0 {
 			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_file WHERE item_id = ? AND role IN ('primary', 'part')",
 				dep.into).Scan(&parts); err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
 			}
 		}
 		if parts == 1 {
 			var err error
 			if whole, err = finishedByTx(ctx, tx, windows); err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
 			}
 		}
 	}
 	for _, oid := range orphans {
 		has, err := itemHasAnyFile(ctx, tx, oid)
 		if err != nil {
-			return nil, nil, "", err
+			return orphaned{}, err
 		}
 		if err := affected.collect(ctx, tx, oid); err != nil {
-			return nil, nil, "", err
+			return orphaned{}, err
 		}
 		if has {
 			p, err := promoteLostTx(ctx, tx, oid, dep.books[oid], dep.lost[oid])
@@ -565,7 +589,7 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 				p, err = ensurePrimary(ctx, tx, oid)
 			}
 			if err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
 			}
 			if p != nil {
 				promoted = append(promoted, *p)
@@ -574,19 +598,24 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 			// or another encoding of it took its place.
 			if span, ok := dep.spans[oid]; ok && !filled {
 				if err := moveDepartedPositionsTx(ctx, tx, oid, dep.into, dep.file, span); err != nil {
-					return nil, nil, "", err
+					return orphaned{}, err
 				}
 			}
 			if err := refreshBookDuration(ctx, tx, oid); err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
 			}
 			marked, err := markUnreachableMissingTx(ctx, tx, oid, nil)
 			if err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
+			}
+			if kept == "" {
+				if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", oid).Scan(&kept); err != nil {
+					return orphaned{}, err
+				}
 			}
 			if !marked {
 				if err := appendItemUpdateTx(ctx, tx, oid); err != nil {
-					return nil, nil, "", err
+					return orphaned{}, err
 				}
 			}
 			continue
@@ -594,19 +623,19 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 		fold := dep.into != 0
 		if fold {
 			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file, dep.lost[oid].window(), dep.preserveLocks, &batch); err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
 			}
 		}
 		opid, err := deleteItemCascade(ctx, tx, oid, &batch)
 		if err != nil {
-			return nil, nil, "", err
+			return orphaned{}, err
 		}
 		if oid == opener {
 			// The minted item carries on as the opener, so the caller's own delta updates
 			// the pid it now carries.
 			took, err := handPIDTx(ctx, tx, dep.intoPID, opid, false)
 			if err != nil {
-				return nil, nil, "", err
+				return orphaned{}, err
 			}
 			if took {
 				handed = opid
@@ -617,13 +646,13 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 			folded = append(folded, opid)
 		}
 		if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
-			return nil, nil, "", err
+			return orphaned{}, err
 		}
 	}
 	if err := finishTx(ctx, tx, []int64{dep.into}, whole, nowNS()); err != nil {
-		return nil, nil, "", err
+		return orphaned{}, err
 	}
-	return promoted, folded, handed, batch.settleTx(ctx, tx)
+	return orphaned{promoted: promoted, folded: folded, handed: handed, kept: kept}, batch.settleTx(ctx, tx)
 }
 
 // appendItemUpdateTx appends an item update delta by item id.

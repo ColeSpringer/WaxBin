@@ -33,7 +33,7 @@ func TestAcquisitionRoundTripAndSourceSurfacing(t *testing.T) {
 	// Stamp acquisition by the file's path (the import path) and read it back.
 	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/a.mp3"), model.AcquisitionInput{
 		SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=1", SourceID: "1", Provider: "waxtap",
-	}); err != nil {
+	}, res.Made); err != nil {
 		t.Fatalf("PutAcquisitionForFile: %v", err)
 	}
 	acq, err := st.AcquisitionByItem(ctx, res.ItemPID)
@@ -840,5 +840,140 @@ func TestClearAcquisitionIsIdempotent(t *testing.T) {
 	}
 	if locked, _ := st.IsFieldLocked(ctx, other.ItemPID, "acquisition"); locked {
 		t.Error("an explicit LockOff clear installed a lock")
+	}
+}
+
+// TestPutAcquisitionForFileFillsAStandingItem: the import stamp of a file that joined an
+// item standing before it (fill) keeps the item's origin and fills only what its record
+// lacks, from an event of the record's own source type alone, a provider's id and version
+// only within the provider the record names; a book's later part reaches its book; a stamp
+// on an item with no record yet records the event.
+func TestPutAcquisitionForFileFillsAStandingItem(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	part := func(path, essence string, position int) *model.ScanItemResult {
+		t.Helper()
+		in := bookIn(lib.ID, path, essence, "Dune", "Frank Herbert", "", "", "")
+		in.Position = position
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	first := part("/lib/dune/1.mp3", "ED1", 1)
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/dune/1.mp3"), model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://first.example/1",
+	}, first.Made); err != nil {
+		t.Fatal(err)
+	}
+	second := part("/lib/dune/2.mp3", "ED2", 2)
+	if second.ItemPID != first.ItemPID {
+		t.Fatalf("part 2 landed on %s, want the book %s", second.ItemPID, first.ItemPID)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/dune/2.mp3"), model.AcquisitionInput{
+		SourceType: model.SourceManual, SourceURL: "https://second.example/2", Provider: "uploader",
+	}, second.Made); err != nil {
+		t.Fatalf("stamp on the joined part: %v", err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, first.ItemPID); err != nil || acq.Provider != "" || acq.SourceType != model.SourceYouTube {
+		t.Errorf("acquisition after another kind of event = %+v (err %v), want it untouched", acq, err)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/dune/2.mp3"), model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://second.example/2", SourceID: "v2",
+		Provider: "uploader", ProviderVersion: "3", OptionsJSON: `{"q":1}`,
+	}, second.Made); err != nil {
+		t.Fatalf("stamp on the joined part: %v", err)
+	}
+	acq, err := st.AcquisitionByItem(ctx, first.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acq.SourceType != model.SourceYouTube || acq.SourceURL != "https://first.example/1" ||
+		acq.Provider != "uploader" || acq.SourceID != "v2" || acq.ProviderVersion != "3" || acq.OptionsJSON != `{"q":1}` {
+		t.Errorf("acquisition = %+v, want the book's own origin kept and the rest filled", acq)
+	}
+
+	// A record naming another provider keeps its id and version out of the fill.
+	track, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/t.mp3", "ET", "CT", "Song"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/t.mp3"), model.AcquisitionInput{
+		SourceType: model.SourceRSS, Provider: "feeds",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, track.ItemPID); err != nil || acq.SourceType != model.SourceRSS || acq.Provider != "feeds" {
+		t.Fatalf("first stamp on a standing item with no record = %+v (err %v), want the event recorded", acq, err)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/t.mp3"), model.AcquisitionInput{
+		SourceType: model.SourceRSS, SourceURL: "https://other.example", SourceID: "x", Provider: "tube", ProviderVersion: "9",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, track.ItemPID); err != nil || acq.SourceType != model.SourceRSS ||
+		acq.Provider != "feeds" || acq.SourceID != "" || acq.ProviderVersion != "" || acq.SourceURL != "https://other.example" {
+		t.Errorf("fill across providers = %+v (err %v), want the url filled and the other provider's id and version left out", acq, err)
+	}
+}
+
+// TestPutAcquisitionForFileStampsEveryTrackOfARip: the import stamp of a cue rip's file
+// records the acquisition on every track the file plays, each having come with it.
+func TestPutAcquisitionForFileStampsEveryTrackOfARip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	rip, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "ER", "CR", 600000,
+		[][2]int64{{0, 7500}, {7500, 15000}, {15000, 0}}))
+	if err != nil || len(rip.Made) != 3 {
+		t.Fatalf("rip = %+v (err %v), want three tracks made", rip, err)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/rip.flac"), model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://rip.example",
+	}, rip.Made); err != nil {
+		t.Fatal(err)
+	}
+	tracks, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(tracks) != 3 {
+		t.Fatalf("tracks = %d (err %v), want the rip's three", len(tracks), err)
+	}
+	for _, tr := range tracks {
+		if acq, err := st.AcquisitionByItem(ctx, tr.PID); err != nil || acq.SourceURL != "https://rip.example" {
+			t.Errorf("%s acquisition = %+v (err %v), want the rip's", tr.Title, acq, err)
+		}
+	}
+}
+
+// TestPutAcquisitionForFileFillsTheRipTracksThatStood: a rip's file read again with a new
+// track names the track the read made, and the stamp of the file records the event whole
+// on that track while only filling the record of the track that stood before it.
+func TestPutAcquisitionForFileFillsTheRipTracksThatStood(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	first, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "ER", "CR", 600000, [][2]int64{{0, 0}}))
+	if err != nil || len(first.Made) != 1 {
+		t.Fatalf("first read = %+v (err %v), want one track made", first, err)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/rip.flac"), model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://first.example"}, first.Made); err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "ER", "CR", 600000, [][2]int64{{0, 7500}, {7500, 0}}))
+	if err != nil || len(second.Made) != 1 || second.Made[0] == first.Made[0] {
+		t.Fatalf("second read = %+v (err %v), want the new track alone made", second, err)
+	}
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/rip.flac"), model.AcquisitionInput{
+		SourceType: model.SourceManual, SourceURL: "https://second.example", Provider: "uploader"}, second.Made); err != nil {
+		t.Fatal(err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, first.Made[0]); err != nil || acq.SourceType != model.SourceYouTube || acq.SourceURL != "https://first.example" {
+		t.Errorf("the standing track's acquisition = %+v (err %v), want its own origin kept", acq, err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, second.Made[0]); err != nil || acq.SourceType != model.SourceManual ||
+		acq.SourceURL != "https://second.example" || acq.Provider != "uploader" {
+		t.Errorf("the new track's acquisition = %+v (err %v), want the event whole", acq, err)
 	}
 }

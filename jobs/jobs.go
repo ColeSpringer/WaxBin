@@ -6,6 +6,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -54,6 +55,30 @@ func (h *Handle) Heartbeat(ctx context.Context, progress float64, msg string) er
 // state.
 func (h *Handle) SetResult(result string) { h.job.Result = result }
 
+// SetParams writes what the job was asked to do to its row, as JSON, once the job knows it
+// (a kind change resolves its targets under its lease), with no change row.
+func (h *Handle) SetParams(ctx context.Context, params any) error {
+	b, err := json.Marshal(params)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeInternal, "jobs.SetParams", err)
+	}
+	h.job.Params = string(b)
+	return h.mgr.store.SaveJobParams(ctx, h.job.PID, b)
+}
+
+// Checkpoint writes the job's result so far to its row at once (SetResult waits for the
+// end), so a job reclaimed after a crash still says what it did: its last checkpoint is
+// its result. The job finishes with it unless SetResult replaces it. A cumulative result
+// grows with the job, so a caller checkpoints on a cadence, never per unit of work.
+func (h *Handle) Checkpoint(ctx context.Context, result any) error {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeInternal, "jobs.Checkpoint", err)
+	}
+	h.job.Result = string(b)
+	return h.mgr.store.SaveJobResult(ctx, h.job.PID, b)
+}
+
 // Spec names a job: its kind, the lease scope it runs under, and what it targeted
 // (see model.Job.TargetType; both target fields are empty for a whole-catalog pass).
 type Spec struct {
@@ -93,19 +118,19 @@ func (m *Manager) Run(ctx context.Context, spec Spec, fn func(context.Context, *
 	defer func() {
 		if r := recover(); r != nil {
 			err = waxerr.New(waxerr.CodeInternal, "jobs.Run", fmt.Sprintf("panic: %v", r))
-			m.finalize(cleanup, job, kind, model.JobFailed, err.Error())
+			m.finalize(cleanup, job, kind, model.JobFailed, err.Error(), err)
 		}
 	}()
 
 	runErr := fn(ctx, &Handle{mgr: m, job: job})
 	switch {
 	case runErr == nil:
-		m.finalize(cleanup, job, kind, model.JobDone, "")
+		m.finalize(cleanup, job, kind, model.JobDone, "", nil)
 	case ctx.Err() != nil && (waxerr.Is(runErr, waxerr.CodeCanceled) ||
 		errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)):
-		m.finalize(cleanup, job, kind, model.JobCanceled, "interrupted before it finished")
+		m.finalize(cleanup, job, kind, model.JobCanceled, "interrupted before it finished", waxerr.New(waxerr.CodeCanceled, "jobs.Run", ""))
 	default:
-		m.finalize(cleanup, job, kind, model.JobFailed, runErr.Error())
+		m.finalize(cleanup, job, kind, model.JobFailed, runErr.Error(), runErr)
 	}
 	return job, runErr
 }
@@ -203,11 +228,16 @@ func (m *Manager) acquire(ctx context.Context, scope, op string) (func(), error)
 	}, nil
 }
 
-// finalize stamps a job's terminal state and persists it (best-effort).
-func (m *Manager) finalize(ctx context.Context, job *model.Job, kind string, state model.JobState, errMsg string) {
+// finalize stamps a job's terminal state and persists it (best-effort), with the class and
+// reason of the error that ended it, if any.
+func (m *Manager) finalize(ctx context.Context, job *model.Job, kind string, state model.JobState, errMsg string, cause error) {
 	fin := time.Now().UnixNano()
 	job.HeartbeatAt, job.FinishedAt, job.Progress = fin, fin, 1
 	job.State, job.Error = state, errMsg
+	job.ErrorCode, job.ErrorReason = "", ""
+	if cause != nil {
+		job.ErrorCode, job.ErrorReason = waxerr.CodeOf(cause), waxerr.ReasonOf(cause)
+	}
 	if err := m.store.UpdateJob(ctx, job); err != nil {
 		m.log.Warn("finalizing job", "kind", kind, "err", err)
 	}

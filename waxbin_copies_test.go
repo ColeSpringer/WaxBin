@@ -502,3 +502,143 @@ func TestLibraryScopedFileOperationsKeepToTheirLibrary(t *testing.T) {
 		t.Errorf("delete of B = %+v, want nothing planned for an item whose primary is in A", del.Actions)
 	}
 }
+
+// stageRecording writes one encoding of a recording tagged with its recording id, a song
+// by a band on a record, into dir, and returns its path.
+func stageRecording(t *testing.T, dir, format string, samples []float32, rec string) string {
+	t.Helper()
+	path := filepath.Join(dir, "song."+format)
+	writeFile(t, path, testaudio.EncodeAs(t, format, "", 22050, samples))
+	if _, err := meta.NewWriter().Apply(context.Background(), path, []meta.TagEdit{
+		{Key: "TITLE", Values: []string{"Song"}}, {Key: "ARTIST", Values: []string{"Band"}},
+		{Key: "ALBUM", Values: []string{"Record"}}, {Key: "TRACKNUMBER", Values: []string{"1"}},
+		{Key: "MUSICBRAINZ_TRACKID", Values: []string{rec}},
+	}); err != nil {
+		t.Fatalf("tag %s: %v", path, err)
+	}
+	return path
+}
+
+// TestImportReportsATakeoverAsJoined: an imported encoding that outranks the one a
+// recording's item holds takes the item over, and the report says the file joined it.
+func TestImportReportsATakeoverAsJoined(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	samples := testaudio.RichSignal(22050, 2, testaudio.MusicalPartials, 51)
+	const rec = "4e2b1b2a-0000-4000-8000-0000000000d1"
+	lossy := t.TempDir()
+	stageRecording(t, lossy, "mp3", samples, rec)
+	importAll(t, ctx, lib, lossy, 1)
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %d (err %v), want the recording", len(items), err)
+	}
+	lossless := t.TempDir()
+	stageRecording(t, lossless, "flac", samples, rec)
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: lossless})
+	if err != nil {
+		t.Fatalf("PlanImport: %v", err)
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil || len(rep.Files) != 1 {
+		t.Fatalf("ApplyImport: %+v, %v", rep, err)
+	}
+	if f := rep.Files[0]; f.Verdict != scan.VerdictJoined || f.ItemPID != items[0].PID || f.AttachedAsCopy {
+		t.Errorf("flac import = %+v, want it to have joined %s as its primary", f, items[0].PID)
+	}
+	if refs := copyRoles(t, lib, items[0].PID); len(refs) != 2 || refs[0].Role != "primary" || filepath.Ext(refs[0].DisplayPath) != ".flac" {
+		t.Errorf("edges = %+v, want the flac the primary", refs)
+	}
+}
+
+// TestARipReadReportsItsFolds: a whole-file track a cue sheet then carves into a rip keeps
+// its pid on the opening track, and the scan names the track it minted from it; with the
+// sheet gone, the scan names the track it folded back into the whole file, which takes the
+// opener's pid.
+func TestARipReadReportsItsFolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	rip := writeCueRip(t, filepath.Join(root, "rip"), 9, "One", "Two")
+	sheet, err := os.ReadFile(filepath.Join(root, "rip", "album.cue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "rip", "album.cue")); err != nil {
+		t.Fatal(err)
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	whole := itemPIDByTitle(t, ctx, lib, "album")
+	writeFile(t, filepath.Join(root, "rip", "album.cue"), sheet)
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan with the sheet: %v", err)
+	}
+	one, two := itemPIDByTitle(t, ctx, lib, "One"), itemPIDByTitle(t, ctx, lib, "Two")
+	if one != whole || len(res.Total.Created) != 1 || res.Total.Created[two] != whole || len(res.Total.Absorbed) != 0 {
+		t.Fatalf("carving: one %s (whole %s), created %v absorbed %v, want Two minted from the whole file's item", one, whole,
+			res.Total.Created, res.Total.Absorbed)
+	}
+	if err := os.Remove(filepath.Join(root, "rip", "album.cue")); err != nil {
+		t.Fatal(err)
+	}
+	res, err = lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan without the sheet: %v", err)
+	}
+	if len(res.Total.Absorbed) != 1 || res.Total.Absorbed[two] != whole || len(res.Total.Created) != 0 {
+		t.Errorf("collapsing: absorbed %v created %v, want Two folded into %s", res.Total.Absorbed, res.Total.Created, whole)
+	}
+	if items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), ""); err != nil || len(items) != 1 || items[0].PID != whole {
+		t.Errorf("items = %+v (err %v), want the whole file under %s", items, err, whole)
+	}
+	_ = rip
+}
+
+// TestAScanThatFailsStillReportsItsFolds: a scan over several libraries that fails on one
+// after another folded items away still answers, and records in its job, what it did to
+// those items' pids.
+func TestAScanThatFailsStillReportsItsFolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root, other := t.TempDir(), t.TempDir()
+	writeCueRip(t, filepath.Join(root, "rip"), 9, "One", "Two")
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+		{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}, {Path: other, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	scanLib(t, ctx, lib)
+	one, two := itemPIDByTitle(t, ctx, lib, "One"), itemPIDByTitle(t, ctx, lib, "Two")
+	if err := os.Remove(filepath.Join(root, "rip", "album.cue")); err != nil {
+		t.Fatal(err)
+	}
+	// The sub-path lies under the first root, so the second library's scan refuses it.
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{SubPath: filepath.Join(root, "rip")})
+	if err == nil {
+		t.Fatal("scan succeeded, want the second library to refuse the sub-path")
+	}
+	if res == nil || res.Total.Absorbed[two] != one {
+		t.Fatalf("result = %+v, want Two folded back into the whole file under %s", res, one)
+	}
+	if got := scanJobAbsorbed(t, ctx, lib, res.JobPID); got[two] != one {
+		t.Errorf("job result absorbed = %v, want Two in %s", got, one)
+	}
+}
+
+// scanJobAbsorbed reads the Absorbed map a scan job recorded.
+func scanJobAbsorbed(t *testing.T, ctx context.Context, lib *waxbin.Library, job model.PID) map[model.PID]model.PID {
+	t.Helper()
+	j, err := lib.Job(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res scan.Result
+	if err := json.Unmarshal([]byte(j.Result), &res); err != nil {
+		t.Fatalf("job result %q: %v", j.Result, err)
+	}
+	return res.Absorbed
+}

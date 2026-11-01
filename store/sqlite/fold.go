@@ -40,6 +40,12 @@ func handPIDTx(ctx context.Context, tx *sql.Tx, from, to model.PID, fromLogged b
 	if n, err := r.RowsAffected(); err != nil || n == 0 {
 		return false, err
 	}
+	// The lineage names the item by the pid it now carries.
+	for _, col := range []string{"pid", "other_pid"} {
+		if _, err := tx.ExecContext(ctx, "UPDATE OR REPLACE item_lineage SET "+col+" = ?1 WHERE "+col+" = ?2", string(to), string(from)); err != nil {
+			return false, err
+		}
+	}
 	if fromLogged {
 		return true, appendChange(ctx, tx, "item", from, model.OpDelete)
 	}

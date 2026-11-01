@@ -93,19 +93,22 @@ func finishProgressLine(cmd *cobra.Command, g *globals, job *model.Job, printed 
 	fmt.Fprintf(errOut(cmd), "\r[100%%] %-64s\n", truncate(job.Message, 64))
 }
 
-// jobError turns a non-successful terminal job into an error. The original error
-// class is not carried on the job row, so a failed job maps to CodeInternal (its
-// message is preserved) and a canceled one to CodeCanceled.
+// jobError turns a non-successful terminal job into an error of the class and reason its
+// row kept, so the CLI exits as the run itself would have. A row with no class (one
+// reclaimed after a crash) reads as internal, a canceled one as canceled.
 func jobError(job *model.Job) error {
 	msg := job.Error
 	if msg == "" {
 		msg = "job " + string(job.State)
 	}
-	code := waxerr.CodeInternal
-	if job.State == model.JobCanceled {
+	code := job.ErrorCode
+	switch {
+	case job.State == model.JobCanceled:
 		code = waxerr.CodeCanceled
+	case code == "":
+		code = waxerr.CodeInternal
 	}
-	return waxerr.New(code, "job."+job.Kind, msg)
+	return waxerr.New(code, "job."+job.Kind, msg).WithReason(job.ErrorReason)
 }
 
 // unmarshalJobResult decodes a finished job's JSON Result summary into v. An empty

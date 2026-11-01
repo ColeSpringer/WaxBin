@@ -63,10 +63,33 @@ type Action struct {
 	Root    string
 	InPlace bool
 	Skip    bool
+	Code    SkipCode // why a skipped action is skipped
 	Reason  string
 	// Tracks lists, for the file of a cue rip, every track it plays, which the deletion
 	// archives with it; it is empty for any other file.
 	Tracks []model.PID
+}
+
+// SkipCode says why a delete action is skipped, beside the reason that says it in words.
+type SkipCode string
+
+const (
+	SkipReadOnly   SkipCode = "read-only"   // the file's library is read-only
+	SkipNoRoot     SkipCode = "no-root"     // no library root holds the file
+	SkipRipChanged SkipCode = "rip-changed" // the file's cue rip plays other tracks than the plan named
+)
+
+// skip marks an action as not deleting, for code.
+func (a *Action) skip(code SkipCode, reason string) {
+	a.Skip, a.Code, a.Reason = true, code, reason
+}
+
+// Skip is an action a run skipped, with why.
+type Skip struct {
+	FilePID model.PID `json:"filePid"`
+	Src     string    `json:"src"`
+	Code    SkipCode  `json:"code"`
+	Reason  string    `json:"reason"`
 }
 
 // Plan is a set of deletions under one mode. Produced read-only (dry run) and
@@ -142,11 +165,12 @@ func (p *Plan) Pending() int {
 	return n
 }
 
-// Report summarizes an applied plan.
+// Report summarizes an applied plan. Skips names each action counted in Skipped.
 type Report struct {
 	Trashed        int
 	Deleted        int
 	Skipped        int
+	Skips          []Skip
 	Errored        int
 	ReclaimedBytes int64
 	Failures       []Failure
@@ -386,7 +410,7 @@ func (s *Service) Recheck(ctx context.Context, plan *Plan) error {
 			now[j] = tr.PID
 		}
 		if !slices.Equal(now, a.Tracks) {
-			a.Skip, a.Reason = true, "the cue rip's tracks changed since the plan; plan the delete again"
+			a.skip(SkipRipChanged, "the cue rip's tracks changed since the plan; plan the delete again")
 		}
 	}
 	return nil
@@ -398,9 +422,9 @@ func planFile(libs []*model.Library, item model.PID, fl model.ItemFileRef, mode 
 	lib, ok := libFor(libs, fl.DisplayPath)
 	switch {
 	case !ok:
-		a.Skip, a.Reason = true, "file is not under a known library root"
+		a.skip(SkipNoRoot, "file is not under a known library root")
 	case lib.ReadOnly:
-		a.Skip, a.Reason = true, "library is read-only"
+		a.skip(SkipReadOnly, model.ReasonLibraryReadOnly)
 	default:
 		a.Root, a.InPlace = lib.RootPath(), lib.Mode == model.ModeInPlace
 		if !mode.BypassesTrash() {
@@ -429,6 +453,7 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 		a := &plan.Actions[i]
 		if a.Skip {
 			rep.Skipped++
+			rep.Skips = append(rep.Skips, Skip{FilePID: a.FilePID, Src: a.Src, Code: a.Code, Reason: a.Reason})
 			continue
 		}
 		size, promoted, err := s.apply(ctx, a, plan.Mode, plan.reason(), sib)

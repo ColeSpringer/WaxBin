@@ -108,3 +108,98 @@ func pathExists(path string) bool {
 func nowNS() int64 { return time.Now().UnixNano() }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// heldAudio splits the cataloged files of a staged file's audio into the first that holds
+// it and the first gone one backing an item of kind in library, the one the file lands in,
+// which the import restores. A file on disk holds the audio, and so does one under a root
+// that cannot be reached (it is out of sight, not gone). A gone file the import cannot
+// bring back, another kind's item's (a track restores no book) or another library's (a
+// scan takes a gone row back only in its own library), holds it only when no gone file the
+// import restores does.
+func heldAudio(occ []model.FileOccupant, kind model.Kind, library int64) (held, gone *model.FileOccupant) {
+	var other *model.FileOccupant
+	for i := range occ {
+		o := &occ[i]
+		switch {
+		case o.OnDisk || !o.Reachable:
+			if held == nil {
+				held = o
+			}
+		case o.ItemPID == "":
+		case o.Kind == kind && o.LibraryID == library:
+			if gone == nil {
+				gone = o
+			}
+		case other == nil:
+			other = o
+		}
+	}
+	if held == nil && gone == nil {
+		held = other
+	}
+	return held, gone
+}
+
+// HeldAudio reports the cataloged file, of those holding an audio essence, that holds it
+// for a staged file of kind landing in library (heldAudio), or nil: the rule an applied
+// import rechecks a DupSkip file by.
+func HeldAudio(occ []model.FileOccupant, kind model.Kind, library int64) *model.FileOccupant {
+	held, _ := heldAudio(occ, kind, library)
+	return held
+}
+
+// heldBy names what a cataloged file at a destination backs, as a reason says it.
+func heldBy(o model.FileOccupant) string {
+	if o.ItemPID == "" {
+		return "a file that backs no item"
+	}
+	return "item " + string(o.ItemPID)
+}
+
+// occupantOf names a cataloged file as what holds an action back.
+func occupantOf(o model.FileOccupant) *Occupant {
+	return &Occupant{Path: o.DisplayPath, FilePID: o.FilePID, ItemPID: o.ItemPID}
+}
+
+// occupantAt names the file at path, with the catalog's identity for it when the catalog
+// holds a file there.
+func occupantAt(path string, occ []model.FileOccupant) *Occupant {
+	for _, o := range occ {
+		if o.DisplayPath == path {
+			return occupantOf(o)
+		}
+	}
+	return &Occupant{Path: path}
+}
+
+// checkRequest refuses a request no plan can serve and defaults its duplicate policy.
+func checkRequest(op string, req *Request) error {
+	if req.Library == nil || req.Library.Mode != model.ModeManaged {
+		return waxerr.New(waxerr.CodeInvalid, op, "import target must be a managed library")
+	}
+	if req.DupPolicy == "" {
+		req.DupPolicy = model.DupSkip
+	}
+	if !req.DupPolicy.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, op, "invalid duplicate policy: "+string(req.DupPolicy))
+	}
+	return nil
+}
+
+// sharedFolder is the deepest folder holding every staged file.
+func sharedFolder(files []*staged) string {
+	if len(files) == 0 {
+		return ""
+	}
+	dir := filepath.Dir(files[0].Src)
+	for _, f := range files[1:] {
+		for !pathx.UnderRoot(dir, f.Src) {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return dir
+}

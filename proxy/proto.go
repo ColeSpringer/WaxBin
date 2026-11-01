@@ -34,8 +34,10 @@ import (
 // (ReasonUnknownMethod) and an older peer ignores a field it does not read. On 23 an error carries its reason,
 // an added field, and fetch_chapters is an added method. On 24 playlist_create and
 // playlist_import_m3u8 carry a description an older server would drop, and
-// playlist_set_description is an added method.
-const ProtocolVersion = 24
+// playlist_set_description is an added method. On 25 the KindReport a run_set_kind job
+// records maps each created item to the item it came from, where an older client reads a
+// list, and carries the targets and how many it read.
+const ProtocolVersion = 25
 
 // ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
 // client meets a server built before the method was added.
@@ -1001,7 +1003,7 @@ type OrganizeUndoParams struct {
 
 // SetKindParams is the run_set_kind request payload: the items to change and the kind
 // to change them to, track or book. The server checks the request before starting the
-// job, and the finished job's result is the KindReport.
+// job, and the job's result is the KindReport, its checkpoints while it runs.
 type SetKindParams struct {
 	ItemPIDs  []string `json:"itemPids"`
 	Kind      string   `json:"kind"`

@@ -483,3 +483,53 @@ func TestCarvedTracksTakeTheRipsAlbumSpellings(t *testing.T) {
 		}
 	}
 }
+
+// TestVerdictOfPartitionsEveryOutcome: every put outcome takes one verdict, and the scan
+// counts each verdict under exactly one of its counters, so an import's report and a
+// scan's totals read one rule.
+func TestVerdictOfPartitionsEveryOutcome(t *testing.T) {
+	t.Parallel()
+	created := func(r *Result) int { return r.ItemsCreated }
+	updated := func(r *Result) int { return r.ItemsUpdated }
+	copies := func(r *Result) int { return r.Copies }
+	sidecars := func(r *Result) int { return r.SidecarsUpdated }
+	unchanged := func(r *Result) int { return r.Unchanged }
+	cases := []struct {
+		name    string
+		out     model.ScanItemResult
+		verdict Verdict
+		counter func(*Result) int
+	}{
+		{"a new item", model.ScanItemResult{ItemCreated: true, FileCreated: true}, VerdictCreated, created},
+		{"a part or a takeover", model.ScanItemResult{FileCreated: true, Joined: true}, VerdictJoined, updated},
+		{"a new copy", model.ScanItemResult{FileCreated: true, AttachedAsCopy: true, Joined: true}, VerdictCopy, copies},
+		{"a missing item back", model.ScanItemResult{Revived: true}, VerdictRevived, updated},
+		{"a takeover of a missing item", model.ScanItemResult{FileCreated: true, Joined: true, Revived: true}, VerdictRevived, updated},
+		{"a copy read again brings its item back", model.ScanItemResult{AttachedAsCopy: true, Revived: true}, VerdictRevived, updated},
+		{"new bytes", model.ScanItemResult{ContentChanged: true}, VerdictUpdated, updated},
+		{"a re-derived field", model.ScanItemResult{MetadataChanged: true}, VerdictUpdated, updated},
+		{"a file row new to a standing item", model.ScanItemResult{FileCreated: true}, VerdictUpdated, updated},
+		{"a copy with new bytes", model.ScanItemResult{AttachedAsCopy: true, ContentChanged: true}, VerdictUpdated, updated},
+		{"a sidecar alone", model.ScanItemResult{SidecarsChanged: true}, VerdictSidecars, sidecars},
+		{"a copy read again", model.ScanItemResult{AttachedAsCopy: true}, VerdictUnchanged, unchanged},
+		{"nothing", model.ScanItemResult{}, VerdictUnchanged, unchanged},
+	}
+	seen := map[Verdict]bool{}
+	for _, c := range cases {
+		out := c.out
+		if got := VerdictOf(&out); got != c.verdict {
+			t.Errorf("%s: verdict %q, want %q", c.name, got, c.verdict)
+		}
+		seen[c.verdict] = true
+		res := &Result{}
+		counted := countOutcome(res, &out)
+		if sum := res.ItemsCreated + res.ItemsUpdated + res.SidecarsUpdated + res.Copies + res.Unchanged; sum != 1 || *counted != 1 || c.counter(res) != 1 {
+			t.Errorf("%s: counted %+v, want one file under the verdict's counter", c.name, *res)
+		}
+	}
+	for _, v := range []Verdict{VerdictCreated, VerdictJoined, VerdictCopy, VerdictRevived, VerdictUpdated, VerdictSidecars, VerdictUnchanged} {
+		if !seen[v] {
+			t.Errorf("verdict %q has no case", v)
+		}
+	}
+}

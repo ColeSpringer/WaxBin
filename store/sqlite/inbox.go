@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -46,21 +48,70 @@ func (s *Store) UpdateImportBatch(ctx context.Context, b *model.ImportBatch) err
 	})
 }
 
-const displayPathFoldQ = "SELECT EXISTS(SELECT 1 FROM file WHERE display_path = ? COLLATE NOCASE)"
+// fileOccupantsQ reads the files a where clause picks, each with its library's root and the
+// item it backs (its primary edge first), one row per edge; fileOccupants keeps a file's
+// first.
+const fileOccupantsQ = `SELECT f.id, f.path, f.display_path, f.pid, f.library_id, COALESCE(f.essence_hash, ''),
+		COALESCE(pi.pid, ''), COALESCE(pi.kind, ''), COALESCE(pi.state, ''), l.root
+	FROM file f
+	JOIN library l ON l.id = f.library_id
+	LEFT JOIN item_file itf ON itf.file_id = f.id
+	LEFT JOIN playable_item pi ON pi.id = itf.item_id
+	WHERE %s
+	ORDER BY f.id, itf.role <> 'primary', itf.item_id`
 
-// DisplayPathExistsFold reports whether any cataloged file's display path equals
-// displayPath case-insensitively. The importer uses it so a file that would land
-// at a path differing only by case from an existing one (which coexist on a
-// case-sensitive Linux filesystem but collide on Windows/macOS) is quarantined,
-// keeping the managed tree portable. NOCASE folds ASCII, covering typical
-// filenames; file_display_nocase serves the lookup.
-func (s *Store) DisplayPathExistsFold(ctx context.Context, displayPath string) (bool, error) {
-	var exists int
-	err := s.rdb().QueryRowContext(ctx, displayPathFoldQ, displayPath).Scan(&exists)
+var (
+	fileOccupantsByDisplayQ = fmt.Sprintf(fileOccupantsQ, "f.display_path = ? COLLATE NOCASE")
+	fileOccupantsByEssenceQ = fmt.Sprintf(fileOccupantsQ, "f.essence_hash = ?")
+)
+
+// FileOccupants returns the cataloged files whose display path equals displayPath folded
+// for case, the paths that would collide with it on a case-insensitive filesystem, so an
+// import can keep the managed tree portable. NOCASE folds ASCII, covering typical file
+// names; file_display_nocase serves the lookup.
+func (s *Store) FileOccupants(ctx context.Context, displayPath string) ([]model.FileOccupant, error) {
+	return s.fileOccupants(ctx, "store.FileOccupants", fileOccupantsByDisplayQ, displayPath)
+}
+
+// FilesByEssence returns the cataloged files holding an audio essence, in every library
+// and whatever their state, for an import's duplicate check: one on disk holds the audio,
+// and one that is not is the gone file of an item the staged file would restore.
+func (s *Store) FilesByEssence(ctx context.Context, essence string) ([]model.FileOccupant, error) {
+	return s.fileOccupants(ctx, "store.FilesByEssence", fileOccupantsByEssenceQ, essence)
+}
+
+func (s *Store) fileOccupants(ctx context.Context, op, q string, arg any) ([]model.FileOccupant, error) {
+	rows, err := s.rdb().QueryContext(ctx, q, arg)
 	if err != nil {
-		return false, waxerr.Wrap(waxerr.CodeIO, "store.DisplayPathExistsFold", err)
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return exists == 1, nil
+	defer rows.Close()
+	var out []model.FileOccupant
+	last := int64(0)
+	reachable := map[string]bool{}
+	for rows.Next() {
+		var id int64
+		var o model.FileOccupant
+		var kind, state string
+		var root []byte
+		if err := rows.Scan(&id, &o.Path, &o.DisplayPath, &o.FilePID, &o.LibraryID, &o.Essence, &o.ItemPID, &kind, &state, &root); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if id == last {
+			continue
+		}
+		up, seen := reachable[string(root)]
+		if !seen {
+			up = fsx.RootUnreachable(string(root)) == nil
+			reachable[string(root)] = up
+		}
+		last, o.Kind, o.State, o.OnDisk, o.Reachable = id, model.Kind(kind), model.ItemState(state), pathExists(o.Path), up
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
 }
 
 // ImportBatches lists import batches, newest first (limit 0 = all).

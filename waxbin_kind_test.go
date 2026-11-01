@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -611,7 +613,7 @@ func TestSetItemKindSplitsABookIntoTracks(t *testing.T) {
 		t.Fatalf("report = %+v, want the book converted and two tracks created", rep)
 	}
 	byChapter := map[string]model.PID{}
-	for _, p := range append([]model.PID{pid}, rep.Created...) {
+	for _, p := range append([]model.PID{pid}, slices.Collect(maps.Keys(rep.Created))...) {
 		v, err := lib.Get(ctx, p)
 		if err != nil || v.Kind != model.KindTrack {
 			t.Fatalf("%s = %+v (err %v), want a track", p, v, err)
@@ -870,7 +872,7 @@ func TestSetItemKindSplitPlacesFollowThePart(t *testing.T) {
 	if len(rep.Created) != 2 {
 		t.Fatalf("report = %+v, want a track for part 2 and one for its MP3", rep)
 	}
-	for _, p := range rep.Created {
+	for p := range rep.Created {
 		files, err := lib.ItemFiles(ctx, p)
 		if err != nil || len(files) != 1 {
 			t.Fatalf("%s files = %+v (err %v)", p, files, err)
@@ -1087,5 +1089,175 @@ func TestSetItemKindSplitsBesideAOneTrackSheet(t *testing.T) {
 	}
 	if v, err := lib.Get(ctx, book); err != nil || v.Kind != model.KindTrack {
 		t.Errorf("item = %+v (err %v), want the book a track under its pid", v, err)
+	}
+}
+
+// reopenAs opens the catalog at db over one managed root declared media.
+func reopenAs(t *testing.T, ctx context.Context, db, root string, media model.MediaType) *waxbin.Library {
+	t.Helper()
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Media: media, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	return lib
+}
+
+// scanJobResult reads the identities a finished scan job recorded.
+func scanJobResult(t *testing.T, ctx context.Context, lib *waxbin.Library, job model.PID) scan.Result {
+	t.Helper()
+	j, err := lib.Job(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res scan.Result
+	if err := json.Unmarshal([]byte(j.Result), &res); err != nil {
+		t.Fatalf("job result %q: %v", j.Result, err)
+	}
+	return res
+}
+
+// TestAScanThatRekindsReportsTheFoldMap: a scan that reads a music root's chapters as one
+// book, the root now declared audiobook, says which track it turned into the book in place
+// and which it folded into it, in its answer and in its job's result.
+func TestAScanThatRekindsReportsTheFoldMap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
+	for n := 1; n <= 3; n++ {
+		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
+	}
+	lib := reopenAs(t, ctx, db, root, model.MediaMusic)
+	scanLib(t, ctx, lib)
+	one, two, three := itemPIDByTitle(t, ctx, lib, "Chapter 01"), itemPIDByTitle(t, ctx, lib, "Chapter 02"), itemPIDByTitle(t, ctx, lib, "Chapter 03")
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lib = reopenAs(t, ctx, db, root, model.MediaAudiobook)
+	t.Cleanup(func() { _ = lib.Close() })
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if book := itemPIDByTitle(t, ctx, lib, "Persuasion"); book != one {
+		t.Fatalf("book = %s, want chapter 1's %s", book, one)
+	}
+	for name, got := range map[string]scan.Result{"answer": res.Total, "job": scanJobResult(t, ctx, lib, res.JobPID)} {
+		if !slices.Equal(got.Converted, []model.PID{one}) || len(got.Absorbed) != 2 || got.Absorbed[two] != one ||
+			got.Absorbed[three] != one || len(got.Created) != 0 {
+			t.Errorf("%s: converted %v absorbed %v created %v, want chapter 1 converted and the rest folded into it",
+				name, got.Converted, got.Absorbed, got.Created)
+		}
+	}
+}
+
+// TestAScanJobRecordsItsPidChangesOnce: a synchronous scan's job names its pid changes once,
+// at the top, each library's counters standing under Runs without them, and a scan that
+// changed nothing, as a watch tick over unchanged files does, records no result.
+func TestAScanJobRecordsItsPidChangesOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
+	for n := 1; n <= 3; n++ {
+		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
+	}
+	lib := reopenAs(t, ctx, db, root, model.MediaMusic)
+	scanLib(t, ctx, lib)
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lib = reopenAs(t, ctx, db, root, model.MediaAudiobook)
+	t.Cleanup(func() { _ = lib.Close() })
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	j, err := lib.Job(ctx, res.JobPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded struct {
+		scan.Result
+		Runs []scan.Result
+	}
+	if err := json.Unmarshal([]byte(j.Result), &recorded); err != nil || len(recorded.Absorbed) != 2 || len(recorded.Runs) != 1 ||
+		recorded.Runs[0].FilesSeen != 3 || len(recorded.Runs[0].Converted)+len(recorded.Runs[0].Absorbed)+len(recorded.Runs[0].Created) != 0 {
+		t.Errorf("job result %s (err %v), want the pid changes at the top alone and the library's counters under Runs", j.Result, err)
+	}
+	idle, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("idle scan: %v", err)
+	}
+	if j, err := lib.Job(ctx, idle.JobPID); err != nil || j.Result != "" {
+		t.Errorf("the idle scan's job result = %q (err %v), want none", j.Result, err)
+	}
+}
+
+// TestAScanReportsThePartsASplitMinted: a scan that splits a book into tracks, its root no
+// longer declared audiobook, names each track it minted for a part with the book it came
+// from, and the book's own conversion into the track that keeps its pid.
+func TestAScanReportsThePartsASplitMinted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
+	for n := 1; n <= 3; n++ {
+		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
+	}
+	lib := reopenAs(t, ctx, db, root, model.MediaAudiobook)
+	scanLib(t, ctx, lib)
+	book := itemPIDByTitle(t, ctx, lib, "Persuasion")
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lib = reopenAs(t, ctx, db, root, model.MediaMusic)
+	t.Cleanup(func() { _ = lib.Close() })
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pids := map[model.PID]bool{}
+	for _, title := range []string{"Chapter 01", "Chapter 02", "Chapter 03"} {
+		pids[itemPIDByTitle(t, ctx, lib, title)] = true
+	}
+	got := res.Total
+	if !slices.Equal(got.Converted, []model.PID{book}) || len(got.Created) != 2 || len(got.Absorbed) != 0 {
+		t.Fatalf("converted %v absorbed %v created %v, want the book converted and two tracks minted", got.Converted, got.Absorbed, got.Created)
+	}
+	for track, src := range got.Created {
+		if src != book || !pids[track] || track == book {
+			t.Errorf("created %s from %s, want a chapter minted from the book %s", track, src, book)
+		}
+	}
+}
+
+// TestCreatedMapsEachPartToItsSource: a book split into tracks maps each track it minted
+// for a part to the book the part came from, the primary's track keeping the book's pid.
+func TestCreatedMapsEachPartToItsSource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	for n := 1; n <= 3; n++ {
+		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
+	}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	scanLib(t, ctx, lib)
+	book := itemPIDByTitle(t, ctx, lib, "Persuasion")
+	rep, err := lib.SetItemKind(ctx, []model.PID{book}, model.KindTrack, waxbin.KindOptions{})
+	if err != nil {
+		t.Fatalf("set kind: %v", err)
+	}
+	two, three := itemPIDByTitle(t, ctx, lib, "Chapter 02"), itemPIDByTitle(t, ctx, lib, "Chapter 03")
+	if want := map[model.PID]model.PID{two: book, three: book}; !maps.Equal(rep.Created, want) {
+		t.Errorf("created = %v, want %v", rep.Created, want)
+	}
+	if itemPIDByTitle(t, ctx, lib, "Chapter 01") != book || rep.Reads != 1 || !slices.Equal(rep.Targets, []model.PID{book}) {
+		t.Errorf("report = %+v, want the book's one target read and chapter 1 keeping its pid", rep)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -10,8 +11,11 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/trash"
 	"github.com/colespringer/waxbin/waxerr"
+	"github.com/spf13/cobra"
 )
 
 // TestRmReasonReachesTheTrash: rm --reason shows the reason in its plan and writes it
@@ -72,5 +76,38 @@ func TestRmReasonReachesTheTrash(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Data) != 1 || list.Data[0].Reason != "book-merge" {
 		t.Fatalf("trash list printed %q (err %v), want one entry with reason book-merge", out, err)
+	}
+}
+
+// TestDeleteReportNamesItsSkips: an applied delete names each action it skipped, with its
+// code and reason, and the JSON carries the plan's three skip counts beside them.
+func TestDeleteReportNamesItsSkips(t *testing.T) {
+	t.Parallel()
+	plan := &trash.Plan{Mode: model.DeleteTrash}
+	rep := &trash.Report{Skipped: 1, SkippedPodcast: 2, SkippedReadOnly: 3, SkippedRipTracks: 4,
+		Skips: []trash.Skip{{FilePID: "FILEA", Src: "/lib/a.mp3", Code: trash.SkipReadOnly, Reason: model.ReasonLibraryReadOnly}}}
+	render := func(asJSON bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := emitDeleteReport(cmd, &globals{jsonOut: asJSON}, plan, rep); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if text := render(false); !strings.Contains(text, "skip /lib/a.mp3 [read-only] (library is read-only)") {
+		t.Errorf("report text lacks the skip:\n%s", text)
+	}
+	var env struct {
+		Data struct {
+			Skips            []trash.Skip `json:"skips"`
+			SkippedPodcast   int          `json:"skippedPodcast"`
+			SkippedReadOnly  int          `json:"skippedReadOnly"`
+			SkippedRipTracks int          `json:"skippedRipTracks"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || len(env.Data.Skips) != 1 || env.Data.Skips[0] != rep.Skips[0] ||
+		env.Data.SkippedPodcast != 2 || env.Data.SkippedReadOnly != 3 || env.Data.SkippedRipTracks != 4 {
+		t.Errorf("report json = %+v (err %v)", env.Data, err)
 	}
 }

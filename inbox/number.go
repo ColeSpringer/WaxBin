@@ -92,7 +92,7 @@ func (s *Service) numberBook(ctx context.Context, key string, files []*staged, s
 		return f
 	}
 	for _, f := range files {
-		f.Book, f.Alternate = key, partOf[f] != nil
+		f.Unit, f.Alternate = "book\x00"+key, partOf[f] != nil
 	}
 
 	number := map[*staged]organize.PartNumber{}
@@ -181,7 +181,8 @@ func (s *Service) catalogBook(ctx context.Context, f *staged) (*model.ItemView, 
 // in the order the catalog keeps (position, its own parts first), a staged part whose
 // place its tags and name do not state taking the next place after the last. A staged
 // copy of a cataloged part, or another encoding of one at its place, is that part's
-// other file once scanned, so it is an alternate numbered by the part. The names the
+// other file once scanned, so it is an alternate numbered by the part, unless it is the
+// part's own audio while the part's file is gone, which restores the part in its place. The names the
 // cataloged parts take are marked used. It returns the layout the book's files sit under
 // and the last number.
 func (s *Service) catalogNumbers(ctx context.Context, view *model.ItemView, parts []model.ItemFileRef, lead []*staged, number map[*staged]organize.PartNumber, used map[string]bool) (string, organize.PartNumber) {
@@ -250,7 +251,10 @@ func (s *Service) catalogNumbers(ctx context.Context, view *model.ItemView, part
 		used[pathx.CollisionKey(organize.BookPartRelPath(layout, numbers[i], last, filepath.Ext(parts[e.part].DisplayPath)))] = true
 	}
 	for f, i := range twin {
-		number[f], f.Alternate, f.place, f.Position = partNumber[i], true, parts[i].Position, parts[i].Position
+		// The part's own audio staged again while its file is gone restores the part, under
+		// the part's own name; otherwise it is the part's other file beside it.
+		restores := audio[i] != nil && f.Essence == audio[i].EssenceHash && !pathExists(string(audio[i].Path))
+		number[f], f.Alternate, f.place, f.Position = partNumber[i], !restores, parts[i].Position, parts[i].Position
 	}
 	return layout, last
 }
@@ -278,24 +282,38 @@ func stagedNumbers(lead []*staged, owner *staged, number map[*staged]organize.Pa
 	return last
 }
 
-// HoldBooks keeps a book's files where they are when one of the book's own parts (one its
-// tags make, not a file joined to it or a copy of a part) will not land, since the rest
-// were named and laid out with it: an import planned again names them around what the
-// catalog then holds. Apply runs it again over the outcomes it rechecks.
-func HoldBooks(actions []Action) {
+// HoldUnits keeps a unit's files where they are when one of its own files will not land:
+// a book's own part (one its tags make, not a file joined to it or a copy of a part), since
+// the rest were named and laid out with it, and, in a plan that holds units, a track of an
+// album that is quarantined, at any stage (a duplicate's audio is in the catalog already,
+// and the album's other tracks land where they would beside it), or a refused file no tag
+// could be read from, which holds every file with a unit. A held file keeps no destination:
+// an import planned again lays it out around what the catalog then holds. Apply runs it
+// again over the outcomes it rechecks.
+func HoldUnits(actions []Action) {
 	held := map[string]string{}
 	for _, a := range actions {
-		if a.Book != "" && !a.Joined && !a.Alternate && a.Outcome != OutcomeImport {
-			if _, ok := held[a.Book]; !ok {
-				held[a.Book] = filepath.Base(a.Src)
-			}
+		book := a.Kind == model.KindBook
+		if a.Unit == "" || a.Joined || a.Alternate || a.Outcome == OutcomeImport || !book && a.Outcome != OutcomeQuarantine {
+			continue
+		}
+		if _, ok := held[a.Unit]; !ok {
+			held[a.Unit] = a.Src
 		}
 	}
 	for i := range actions {
 		a := &actions[i]
-		if part, ok := held[a.Book]; ok && a.Outcome == OutcomeImport {
-			a.Outcome, a.Reason = OutcomeQuarantine, "held with its book, whose part "+part+" will not land"
-			a.Dst, a.RelDst = "", ""
+		src, ok := held[a.Unit]
+		if wild, found := held[anyUnit]; !ok && found && a.Unit != "" {
+			src, ok = wild, true
+		}
+		if !ok || a.Outcome != OutcomeImport {
+			continue
+		}
+		if a.Kind == model.KindBook {
+			a.Refuse(OutcomeQuarantine, HoldBook, "held with its book, whose part "+filepath.Base(src)+" will not land", &Occupant{StagedSrc: src})
+		} else {
+			a.Refuse(OutcomeQuarantine, HoldAlbum, "held with its album, whose track "+filepath.Base(src)+" will not land", &Occupant{StagedSrc: src})
 		}
 	}
 }

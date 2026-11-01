@@ -381,7 +381,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if id != 0 {
-				key, rekinded = &resolvedItem{id: id}, true
+				key, rekinded, res.Rekinded = &resolvedItem{id: id}, true, true
 			}
 		}
 
@@ -487,7 +487,8 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		res.ItemPID, res.ItemCreated = itemPID, created
+		// A scan put writes present, so a state it changed was missing or archived.
+		res.ItemPID, res.ItemCreated, res.Revived = itemPID, created, stateChanged
 
 		// The fields this put re-derives over an existing item, judged before upsertTrack
 		// replaces the columns they are compared against.
@@ -587,15 +588,30 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if created {
 			dep.intoPID = itemPID
 		}
+		// A file taking a standing item over joins it, unless it already backed it.
+		if _, held := dep.lost[itemID]; demoted && !held {
+			res.Joined = true
+		}
 		orphans, err := linkPrimaryFile(ctx, tx, itemID, fileID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		var took model.PID
-		if res.Promoted, res.Folded, took, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
+		o, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		handed := carryHandedPID(res, &itemPID, took)
+		res.Promoted = o.promoted
+		handed := carryHandedPID(res, &itemPID, o.handed)
+		res.Absorbed = absorbedInto(o.folded, itemPID)
+		if res.ItemCreated && o.kept != "" {
+			res.Minted = map[model.PID]model.PID{itemPID: o.kept}
+		}
+		if res.ItemCreated && len(res.Absorbed) == 0 {
+			res.Made = []model.PID{itemPID}
+		}
+		if err := recordLineageTx(ctx, tx, in.Job, res.Absorbed, res.Minted); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if demoted {
 			if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -1119,19 +1135,6 @@ func (s *Store) FileQualitiesByItem(ctx context.Context) (map[model.PID]model.Fi
 		}
 	}
 	return out, rows.Err()
-}
-
-// FileByEssence returns a file by essence hash (first match), or CodeNotFound.
-func (s *Store) FileByEssence(ctx context.Context, essence string) (*model.File, error) {
-	row := s.rdb().QueryRowContext(ctx, fileSelect+" WHERE essence_hash = ? LIMIT 1", essence)
-	f, err := scanFile(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.New(waxerr.CodeNotFound, "store.FileByEssence", "no file with that essence")
-	}
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, "store.FileByEssence", err)
-	}
-	return f, nil
 }
 
 // AdoptItemPID gives the item at from the pid to, unless to is not a valid pid or another

@@ -45,13 +45,15 @@ func TestPlaylistNameSeedSeeksTheNameIndex(t *testing.T) {
 	}
 }
 
-// TestDisplayPathFoldSeeksItsIndex: the case-folded collision check an import makes seeks
-// file_display_nocase.
-func TestDisplayPathFoldSeeksItsIndex(t *testing.T) {
+// TestFileOccupantLookupsSeekTheirIndexes: the case-folded destination check an import
+// makes seeks file_display_nocase, and its duplicate check by audio seeks file_essence.
+func TestFileOccupantLookupsSeekTheirIndexes(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
-	plan := explainPlan(t, st, displayPathFoldQ, "/lib/A/01.flac")
-	if !strings.Contains(plan, "file_display_nocase (display_path=?)") {
+	if plan := explainPlan(t, st, fileOccupantsByDisplayQ, "/lib/A/01.flac"); !strings.Contains(plan, "file_display_nocase (display_path=?)") {
 		t.Errorf("plan:\n%s\nwant a seek on file_display_nocase", plan)
+	}
+	if plan := explainPlan(t, st, fileOccupantsByEssenceQ, "e1"); !strings.Contains(plan, "file_essence (essence_hash=?)") {
+		t.Errorf("plan:\n%s\nwant a seek on file_essence", plan)
 	}
 }

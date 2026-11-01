@@ -12,11 +12,13 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/trash"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -312,6 +314,10 @@ func TestDeletePlanAppliedAfterTheFlag(t *testing.T) {
 	if err != nil || rep.Trashed != 1 || rep.Skipped != 1 {
 		t.Fatalf("apply = %+v (err %v), want one trashed and one skipped", rep, err)
 	}
+	if len(rep.Skips) != 1 || rep.Skips[0].Src != srcs[1] || rep.Skips[0].Code != trash.SkipReadOnly ||
+		rep.Skips[0].Reason != model.ReasonLibraryReadOnly || rep.Skips[0].FilePID == "" {
+		t.Errorf("skips = %+v, want B's file named read-only", rep.Skips)
+	}
 	if fileExists(srcs[0]) || !fileExists(srcs[1]) {
 		t.Fatalf("after apply: A present %v, B present %v, want only B left in place", fileExists(srcs[0]), fileExists(srcs[1]))
 	}
@@ -430,6 +436,10 @@ func TestImportPlanAppliedAfterTheFlag(t *testing.T) {
 	if err != nil || rep.Imported != 0 || rep.Quarantined != 1 {
 		t.Fatalf("apply = %+v (err %v), want the file quarantined", rep, err)
 	}
+	if len(rep.Holds) != 1 || rep.Holds[0].Src != src || rep.Holds[0].Code != inbox.HoldReadOnlyLibrary ||
+		rep.Holds[0].Outcome != inbox.OutcomeQuarantine || rep.Holds[0].Reason != model.ReasonLibraryReadOnly || rep.Holds[0].Dst == "" {
+		t.Errorf("holds = %+v, want the file named, held by its read-only library at the place it would have taken", rep.Holds)
+	}
 	if !fileExists(src) {
 		t.Fatal("the staged file left staging")
 	}
@@ -455,6 +465,9 @@ func TestImportLeavesAReadOnlyRootsFilesInPlace(t *testing.T) {
 	rep, err := lib.ApplyImport(ctx, plan)
 	if err != nil || rep.Imported != 0 || rep.Quarantined != 1 || !fileExists(staged) {
 		t.Fatalf("applying an older move plan = %+v (err %v), want the file quarantined in place", rep, err)
+	}
+	if len(rep.Holds) != 1 || rep.Holds[0].Src != staged || rep.Holds[0].Code != inbox.HoldReadOnlySource {
+		t.Errorf("holds = %+v, want the staged file named, held in its read-only library", rep.Holds)
 	}
 
 	plan, err = lib.PlanImport(ctx, req)

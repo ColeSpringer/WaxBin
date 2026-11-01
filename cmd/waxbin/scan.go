@@ -91,29 +91,33 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 	unreachable := unreachableRoots(runs)
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			JobPID           string   `json:"jobPid"`
-			FilesSeen        int      `json:"filesSeen"`
-			AudioFiles       int      `json:"audioFiles"`
-			ItemsCreated     int      `json:"itemsCreated"`
-			ItemsUpdated     int      `json:"itemsUpdated"`
-			Relinked         int      `json:"relinked"`
-			Unchanged        int      `json:"unchanged"`
-			SidecarsUpdated  int      `json:"sidecarsUpdated"`
-			Missing          int      `json:"missing"`
-			Skipped          int      `json:"skipped"`
-			Errored          int      `json:"errored"`
-			Copies           int      `json:"copies"`
-			Reread           int      `json:"reread"`
-			Promoted         int      `json:"promoted"`
-			Dropped          int      `json:"dropped"`
-			WalkErrors       int      `json:"walkErrors"`
-			SubPathGone      bool     `json:"subPathGone,omitempty"`
-			RootUnreachable  bool     `json:"rootUnreachable,omitempty"`
-			UnreachableRoots []string `json:"unreachableRoots,omitempty"`
+			JobPID           string            `json:"jobPid"`
+			FilesSeen        int               `json:"filesSeen"`
+			AudioFiles       int               `json:"audioFiles"`
+			ItemsCreated     int               `json:"itemsCreated"`
+			ItemsUpdated     int               `json:"itemsUpdated"`
+			Relinked         int               `json:"relinked"`
+			Unchanged        int               `json:"unchanged"`
+			SidecarsUpdated  int               `json:"sidecarsUpdated"`
+			Missing          int               `json:"missing"`
+			Skipped          int               `json:"skipped"`
+			Errored          int               `json:"errored"`
+			Copies           int               `json:"copies"`
+			Reread           int               `json:"reread"`
+			Promoted         int               `json:"promoted"`
+			Dropped          int               `json:"dropped"`
+			WalkErrors       int               `json:"walkErrors"`
+			SubPathGone      bool              `json:"subPathGone,omitempty"`
+			RootUnreachable  bool              `json:"rootUnreachable,omitempty"`
+			UnreachableRoots []string          `json:"unreachableRoots,omitempty"`
+			Converted        []string          `json:"converted"`
+			Absorbed         map[string]string `json:"absorbed"`
+			Created          map[string]string `json:"created"`
 		}{
 			string(jobPID), t.FilesSeen, t.AudioFiles, t.ItemsCreated, t.ItemsUpdated,
 			t.Relinked, t.Unchanged, t.SidecarsUpdated, t.Missing, t.Skipped, t.Errored,
 			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors, t.SubPathGone, t.RootUnreachable, unreachable,
+			nonNil(pidStrings(t.Converted)), nonNilMap(pidMapStrings(t.Absorbed)), nonNilMap(pidMapStrings(t.Created)),
 		})
 	}
 	fmt.Fprintf(out(cmd), "Scan complete (job %s)\n", jobPID)
@@ -138,6 +142,15 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 	}
 	if t.Dropped > 0 {
 		fmt.Fprintf(out(cmd), "  dropped:      %d (gone files no item needs)\n", t.Dropped)
+	}
+	if len(t.Converted) > 0 {
+		fmt.Fprintf(out(cmd), "  converted:    %d (items read as another kind, keeping their pids)\n", len(t.Converted))
+	}
+	if len(t.Absorbed) > 0 {
+		fmt.Fprintf(out(cmd), "  absorbed:     %d (items folded into another; --json maps them)\n", len(t.Absorbed))
+	}
+	if len(t.Created) > 0 {
+		fmt.Fprintf(out(cmd), "  split off:    %d (items made for a file another item held; --json maps them)\n", len(t.Created))
 	}
 	fmt.Fprintf(out(cmd), "  skipped:      %d\n", t.Skipped)
 	fmt.Fprintf(out(cmd), "  errored:      %d\n", t.Errored)

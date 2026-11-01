@@ -54,7 +54,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			}
 			if id != 0 {
 				key, rekinded = &resolvedItem{id: id}, true
-				res.MetadataChanged = true
+				res.MetadataChanged, res.Rekinded = true, true
 			}
 		}
 
@@ -97,7 +97,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		res.ItemPID, res.ItemCreated = itemPID, created
+		res.ItemPID, res.ItemCreated, res.Revived = itemPID, created, stateChanged
 
 		affected := newAffectedRollups()
 		affected.deferred = in.DeferRollups
@@ -205,12 +205,22 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 		// A surviving item lost a file (e.g. a multi-file book whose part was retagged
 		// into another book): it keeps a primary and its rollups and total are refreshed.
-		promoted, folded, took, err := reconcileOrphansTx(ctx, tx, link.orphans, dep, affected)
+		o, err := reconcileOrphansTx(ctx, tx, link.orphans, dep, affected)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		res.Promoted, res.Folded = append(res.Promoted, promoted...), folded
-		handed := carryHandedPID(res, &itemPID, took)
+		res.Promoted = append(res.Promoted, o.promoted...)
+		handed := carryHandedPID(res, &itemPID, o.handed)
+		res.Absorbed = absorbedInto(o.folded, itemPID)
+		if res.ItemCreated && o.kept != "" {
+			res.Minted = map[model.PID]model.PID{itemPID: o.kept}
+		}
+		if res.ItemCreated && len(res.Absorbed) == 0 {
+			res.Made = []model.PID{itemPID}
+		}
+		if err := recordLineageTx(ctx, tx, in.Job, res.Absorbed, res.Minted); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		// A book a file the folder rule kept alone makes up takes the key the file's tags
 		// give it now (a retitled book with no ALBUM, one named for a renamed folder), so a
 		// book found later under the old key is a book of its own.

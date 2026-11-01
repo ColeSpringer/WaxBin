@@ -88,10 +88,29 @@ func (l *Library) Job(ctx context.Context, pid model.PID) (*model.Job, error) {
 
 // --- scan ---
 
-// scanWork runs the scan across libs, accumulating into out. It is shared by the
-// synchronous Scan and the asynchronous StartScan.
-func (l *Library) scanWork(libs []*model.Library, req ScanRequest, out *ScanResult) jobFn {
-	return func(ctx context.Context, h *jobs.Handle) error {
+// scanWork runs the scan across libs, accumulating into out, and records the summary as
+// the job's result, the total over every library as a scan.Result at the top level, its
+// pid changes there alone, and each library's counters under Runs. It is shared by the
+// synchronous Scan and the asynchronous StartScan, so either job row says what the scan
+// did, a scan that failed or was canceled partway too; a synchronous scan that changed
+// nothing (idle, unless always), as most watch ticks are, records none, the job table
+// keeping every row.
+func (l *Library) scanWork(libs []*model.Library, req ScanRequest, out *ScanResult, always bool) jobFn {
+	return func(ctx context.Context, h *jobs.Handle) (err error) {
+		defer func() {
+			if !always && err == nil && !out.Total.Changed() {
+				return
+			}
+			runs := make([]scan.Result, len(out.Runs))
+			for i, r := range out.Runs {
+				r.Converted, r.Absorbed, r.Created = nil, nil, nil
+				runs[i] = r
+			}
+			h.SetResult(l.jsonResult(struct {
+				scan.Result
+				Runs []scan.Result
+			}{out.Total, runs}))
+		}()
 		return l.scanLibraries(ctx, libs, req, out, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 	}
 }
@@ -113,11 +132,14 @@ func (l *Library) scanLibraries(ctx context.Context, libs []*model.Library, req 
 			AdoptStampedPIDs: req.AdoptStampedPIDs, Adoption: adoption, ForceReconcile: req.ForceReconcile,
 			IgnoreLocks: req.IgnoreLocks,
 		}, libraryBeat(i, len(libs), beat))
+		// A library a cancel or failure cut short still says what its scan did.
+		if r != nil {
+			out.Runs = append(out.Runs, *r)
+			addResult(&out.Total, r)
+		}
 		if err != nil {
 			return err
 		}
-		out.Runs = append(out.Runs, *r)
-		addResult(&out.Total, r)
 	}
 	if len(libs) == 1 {
 		out.Total.LibraryPID, out.Total.LibraryName = out.Runs[0].LibraryPID, out.Runs[0].LibraryName
@@ -154,23 +176,14 @@ func scanSpec(req ScanRequest) jobs.Spec {
 // StartScan submits a scan as a background job and returns its PID immediately.
 // The job runs to completion in this process; a client follows it through Job and
 // reads the summary from the finished job's Result: the total over every library as a
-// scan.Result at the top level, and each library's own result under Runs.
+// scan.Result at the top level, with the scan's pid changes, and each library's counters
+// under Runs.
 func (l *Library) StartScan(ctx context.Context, req ScanRequest) (model.PID, error) {
 	libs, err := l.resolveLibraries(ctx, req.LibraryPID)
 	if err != nil {
 		return "", err
 	}
-	return l.startJob(ctx, scanSpec(req), func(jctx context.Context, h *jobs.Handle) error {
-		out := &ScanResult{}
-		if err := l.scanWork(libs, req, out)(jctx, h); err != nil {
-			return err
-		}
-		h.SetResult(l.jsonResult(struct {
-			scan.Result
-			Runs []scan.Result
-		}{out.Total, out.Runs}))
-		return nil
-	})
+	return l.startJob(ctx, scanSpec(req), l.scanWork(libs, req, &ScanResult{}, true))
 }
 
 // --- analyze ---
@@ -406,7 +419,7 @@ func (l *Library) organizeUndoWork(jobPID model.PID, out **organize.RunResult) j
 		plan := organize.UndoPlan(moves)
 		for i := range plan.Actions {
 			if a := &plan.Actions[i]; !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
-				a.Skip, a.Code, a.Reason = true, organize.HoldReadOnly, "library is read-only"
+				a.Skip, a.Code, a.Reason = true, organize.HoldReadOnly, model.ReasonLibraryReadOnly
 			}
 		}
 		if err := l.organizer.Hold(jctx, plan); err != nil {

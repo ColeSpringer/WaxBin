@@ -428,3 +428,41 @@ func TestSweepReadsEachRipOnce(t *testing.T) {
 		t.Errorf("reads = %d item files, %d rip tracks; want 3 and 1", st.itemFiles, st.ripTracks)
 	}
 }
+
+// TestExecuteNamesEverySkip: a run's report names each action it skipped with its code and
+// reason, the plan's skips (no library holds the file, a read-only library) and the run's
+// own alike, beside the count.
+func TestExecuteNamesEverySkip(t *testing.T) {
+	t.Parallel()
+	root, roRoot, elsewhere := t.TempDir(), t.TempDir(), t.TempDir()
+	libs := []*model.Library{
+		{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged},
+		{Root: []byte(roRoot), DisplayRoot: roRoot, Mode: model.ModeManaged, ReadOnly: true},
+	}
+	var targets []FileTarget
+	for _, p := range []string{filepath.Join(root, "a.mp3"), filepath.Join(roRoot, "b.mp3"), filepath.Join(elsewhere, "c.mp3")} {
+		writeAt(t, p, "x")
+		targets = append(targets, FileTarget{ItemPID: "i", File: model.ItemFileRef{FilePID: model.PID(filepath.Base(p)), Path: []byte(p), DisplayPath: p}})
+	}
+	s := New(fakeStore{}, nil)
+	plan, err := s.PlanFiles(context.Background(), libs, targets, model.DeletePermanent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := s.Execute(context.Background(), plan)
+	if err != nil || rep.Deleted != 1 || rep.Skipped != 2 {
+		t.Fatalf("Execute = %+v (err %v), want one delete and two skips", rep, err)
+	}
+	want := []Skip{
+		{FilePID: "b.mp3", Src: filepath.Join(roRoot, "b.mp3"), Code: SkipReadOnly, Reason: model.ReasonLibraryReadOnly},
+		{FilePID: "c.mp3", Src: filepath.Join(elsewhere, "c.mp3"), Code: SkipNoRoot, Reason: "file is not under a known library root"},
+	}
+	if len(rep.Skips) != len(want) {
+		t.Fatalf("skips = %+v, want %+v", rep.Skips, want)
+	}
+	for i := range want {
+		if rep.Skips[i] != want[i] {
+			t.Errorf("skip %d = %+v, want %+v", i, rep.Skips[i], want[i])
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/scan"
 	"github.com/spf13/cobra"
 )
@@ -63,5 +64,39 @@ func TestScanResultSaysTheRootWasUnreachable(t *testing.T) {
 	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || !env.Data.RootUnreachable ||
 		len(env.Data.UnreachableRoots) != 1 || env.Data.UnreachableRoots[0] != "/mnt/music" {
 		t.Errorf("scan json = %+v (err %v), want the unreachable root named", env, err)
+	}
+}
+
+// TestScanResultCarriesTheFoldMap: a scan that changed items' identities says so: the
+// JSON maps each, and the text counts them.
+func TestScanResultCarriesTheFoldMap(t *testing.T) {
+	t.Parallel()
+	res := scan.Result{Converted: []model.PID{"BOOK"}, Absorbed: map[model.PID]model.PID{"T2": "BOOK"},
+		Created: map[model.PID]model.PID{"T9": "OLD"}}
+	render := func(asJSON bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := renderScanResult(cmd, &globals{jsonOut: asJSON}, "J1", res, nil); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	text := render(false)
+	for _, want := range []string{"converted:    1", "absorbed:     1", "split off:    1"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("scan text lacks %q:\n%s", want, text)
+		}
+	}
+	var env struct {
+		Data struct {
+			Converted []string          `json:"converted"`
+			Absorbed  map[string]string `json:"absorbed"`
+			Created   map[string]string `json:"created"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || len(env.Data.Converted) != 1 ||
+		env.Data.Absorbed["T2"] != "BOOK" || env.Data.Created["T9"] != "OLD" {
+		t.Errorf("scan json = %+v (err %v)", env.Data, err)
 	}
 }

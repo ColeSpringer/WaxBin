@@ -130,20 +130,27 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *trash.Report) error {
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			Mode           string          `json:"mode"`
-			Trashed        int             `json:"trashed"`
-			Deleted        int             `json:"deleted"`
-			Skipped        int             `json:"skipped"`
-			Errored        int             `json:"errored"`
-			ReclaimedBytes int64           `json:"reclaimedBytes"`
-			DirsPruned     int             `json:"dirsPruned"`
-			Failures       []trash.Failure `json:"failures,omitempty"`
-		}{string(plan.Mode), rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored,
-			rep.ReclaimedBytes, rep.DirsPruned, rep.Failures})
+			Mode             string          `json:"mode"`
+			Trashed          int             `json:"trashed"`
+			Deleted          int             `json:"deleted"`
+			Skipped          int             `json:"skipped"`
+			Skips            []trash.Skip    `json:"skips"`
+			SkippedPodcast   int             `json:"skippedPodcast"`
+			SkippedReadOnly  int             `json:"skippedReadOnly"`
+			SkippedRipTracks int             `json:"skippedRipTracks"`
+			Errored          int             `json:"errored"`
+			ReclaimedBytes   int64           `json:"reclaimedBytes"`
+			DirsPruned       int             `json:"dirsPruned"`
+			Failures         []trash.Failure `json:"failures,omitempty"`
+		}{string(plan.Mode), rep.Trashed, rep.Deleted, rep.Skipped, nonNil(rep.Skips), rep.SkippedPodcast, rep.SkippedReadOnly,
+			rep.SkippedRipTracks, rep.Errored, rep.ReclaimedBytes, rep.DirsPruned, rep.Failures})
 	}
 	w := out(cmd)
 	fmt.Fprintf(w, "Deleted (mode %s): trashed %d, removed %d, skipped %d, errored %d, reclaimed %d bytes, pruned %s\n",
 		plan.Mode, rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored, rep.ReclaimedBytes, plural(rep.DirsPruned, "folder"))
+	for _, s := range rep.Skips {
+		fmt.Fprintf(w, "  skip %s [%s] (%s)\n", s.Src, s.Code, s.Reason)
+	}
 	for _, f := range rep.Failures {
 		fmt.Fprintf(w, "  FAIL %s: %s\n", f.Src, f.Err)
 	}

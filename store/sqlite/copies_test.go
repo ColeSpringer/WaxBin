@@ -1302,14 +1302,14 @@ func TestPutAcquisitionForFileSkipsACopy(t *testing.T) {
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
 	r1, _ := putCopyPair(t, st, lib, p1, p2)
-	copyOf, err := st.PutAcquisitionForFile(ctx, []byte(p2), model.AcquisitionInput{SourceType: model.SourceManual})
+	copyOf, err := st.PutAcquisitionForFile(ctx, []byte(p2), model.AcquisitionInput{SourceType: model.SourceManual}, nil)
 	if err != nil || copyOf != r1.ItemPID {
 		t.Fatalf("stamp on the copy = %q (err %v), want it reported as a copy of %s", copyOf, err, r1.ItemPID)
 	}
 	if _, err := st.AcquisitionByItem(ctx, r1.ItemPID); err == nil {
 		t.Error("the item gained an acquisition row from its copy's import")
 	}
-	if copyOf, err := st.PutAcquisitionForFile(ctx, []byte(p1), model.AcquisitionInput{SourceType: model.SourceManual}); err != nil || copyOf != "" {
+	if copyOf, err := st.PutAcquisitionForFile(ctx, []byte(p1), model.AcquisitionInput{SourceType: model.SourceManual}, nil); err != nil || copyOf != "" {
 		t.Errorf("stamp on the primary = %q (err %v), want it recorded", copyOf, err)
 	}
 }

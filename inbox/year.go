@@ -101,12 +101,65 @@ func (s *Service) alignAlbums(ctx context.Context, req Request, files []*staged,
 		}
 		rel, err := organize.RenderRelPath(f.prof, view)
 		if err != nil {
-			f.Outcome, f.Reason = OutcomeQuarantine, "no destination: "+err.Error()
+			f.Refuse(OutcomeQuarantine, HoldNoDestination, "no destination: "+err.Error(), nil)
 			continue
 		}
 		f.rel, f.RelDst = rel, rel
 	}
 	return nil
+}
+
+// anyUnit is the unit of a refused file no tag could be read from: whatever unit it belongs
+// to cannot be told, so it holds every file of the plan (HoldUnits).
+const anyUnit = "*"
+
+// planUnits gives the files of a plan that holds units the unit each lands with, whether it
+// imports or was refused before it had a destination: a track its album, by its album title
+// alone, so the tracks of one album share it however fully each is tagged and wherever a
+// host handed each over from; a refused book part its book, unless it is a copy or another
+// encoding of one of the book's parts (copyOfPart), which holds nothing as a copy of a part
+// never does; a refused file no tag could be read from anyUnit. An importable book part has
+// its book's unit from the numbering, which runs first.
+func (s *Service) planUnits(ctx context.Context, files []*staged) {
+	for _, f := range files {
+		switch {
+		case f.Outcome == OutcomeDuplicate:
+		case f.Code == HoldUnreadable:
+			f.Unit = anyUnit
+		case f.Kind == model.KindTrack:
+			if album := identity.MatchKey(f.tags.Album); album != "" {
+				f.Unit = "album\x00" + album
+			} else if id := strings.TrimSpace(f.tags.MBReleaseID); id != "" {
+				f.Unit = "album\x00mbid:" + strings.ToLower(id)
+			}
+		case f.Outcome != OutcomeImport && f.Library != nil && f.book != "":
+			if unit := "book\x00" + strconv.FormatInt(f.Library.ID, 10) + "\x00" + f.book; !s.copyOfPart(ctx, f, unit, files) {
+				f.Unit = unit
+			}
+		}
+	}
+}
+
+// copyOfPart reports whether a refused book file is a copy or another encoding of a part of
+// its book, one staged with it and numbered into unit or one the catalog holds, by the rule
+// the numbering marks an alternate by: the same audio, or another encoding at the part's
+// place.
+func (s *Service) copyOfPart(ctx context.Context, f *staged, unit string, files []*staged) bool {
+	for _, g := range files {
+		if g != f && g.Outcome == OutcomeImport && g.Unit == unit &&
+			(f.Essence != "" && f.Essence == g.Essence || g.place == f.place && model.OtherEncoding(g.file(), f.file())) {
+			return true
+		}
+	}
+	_, parts := s.catalogBook(ctx, f)
+	for _, p := range parts {
+		a, err := s.store.FileByPID(ctx, p.FilePID)
+		if err == nil && (f.Essence != "" && f.Essence == a.EssenceHash ||
+			f.placeStated && f.place == p.Position && model.OtherEncoding(f.file(), *a)) {
+			return true
+		}
+	}
+	return false
 }
 
 // spellings maps each artist an import's tracks and books name, by match key, to the name

@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/trash"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -311,6 +312,9 @@ func TestApplyDeleteLeavesARipWhoseTracksChanged(t *testing.T) {
 	rep, err := lib.ApplyDelete(ctx, plan)
 	if err != nil || rep.Trashed != 0 || rep.Skipped != 1 {
 		t.Fatalf("apply = %+v (err %v), want the rip left alone", rep, err)
+	}
+	if len(rep.Skips) != 1 || rep.Skips[0].Code != trash.SkipRipChanged || rep.Skips[0].Src != rip {
+		t.Errorf("skips = %+v, want the rip named for its changed tracks", rep.Skips)
 	}
 	if !fileExists(rip) {
 		t.Error("the rip was deleted")

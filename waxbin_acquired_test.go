@@ -3,17 +3,21 @@ package waxbin_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -1045,5 +1049,154 @@ func TestFolderImportClassifiesAgainstItsLibrary(t *testing.T) {
 	}
 	if row := kindRow(t, ctx, forced, v.PID); row == nil || !row.Locked || row.Source != model.SourceUser {
 		t.Errorf("kind row = %+v, want a user lock for the forced kind", row)
+	}
+}
+
+// TestAJoinedImportKeepsTheStandingAcquisition: a file acquired into an item that stood
+// before it (a book's next part, an encoding taking a track over) keeps the origin the item
+// was acquired from, filling only what its record lacks.
+func TestAJoinedImportKeepsTheStandingAcquisition(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	acq := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	apply := func(src string, kind model.Kind, m waxbin.AcquiredMeta) inbox.FileOutcome {
+		t.Helper()
+		res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, kind, m)
+		if err != nil {
+			t.Fatalf("ImportAcquired %s: %v", src, err)
+		}
+		rep, err := lib.ApplyImport(ctx, res.Plan)
+		if err != nil || len(rep.Files) != 1 {
+			t.Fatalf("ApplyImport %s: %+v, %v", src, rep, err)
+		}
+		return rep.Files[0]
+	}
+	partOne, partTwo := filepath.Join(acq, "01.mp3"), filepath.Join(acq, "02.mp3")
+	stageBookPart(t, partOne, "Dune", 1, true, 1)
+	stageBookPart(t, partTwo, "Dune", 2, true, 2)
+	apply(partOne, model.KindBook, waxbin.AcquiredMeta{SourceType: model.SourceYouTube, SourceURL: "https://first.example/1"})
+	if f := apply(partTwo, model.KindBook, waxbin.AcquiredMeta{SourceType: model.SourceYouTube,
+		SourceURL: "https://second.example/2", Provider: "uploader"}); f.Verdict != scan.VerdictJoined {
+		t.Errorf("part 2 = %+v, want it joined to the book", f)
+	}
+	book := oneBook(t, ctx, lib, 2)
+	if row, err := lib.Acquisition(ctx, book.PID); err != nil || row.SourceType != model.SourceYouTube ||
+		row.SourceURL != "https://first.example/1" || row.Provider != "uploader" {
+		t.Errorf("book acquisition = %+v (err %v), want its own origin with the provider filled in", row, err)
+	}
+
+	samples := testaudio.RichSignal(22050, 2, testaudio.MusicalPartials, 52)
+	const rec = "4e2b1b2a-0000-4000-8000-0000000000d2"
+	created := apply(stageRecording(t, t.TempDir(), "mp3", samples, rec), model.KindTrack,
+		waxbin.AcquiredMeta{SourceType: model.SourceYouTube, SourceURL: "https://first.example/song"})
+	if f := apply(stageRecording(t, t.TempDir(), "flac", samples, rec), model.KindTrack,
+		waxbin.AcquiredMeta{SourceType: model.SourceManual, SourceURL: "https://second.example/song", Provider: "uploader"}); f.Verdict != scan.VerdictJoined || f.ItemPID != created.ItemPID {
+		t.Errorf("flac = %+v, want it to have taken %s over", f, created.ItemPID)
+	}
+	if row, err := lib.Acquisition(ctx, created.ItemPID); err != nil || row.SourceType != model.SourceYouTube ||
+		row.SourceURL != "https://first.example/song" || row.Provider != "" {
+		t.Errorf("track acquisition = %+v (err %v), want the origin it was acquired from, untouched by a manual event", row, err)
+	}
+}
+
+// stageTrack writes one track of an album by a band, with its own audio, and returns it
+// as an acquired file.
+func stageTrack(t *testing.T, dir, title string, track int, seed byte) waxbin.AcquiredFile {
+	t.Helper()
+	path := filepath.Join(dir, fmt.Sprintf("%02d.mp3", track))
+	writeFile(t, path, testaudio.BuildMP3WithAudio(title, "Band", "Record", track, testaudio.AudioWithSeed(seed)))
+	return waxbin.AcquiredFile{Path: path}
+}
+
+// TestAcquiredUnitHoldsAnAlbumWhoseTrackCannotLand: a unit asked to land whole keeps every
+// track of an album in place when one of them cannot land, and says so for each; asked
+// nothing, the others land and only the blocked one waits.
+func TestAcquiredUnitHoldsAnAlbumWhoseTrackCannotLand(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, whole := range []bool{true, false} {
+		root, acq := t.TempDir(), t.TempDir()
+		lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+		files := []waxbin.AcquiredFile{stageTrack(t, acq, "One", 1, 81), stageTrack(t, acq, "Two", 2, 82), stageTrack(t, acq, "Three", 3, 83)}
+		writeFile(t, filepath.Join(root, "Band", "Record", "02 - Two.mp3"), []byte("taken"))
+		res, err := lib.ImportAcquiredUnit(ctx, files, model.KindTrack, waxbin.AcquiredMeta{HoldUnits: whole})
+		if err != nil {
+			t.Fatalf("ImportAcquiredUnit: %v", err)
+		}
+		codes := []inbox.HoldCode{res.Files[0].Code, res.Files[1].Code, res.Files[2].Code}
+		want := []inbox.HoldCode{"", inbox.HoldExists, ""}
+		if whole {
+			want = []inbox.HoldCode{inbox.HoldAlbum, inbox.HoldExists, inbox.HoldAlbum}
+		}
+		if !slices.Equal(codes, want) {
+			t.Errorf("whole %v: codes = %v, want %v (files %+v)", whole, codes, want, res.Files)
+		}
+		if got := res.Plan.Importable(); got != map[bool]int{true: 0, false: 2}[whole] {
+			t.Errorf("whole %v: importable = %d", whole, got)
+		}
+	}
+}
+
+// TestAcquiredUnitSeesItsOwnDestinations: two files of one unit that render to one place
+// are planned together, so the second is held for the first rather than failing when the
+// first has landed there.
+func TestAcquiredUnitSeesItsOwnDestinations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	acq := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	first := stageTrack(t, filepath.Join(acq, "a"), "Song", 1, 84)
+	second := stageTrack(t, filepath.Join(acq, "b"), "Song", 1, 85)
+	res, err := lib.ImportAcquiredUnit(ctx, []waxbin.AcquiredFile{first, second}, model.KindTrack, waxbin.AcquiredMeta{})
+	if err != nil {
+		t.Fatalf("ImportAcquiredUnit: %v", err)
+	}
+	if res.Files[0].Outcome != inbox.OutcomeImport || res.Files[1].Outcome != inbox.OutcomeQuarantine || res.Files[1].Code != inbox.HoldClaimed {
+		t.Fatalf("files = %+v, want the first to import and the second held for it", res.Files)
+	}
+	rep, err := lib.ApplyImport(ctx, res.Plan)
+	if err != nil || rep.Imported != 1 || rep.Errored != 0 || rep.Quarantined != 1 {
+		t.Errorf("apply = %+v (err %v), want one import and one quarantine", rep, err)
+	}
+}
+
+// TestAcquiredUnitHoldsAnAlbumWhoseTrackIsRefusedWhilePlanning: an album asked to land whole
+// stays where it is when one of its tracks is refused before it has a destination: one
+// staged in a read-only library, whose tags still name the album, and one no tag can be read
+// from, which holds every unit the request carries.
+func TestAcquiredUnitHoldsAnAlbumWhoseTrackIsRefusedWhilePlanning(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, refusal := range []inbox.HoldCode{inbox.HoldReadOnlySource, inbox.HoldUnreadable} {
+		root, acq, held := t.TempDir(), t.TempDir(), t.TempDir()
+		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+			{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}, {Path: held, Mode: model.ModeInPlace}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = lib.Close() })
+		files := []waxbin.AcquiredFile{stageTrack(t, acq, "One", 1, 81), stageTrack(t, acq, "Two", 2, 82), stageTrack(t, acq, "Three", 3, 83)}
+		switch refusal {
+		case inbox.HoldReadOnlySource:
+			files[1] = stageTrack(t, held, "Two", 2, 82)
+			setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, held), true)
+		case inbox.HoldUnreadable:
+			// The file turns into a folder: it is there, but no tag can be read from it.
+			if err := os.Remove(files[1].Path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(files[1].Path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res, err := lib.ImportAcquiredUnit(ctx, files, model.KindTrack, waxbin.AcquiredMeta{HoldUnits: true})
+		if err != nil {
+			t.Fatalf("ImportAcquiredUnit: %v", err)
+		}
+		codes := []inbox.HoldCode{res.Files[0].Code, res.Files[1].Code, res.Files[2].Code}
+		if want := []inbox.HoldCode{inbox.HoldAlbum, refusal, inbox.HoldAlbum}; !slices.Equal(codes, want) || res.Plan.Importable() != 0 {
+			t.Errorf("%s: codes = %v, want %v and nothing importable", refusal, codes, want)
+		}
 	}
 }

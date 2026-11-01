@@ -588,16 +588,18 @@ func bucketViews(buckets []read.Bucket) []bucketView {
 }
 
 type jobView struct {
-	PID        string  `json:"pid"`
-	Kind       string  `json:"kind"`
-	Scope      string  `json:"scope"`
-	TargetType string  `json:"targetType,omitempty"`
-	TargetPID  string  `json:"targetPid,omitempty"`
-	State      string  `json:"state"`
-	Owner      string  `json:"owner"`
-	Progress   float64 `json:"progress"`
-	Message    string  `json:"message,omitempty"`
-	Error      string  `json:"error,omitempty"`
+	PID         string  `json:"pid"`
+	Kind        string  `json:"kind"`
+	Scope       string  `json:"scope"`
+	TargetType  string  `json:"targetType,omitempty"`
+	TargetPID   string  `json:"targetPid,omitempty"`
+	State       string  `json:"state"`
+	Owner       string  `json:"owner"`
+	Progress    float64 `json:"progress"`
+	Message     string  `json:"message,omitempty"`
+	Error       string  `json:"error,omitempty"`
+	ErrorCode   string  `json:"errorCode,omitempty"`
+	ErrorReason string  `json:"errorReason,omitempty"`
 }
 
 type derivedView struct {
@@ -782,6 +784,7 @@ func jobViews(jobs []*model.Job) []jobView {
 			PID: string(j.PID), Kind: j.Kind, Scope: j.Scope, State: string(j.State),
 			TargetType: j.TargetType, TargetPID: string(j.TargetPID),
 			Owner: j.Owner, Progress: j.Progress, Message: j.Message, Error: j.Error,
+			ErrorCode: string(j.ErrorCode), ErrorReason: string(j.ErrorReason),
 		})
 	}
 	return out

@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/colespringer/waxbin/query"
 )
@@ -65,6 +66,10 @@ type PutScannedTrackInput struct {
 	// of recomputing their rollups and album years in the put, which a scan of many files
 	// would otherwise pay once per file for every member an entity has.
 	DeferRollups bool
+	// Job names the kind change the put reads its file for, under which the store records
+	// each item the put folds away and makes (item_lineage), so a change a crash or a cancel
+	// cuts off can still say what it did; empty for any other put, which records none.
+	Job PID
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -140,8 +145,9 @@ type PutScannedBookInput struct {
 	// holds keeps the one stored for it: the name organize or an import gave the file has
 	// replaced the one that stated it.
 	DiscUnstated, PlaceUnstated bool
-	// DeferRollups is PutScannedTrackInput's.
+	// DeferRollups and Job are PutScannedTrackInput's.
 	DeferRollups bool
+	Job          PID
 }
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual
@@ -173,8 +179,9 @@ type PutScannedVirtualTracksInput struct {
 	// PreserveLocks keeps a user-locked field on a virtual track from being re-derived
 	// from the .cue on a forced rescan (see PutScannedTrackInput.PreserveLocks).
 	PreserveLocks bool
-	// DeferRollups is PutScannedTrackInput's.
+	// DeferRollups and Job are PutScannedTrackInput's.
 	DeferRollups bool
+	Job          PID
 }
 
 // VirtualTrack is one cue TRACK of a single-file rip: a full track item plus the
@@ -223,17 +230,34 @@ type ScanItemResult struct {
 	AttachedAsCopy bool
 	// Joined reports that this write gave the file an edge it did not hold: a new
 	// alternate (a new copy, a row no item held, a part folded into the copy it always
-	// was), or a book part arriving from another item or moving within the book. A copy
-	// read again, or followed to a new path, is not joined.
+	// was), a book part arriving from another item or moving within the book, or another
+	// encoding taking a standing item over. A copy read again, or followed to a new path,
+	// is not joined.
 	Joined bool
+	// Revived reports that the write brought the item back to present from missing (or
+	// from the trash, for a trashed item's file put back by hand), the file found again.
+	Revived bool
 	// Promoted lists alternates the write promoted on another item that lost this file
 	// (a re-encoded primary re-keyed away), for the caller to re-read.
 	Promoted []PromotedFile
-	// Folded lists the items this write left with no file and folded into ItemPID, their
-	// play state and list entries moved there, before deleting them. A rip's opening track
-	// whose pid a new item took is not among them: the item carries on as that track, not
-	// created but changed.
-	Folded []PID
+	// Rekinded reports that the write turned ItemPID's item into another kind in place, a
+	// track read as a book or a book as a track, keeping its pid.
+	Rekinded bool
+	// Absorbed maps each item this write left with no file to the item that took it in
+	// (ItemPID's, or for a rip the track that opens the file), its play state and list
+	// entries moved there before it was deleted. An item whose pid the taker carries on
+	// with (a rip's opening track and the whole file it becomes, either way) is not among
+	// them: it is not gone but changed.
+	Absorbed map[PID]PID
+	// Minted maps each item this write created for a file another item held to that item,
+	// which stood on without it: a part leaving its book to be a track of its own, or the
+	// tracks a cue sheet carves out of a whole-file item.
+	Minted map[PID]PID
+	// Made lists the items this write created that took no item in: ItemPID when it made
+	// it, and each new track of a rip but one carrying on an item the write folded. An
+	// import records its event whole on these and only fills the record of every other item
+	// the file backs, which stood before it (Store.PutAcquisitionForFile).
+	Made []PID
 }
 
 // KindTarget is what a kind change reads of an item: its kind, whether a kind lock pins
@@ -551,7 +575,9 @@ type Catalog interface {
 	// it is not a rip.
 	VirtualTracksForPath(ctx context.Context, path []byte) ([]VirtualTrack, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
-	FileByEssence(ctx context.Context, essence string) (*File, error)
+	// FilesByEssence returns the cataloged files holding an audio essence, each saying
+	// whether it is on disk and which item it backs.
+	FilesByEssence(ctx context.Context, essence string) ([]FileOccupant, error)
 	// FileOwner returns a file's edge and the item it backs, the item it is the primary of
 	// first, or an empty item pid for a file that backs none.
 	FileOwner(ctx context.Context, filePID PID) (PID, ItemFileRef, error)
@@ -663,6 +689,10 @@ type JobStore interface {
 	CreateJob(ctx context.Context, j *Job) error // assigns ID + PID
 	UpdateJob(ctx context.Context, j *Job) error
 	Heartbeat(ctx context.Context, jobID, ts int64, progress float64, msg string) error
+	// SaveJobResult writes a running job's result so far (a checkpoint), and SaveJobParams
+	// what it was asked to do, each with no change row, as Heartbeat writes its progress.
+	SaveJobResult(ctx context.Context, pid PID, result json.RawMessage) error
+	SaveJobParams(ctx context.Context, pid PID, params json.RawMessage) error
 	ListJobs(ctx context.Context, limit int) ([]*Job, error)
 	JobByPID(ctx context.Context, pid PID) (*Job, error)
 

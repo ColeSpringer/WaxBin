@@ -3,6 +3,7 @@ package waxbin_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/scan"
 )
 
 // stageBookPart writes one staged part of a book. album may be empty, and narrated adds
@@ -652,9 +654,136 @@ func TestBookHeldWhenItsPartBecomesADuplicate(t *testing.T) {
 	if err != nil || rep.Imported != 0 || rep.Duplicates != 1 || rep.Quarantined != 2 {
 		t.Fatalf("ApplyImport of the stale plan: %+v, %v; want part 1 a duplicate and the rest held", rep, err)
 	}
+	codes := map[string]inbox.HoldCode{}
+	for _, h := range rep.Holds {
+		codes[filepath.Base(h.Src)] = h.Code
+	}
+	if len(rep.Holds) != 3 || codes["01.mp3"] != inbox.HoldLandedSince || codes["02.mp3"] != inbox.HoldBook || codes["03.mp3"] != inbox.HoldBook {
+		t.Errorf("holds = %+v, want part 1 landed since the plan and its book's other parts held with it", rep.Holds)
+	}
 	importAll(t, ctx, lib, staging, 2)
 	oneBook(t, ctx, lib, 3)
 	if moves := organizeMoves(t, ctx, lib); len(moves) != 0 {
 		t.Errorf("organize after the second plan would move %v", moves)
+	}
+}
+
+// TestImportReportsAPartJoiningAnExistingBook: a part imported after its book stands says
+// it joined that book and names it, where the first part said it created the book.
+func TestImportReportsAPartJoiningAnExistingBook(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	apply := func(track int) inbox.FileOutcome {
+		t.Helper()
+		staging := t.TempDir()
+		stageBookPart(t, filepath.Join(staging, "Dune", fmt.Sprintf("%02d.mp3", track)), "Dune", track, true, byte(track))
+		plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: staging})
+		if err != nil {
+			t.Fatalf("PlanImport: %v", err)
+		}
+		rep, err := lib.ApplyImport(ctx, plan)
+		if err != nil || len(rep.Files) != 1 {
+			t.Fatalf("ApplyImport: %+v, %v", rep, err)
+		}
+		return rep.Files[0]
+	}
+	first := apply(1)
+	book := oneBook(t, ctx, lib, 1)
+	if first.Verdict != scan.VerdictCreated || first.ItemPID != book.PID {
+		t.Errorf("part 1 = %+v, want it to have created the book %s", first, book.PID)
+	}
+	if second := apply(2); second.Verdict != scan.VerdictJoined || second.ItemPID != book.PID {
+		t.Errorf("part 2 = %+v, want it to have joined the book %s", second, book.PID)
+	}
+	oneBook(t, ctx, lib, 2)
+}
+
+// TestAcquiredUnitPlansItsPartsTogether: a book's parts handed over as one unit are planned
+// in one pass, numbered among each other as a folder import numbers them, and land as one
+// book; one at a time, the first takes the book's bare name (the contrast in
+// TestAcquiredUnnumberedPartsImportOneAtATime).
+func TestAcquiredUnitPlansItsPartsTogether(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	acq := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
+	var files []waxbin.AcquiredFile
+	for i, title := range []string{"Intro", "Body", "End"} {
+		src := filepath.Join(acq, fmt.Sprintf("%c %s.mp3", 'a'+i, title))
+		writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: title, Artist: "Author", Album: "Tome",
+			TXXX: narrated, Audio: testaudio.AudioWithSeed(byte(i + 1))}))
+		files = append(files, waxbin.AcquiredFile{Path: src})
+	}
+	res, err := lib.ImportAcquiredUnit(ctx, files, model.KindBook, waxbin.AcquiredMeta{})
+	if err != nil {
+		t.Fatalf("ImportAcquiredUnit: %v", err)
+	}
+	if len(res.Files) != 3 || len(res.Plan.Actions) != 3 || res.Plan.Importable() != 3 {
+		t.Fatalf("unit = %+v (actions %+v), want three parts planned to import", res.Files, res.Plan.Actions)
+	}
+	for i, f := range res.Files {
+		if f.Path != files[i].Path || f.Outcome != inbox.OutcomeImport {
+			t.Errorf("file %d = %+v, want %s to import", i, f, files[i].Path)
+		}
+	}
+	if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 3 {
+		t.Fatalf("ApplyImport: %+v, %v", rep, err)
+	}
+	book := oneBook(t, ctx, lib, 3)
+	parts, _ := lib.ItemFiles(ctx, book.PID)
+	for i, want := range []string{"Tome - 01.mp3", "Tome - 02.mp3", "Tome - 03.mp3"} {
+		if filepath.Base(parts[i].DisplayPath) != want {
+			t.Errorf("part %d = %s, want %s", i+1, parts[i].DisplayPath, want)
+		}
+	}
+	if moves := organizeMoves(t, ctx, lib); len(moves) != 0 {
+		t.Errorf("organize after the import would move %v", moves)
+	}
+}
+
+// TestReuploadOfABooksGonePartRestoresItInPlace: a book part whose file went missing, its
+// own audio staged again, is planned at the part's own name rather than as a copy beside
+// it, lands there, and the report says it restored the book's file.
+func TestReuploadOfABooksGonePartRestoresItInPlace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	staging := t.TempDir()
+	stageBookPart(t, filepath.Join(staging, "Dune", "01.mp3"), "Dune", 1, true, 1)
+	stageBookPart(t, filepath.Join(staging, "Dune", "02.mp3"), "Dune", 2, true, 2)
+	importAll(t, ctx, lib, staging, 2)
+	book := oneBook(t, ctx, lib, 2)
+	parts, err := lib.ItemFiles(ctx, book.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := parts[1]
+	if err := os.Remove(gone.DisplayPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	again := t.TempDir()
+	stageBookPart(t, filepath.Join(again, "Dune", "02.mp3"), "Dune", 2, true, 2)
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: again})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := plan.Actions[0]; a.Outcome != inbox.OutcomeImport || a.Dst != gone.DisplayPath || a.Alternate || a.Restores != book.PID {
+		t.Fatalf("action = %+v, want the part restored at %s", a, gone.DisplayPath)
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil || len(rep.Files) != 1 || rep.Files[0].Restores != book.PID {
+		t.Fatalf("apply = %+v (err %v), want the report to name the book it restored", rep, err)
+	}
+	after, err := lib.ItemFiles(ctx, book.PID)
+	if err != nil || len(after) != 2 || after[1].FilePID != gone.FilePID || after[1].Role != gone.Role {
+		t.Errorf("parts = %+v (err %v), want part 2 back on its own row", after, err)
+	}
+	if moves := organizeMoves(t, ctx, lib); len(moves) != 0 {
+		t.Errorf("organize after the restore would move %v", moves)
 	}
 }

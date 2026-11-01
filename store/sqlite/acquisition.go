@@ -1,9 +1,11 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/colespringer/waxbin/model"
@@ -30,35 +32,113 @@ func (s *Store) PutAcquisition(ctx context.Context, itemPID model.PID, in model.
 	})
 }
 
-// PutAcquisitionForFile records origin provenance against the item backing the file
-// at path, resolving the item from the file's primary edge. It is the import path's
-// stamp: after a placed file is cataloged, its item gets the acquisition row. It is a
-// no-op (CodeNotFound) when no cataloged item owns that path. A file that joined an
-// existing item as an alternate stamps nothing, since that item was acquired before it,
-// and returns the item's pid as copyOf.
-func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) (copyOf model.PID, err error) {
+// PutAcquisitionForFile records origin provenance against the items backing the file at
+// path, through the file's own edges: the item it is the primary or a part of, or every
+// track a cue rip's file plays. It is the import path's stamp: after a placed file is
+// cataloged, its item gets the acquisition row. It is a no-op (CodeNotFound) when no
+// cataloged item owns that path. A file that joined an existing item as an alternate
+// stamps nothing, since that item was acquired before it, and returns the item's pid as
+// copyOf. An item the put that cataloged the file made from nothing (made, the put's
+// ScanItemResult.Made) takes the event whole; every other item stood before the file joined
+// it (a book's next part, an encoding taking it over, a missing item found again, a rip's
+// track read again) or took in one that did, so the event keeps that item's origin and only
+// fills what its record lacks (fillAcquisitionTx).
+func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput, made []model.PID) (copyOf model.PID, err error) {
 	const op = "store.PutAcquisitionForFile"
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
-		var itemID int64
-		var itemPID model.PID
-		var role string
-		err := tx.QueryRowContext(ctx, `SELECT pi.id, pi.pid, itf.role
-			FROM file f JOIN item_file itf ON itf.file_id = f.id AND itf.role IN ('primary', 'alternate')
-			JOIN playable_item pi ON pi.id = itf.item_id
-			WHERE f.path = ? ORDER BY itf.role = 'primary' DESC LIMIT 1`, path).Scan(&itemID, &itemPID, &role)
-		if errors.Is(err, sql.ErrNoRows) {
-			return waxerr.New(waxerr.CodeNotFound, op, "no cataloged item backs the placed file")
+		type owner struct {
+			id  int64
+			pid model.PID
 		}
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT pi.id, pi.pid, itf.role = 'alternate'
+			FROM file f JOIN item_file itf ON itf.file_id = f.id JOIN playable_item pi ON pi.id = itf.item_id
+			WHERE f.path = ? ORDER BY itf.role = 'alternate', pi.id`, path)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if role == alternateRole {
-			copyOf = itemPID
+		var owners []owner
+		alternate := false
+		for rows.Next() {
+			var o owner
+			var alt bool
+			if err := rows.Scan(&o.id, &o.pid, &alt); err != nil {
+				rows.Close()
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if alt && len(owners) > 0 {
+				break
+			}
+			owners, alternate = append(owners, o), alt
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		switch {
+		case len(owners) == 0:
+			return waxerr.New(waxerr.CodeNotFound, op, "no cataloged item backs the placed file")
+		case alternate:
+			copyOf = owners[0].pid
 			return nil
 		}
-		return putAcquisitionTx(ctx, tx, itemID, itemPID, in)
+		for _, o := range owners {
+			stamp := fillAcquisitionTx
+			if slices.Contains(made, o.pid) {
+				stamp = putAcquisitionTx
+			}
+			if err := stamp(ctx, tx, o.id, o.pid, in); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return copyOf, err
+}
+
+// fillAcquisitionTx records an event against an item that stood before the file it came
+// with: an item with no record takes the event whole, and one with a record keeps every
+// field it holds, taking the event's url and options where it has none, and the event's
+// provider, id and version only where it names no provider or the same one (an id means
+// nothing outside its provider's namespace). An event of another source type fills
+// nothing, since its url and options describe a different acquisition. A curated record
+// is left alone.
+func fillAcquisitionTx(ctx context.Context, tx *sql.Tx, itemID int64, itemPID model.PID, in model.AcquisitionInput) error {
+	const op = "store.PutAcquisition"
+	if locked, err := acquisitionLockedTx(ctx, tx, itemID); err != nil || locked {
+		return err
+	}
+	var cur model.AcquisitionInput
+	err := tx.QueryRowContext(ctx, `SELECT source_type, source_url, source_id, provider, provider_version, options_json
+		FROM acquisition WHERE item_id = ?`, itemID).Scan(&cur.SourceType, &cur.SourceURL, &cur.SourceID, &cur.Provider, &cur.ProviderVersion, &cur.OptionsJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return putAcquisitionTx(ctx, tx, itemID, itemPID, in)
+	}
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if in.SourceType != "" && in.SourceType != cur.SourceType {
+		return nil
+	}
+	next := cur
+	next.SourceURL = cmp.Or(cur.SourceURL, in.SourceURL)
+	next.OptionsJSON = cmp.Or(cur.OptionsJSON, in.OptionsJSON)
+	switch {
+	case cur.Provider == "" && cur.SourceID == "":
+		next.Provider, next.SourceID = in.Provider, in.SourceID
+		next.ProviderVersion = cmp.Or(cur.ProviderVersion, in.ProviderVersion)
+	case in.Provider != "" && in.Provider == cur.Provider:
+		next.SourceID = cmp.Or(cur.SourceID, in.SourceID)
+		next.ProviderVersion = cmp.Or(cur.ProviderVersion, in.ProviderVersion)
+	}
+	if next == cur {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE acquisition SET source_url = ?, source_id = ?, provider = ?,
+			provider_version = ?, options_json = ? WHERE item_id = ?`,
+		next.SourceURL, next.SourceID, next.Provider, next.ProviderVersion, next.OptionsJSON, itemID); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 }
 
 // putAcquisitionTx writes the acquisition row and emits an item update delta so a

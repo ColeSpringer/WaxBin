@@ -114,9 +114,10 @@ func (s *Store) KindTargets(ctx context.Context, pids []model.PID) ([]model.Kind
 // primary or part, at anchor's position, and settles the items the file leaves as a put's
 // link does, an item left with no file folding into anchor's. A kind change uses it for a
 // copy it cannot read, its file not on disk, so the copy goes where the file it copies
-// went. It returns that item and the items folded, and does nothing when anchor backs no
-// whole-file edge or the file is that item's alternate already.
-func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID model.PID) (model.PID, []model.PID, error) {
+// went, recording the items folded under its job (item_lineage). It returns that item and
+// the items folded, and does nothing when anchor backs no whole-file edge or the file is
+// that item's alternate already.
+func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID, job model.PID) (model.PID, []model.PID, error) {
 	const op = "store.FollowFile"
 	var into model.PID
 	var folded []model.PID
@@ -172,7 +173,12 @@ func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID model.PID) (m
 			}
 		}
 		affected := newAffectedRollups()
-		if _, folded, _, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
+		o, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		folded = o.folded
+		if err := recordLineageTx(ctx, tx, job, absorbedInto(folded, into), nil); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
