@@ -512,6 +512,7 @@ type orphaned struct {
 	folded   []model.PID
 	handed   model.PID
 	kept     model.PID
+	keptID   int64
 }
 
 // absorbedInto maps each folded item to the item that took it in, nil for none.
@@ -535,6 +536,7 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 	var promoted []model.PromotedFile
 	var folded []model.PID
 	var handed, kept model.PID
+	var keptID int64
 	// The playlists and queues the folds and deletes change are settled once at the end.
 	var batch entryHolders
 	// A rip's track that opens the file, folding into an item this put minted, hands it
@@ -611,6 +613,7 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 				if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", oid).Scan(&kept); err != nil {
 					return orphaned{}, err
 				}
+				keptID = oid
 			}
 			if !marked {
 				if err := appendItemUpdateTx(ctx, tx, oid); err != nil {
@@ -651,7 +654,7 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 	if err := finishTx(ctx, tx, []int64{dep.into}, whole, nowNS()); err != nil {
 		return orphaned{}, err
 	}
-	return orphaned{promoted: promoted, folded: folded, handed: handed, kept: kept}, batch.settleTx(ctx, tx)
+	return orphaned{promoted: promoted, folded: folded, handed: handed, kept: kept, keptID: keptID}, batch.settleTx(ctx, tx)
 }
 
 // appendItemUpdateTx appends an item update delta by item id.

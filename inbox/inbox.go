@@ -737,6 +737,7 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			sidecars, outcome, err := s.importOne(ctx, plan, a, lib, speller(lib), sib)
 			if err != nil {
 				rep.Errored++
+				rep.Sidecars += sidecars
 				rep.Failures = append(rep.Failures, Failure{Src: a.Src, Dst: outcome.Path, Err: err.Error()})
 				s.log.Warn("import failed", "src", a.Src, "dst", a.Dst, "err", err)
 				continue
@@ -787,10 +788,11 @@ func (s *Service) pruneStaging(root string, placed []organize.SidecarMove) int {
 	}, func(dir string, err error) { s.log.Warn("pruning an emptied staging folder", "dir", dir, "err", err) }))
 }
 
-// importOne places one file in the managed tree, catalogs it under its target
-// library, records any acquisition provenance, and carries its sidecars in alongside
-// it. It returns the number of sidecars placed and what cataloging the file did, whose
-// Path is set once the file has landed, a failure after the move included.
+// importOne places one file in the managed tree with its sidecars beside it, catalogs it
+// under its target library, and records any acquisition provenance. The sidecars come
+// first because cataloging reads them: a cue sheet carves the rip only while it is beside
+// the file. It returns the number of sidecars placed and what cataloging the file did,
+// whose Path is set once the file has landed, a failure after the move included.
 func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *model.Library, sp *fsx.Speller, sib *organize.Siblings) (int, FileOutcome, error) {
 	var outcome FileOutcome
 	if err := os.MkdirAll(pathx.Long(filepath.Dir(a.Dst)), 0o755); err != nil {
@@ -800,6 +802,13 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 		return 0, outcome, err
 	}
 	outcome.Path = a.Dst
+	// The file's own companions land beside it before it is cataloged, so the scan reads
+	// the file as the next one would: a cue sheet carves the rip it describes, and lyrics
+	// and per-track art come in with the audio rather than at the next scan.
+	if !plan.Copy {
+		sib.Left(a.Src)
+	}
+	sidecars := s.relocateSidecars(plan, a, sib)
 	var forced model.Kind
 	if a.KindForced {
 		forced = a.Kind
@@ -810,13 +819,16 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	}
 	res, out, err := s.cataloger.ScanFileWith(ctx, lib, a.Dst, opts)
 	if err != nil {
-		return 0, outcome, err
+		return sidecars, outcome, err
 	}
+	// The put committed, so the file is imported: what follows describes that and runs
+	// to the end whether or not the caller has given up on the batch.
+	settled := context.WithoutCancel(ctx)
 	var made []model.PID
 	if out != nil {
 		outcome.ItemPID, outcome.AttachedAsCopy = out.ItemPID, out.AttachedAsCopy
 		outcome.Verdict, outcome.Relinked, outcome.Promoted = scan.VerdictOf(out), out.Relinked, out.Promoted
-		outcome.Restores = s.restored(ctx, a, out)
+		outcome.Restores = s.restored(settled, a, out)
 		made = out.Made
 	}
 	// The scan's own result settles every fold it made, a promoted alternate's re-read
@@ -828,10 +840,12 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	// attribution only: a failure to record it must not fail an import whose audio
 	// already landed and cataloged. A file that joined an existing item as a copy
 	// records none, since that item was acquired before it, and an item that stood before
-	// the file, or took one in, only fills what its record lacks: every item the file backs
-	// but those the put made from nothing.
+	// the file, or took one in, keeps its origin and takes from the event only what its
+	// record lacks of the same acquisition: every item the file backs but those the put
+	// made from nothing. The write outlives a cancel: the file is imported once the put
+	// commits, and nothing would record its origin later.
 	if plan.Acquisition != nil && !outcome.AttachedAsCopy {
-		copyOf, err := s.store.PutAcquisitionForFile(ctx, []byte(a.Dst), *plan.Acquisition, made)
+		copyOf, err := s.store.PutAcquisitionForFile(settled, []byte(a.Dst), *plan.Acquisition, made)
 		if err != nil {
 			s.log.Warn("recording acquisition provenance", "dst", a.Dst, "err", err)
 		}
@@ -839,10 +853,7 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 			outcome.ItemPID, outcome.AttachedAsCopy, outcome.Verdict = copyOf, true, scan.VerdictCopy
 		}
 	}
-	if !plan.Copy {
-		sib.Left(a.Src)
-	}
-	return s.relocateSidecars(plan, a, sib), outcome, nil
+	return sidecars, outcome, nil
 }
 
 // preflightPlan refuses an import that would leave any destination volume below its
@@ -873,12 +884,12 @@ func preflightPlan(plan *Plan) error {
 	return nil
 }
 
-// relocateSidecars carries an imported file's own companions (same-basename lyrics and
-// art) into the managed tree, moving or copying them to match the audio. Sidecars are
-// not cataloged, so a conflict or failure is logged and skipped, never fatal (the audio
-// is already imported). The same discovery as organize is used, so import and organize
-// keep one sidecar set; the directory's own cover is carried by placeCovers once the
-// batch is done.
+// relocateSidecars carries a placed file's own companions (same-basename lyrics, cue
+// sheets and art) into the managed tree, moving or copying them to match the audio, before
+// the file is cataloged. Sidecars are not cataloged on their own, so a conflict or failure
+// is logged and skipped, never fatal (the audio is already in place). The same discovery
+// as organize is used, so import and organize keep one sidecar set; the directory's own
+// cover is carried by placeCovers once the batch is done.
 func (s *Service) relocateSidecars(plan *Plan, a *Action, sib *organize.Siblings) int {
 	moved := 0
 	for _, m := range organize.SidecarMoves(a.Src, a.Dst, sib) {

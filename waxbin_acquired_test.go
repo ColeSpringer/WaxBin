@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1054,7 +1055,7 @@ func TestFolderImportClassifiesAgainstItsLibrary(t *testing.T) {
 
 // TestAJoinedImportKeepsTheStandingAcquisition: a file acquired into an item that stood
 // before it (a book's next part, an encoding taking a track over) keeps the origin the item
-// was acquired from, filling only what its record lacks.
+// was acquired from, taking nothing from an event for another acquisition.
 func TestAJoinedImportKeepsTheStandingAcquisition(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1082,8 +1083,8 @@ func TestAJoinedImportKeepsTheStandingAcquisition(t *testing.T) {
 	}
 	book := oneBook(t, ctx, lib, 2)
 	if row, err := lib.Acquisition(ctx, book.PID); err != nil || row.SourceType != model.SourceYouTube ||
-		row.SourceURL != "https://first.example/1" || row.Provider != "uploader" {
-		t.Errorf("book acquisition = %+v (err %v), want its own origin with the provider filled in", row, err)
+		row.SourceURL != "https://first.example/1" || row.Provider != "" {
+		t.Errorf("book acquisition = %+v (err %v), want its own origin, with nothing of a part acquired on its own", row, err)
 	}
 
 	samples := testaudio.RichSignal(22050, 2, testaudio.MusicalPartials, 52)
@@ -1197,6 +1198,287 @@ func TestAcquiredUnitHoldsAnAlbumWhoseTrackIsRefusedWhilePlanning(t *testing.T) 
 		codes := []inbox.HoldCode{res.Files[0].Code, res.Files[1].Code, res.Files[2].Code}
 		if want := []inbox.HoldCode{inbox.HoldAlbum, refusal, inbox.HoldAlbum}; !slices.Equal(codes, want) || res.Plan.Importable() != 0 {
 			t.Errorf("%s: codes = %v, want %v and nothing importable", refusal, codes, want)
+		}
+	}
+}
+
+// TestAcquiredBookPartsStampTheBookQuietly: a book acquired part by part, or handed over
+// as one unit, records its origin on the book the first part made, and every later part,
+// which joins the book by a part edge, fills what that record lacks rather than warning
+// that no item backs it: a part's event naming the same acquisition in more detail adds
+// the detail, and one naming another acquisition leaves the record alone.
+func TestAcquiredBookPartsStampTheBookQuietly(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		asUnit bool
+	}{{"one at a time", false}, {"as a unit", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			acq := t.TempDir()
+			logs := &messages{}
+			lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
+				DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+				Roots:  []config.Root{{Path: t.TempDir(), Mode: model.ModeManaged, Profile: "waxbin-native"}},
+				Logger: slog.New(logs),
+			})
+			if err != nil {
+				t.Fatalf("open library: %v", err)
+			}
+			t.Cleanup(func() { _ = lib.Close() })
+			// Part two names part one's acquisition with the version part one's event lacked;
+			// part three names an acquisition of its own.
+			events := []waxbin.AcquiredMeta{
+				{SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=1", Provider: "waxtap"},
+				{SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=1", Provider: "waxtap", ProviderVersion: "2"},
+				{SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=3", Provider: "waxtap", ProviderVersion: "3"},
+			}
+			var files []waxbin.AcquiredFile
+			var outcomes []inbox.FileOutcome
+			for i := 1; i <= 3; i++ {
+				src := filepath.Join(acq, fmt.Sprintf("part%d.mp3", i))
+				writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter", Artist: "Author",
+					Album: "Long Book", Track: i, TrackTotal: 3, Audio: testaudio.AudioWithSeed(byte(i))}))
+				files = append(files, waxbin.AcquiredFile{Path: src})
+				if tc.asUnit {
+					continue
+				}
+				res, err := lib.ImportAcquired(ctx, files[i-1], model.KindBook, events[i-1])
+				if err != nil {
+					t.Fatalf("ImportAcquired part %d: %v", i, err)
+				}
+				rep, err := lib.ApplyImport(ctx, res.Plan)
+				if err != nil || rep.Imported != 1 {
+					t.Fatalf("ApplyImport part %d: rep=%+v err=%v", i, rep, err)
+				}
+				outcomes = append(outcomes, rep.Files...)
+			}
+			want := events[0]
+			want.ProviderVersion = "2"
+			if tc.asUnit {
+				res, err := lib.ImportAcquiredUnit(ctx, files, model.KindBook, events[0])
+				if err != nil {
+					t.Fatalf("ImportAcquiredUnit: %v", err)
+				}
+				rep, err := lib.ApplyImport(ctx, res.Plan)
+				if err != nil || rep.Imported != 3 {
+					t.Fatalf("ApplyImport: rep=%+v err=%v", rep, err)
+				}
+				outcomes, want = rep.Files, events[0]
+			}
+			books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+			if err != nil || len(books) != 1 {
+				t.Fatalf("books = %d (err %v), want one", len(books), err)
+			}
+			book := books[0]
+			parts, err := lib.ItemFiles(ctx, book.PID)
+			if err != nil || len(parts) != 3 || parts[0].Role != "primary" || parts[1].Role != "part" || parts[2].Role != "part" {
+				t.Fatalf("parts = %+v (err %v), want a primary and two parts on the one book", parts, err)
+			}
+			if len(outcomes) != 3 {
+				t.Fatalf("outcomes = %+v, want one per part", outcomes)
+			}
+			for i, o := range outcomes {
+				verdict := scan.VerdictJoined
+				if i == 0 {
+					verdict = scan.VerdictCreated
+				}
+				if o.ItemPID != book.PID || o.Verdict != verdict {
+					t.Errorf("part %d = %+v, want %s on the book %s", i+1, o, verdict, book.PID)
+				}
+			}
+			a, err := lib.Acquisition(ctx, book.PID)
+			if err != nil {
+				t.Fatalf("Acquisition: %v", err)
+			}
+			if a.SourceType != want.SourceType || a.SourceURL != want.SourceURL || a.Provider != want.Provider ||
+				a.ProviderVersion != want.ProviderVersion || a.SourceID != "" {
+				t.Errorf("book origin = %+v, want %+v", a, want)
+			}
+			for _, line := range logs.msgs {
+				if strings.Contains(line, "acquisition provenance") {
+					t.Errorf("a part's stamp warned: %s", line)
+				}
+			}
+		})
+	}
+}
+
+// sortedPIDs is the pids of items, in order.
+func sortedPIDs(items []*model.ItemView) []model.PID {
+	var out []model.PID
+	for _, it := range items {
+		out = append(out, it.PID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestAnAcquiredRipIsCarvedAtImport: a cue rip handed over with its sheet is cataloged at
+// import as the tracks the sheet carves, each with the acquisition, because the file's own
+// companions land beside it before it is read; a scan after it finds nothing to reshape.
+func TestAnAcquiredRipIsCarvedAtImport(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	rip := writeCueRip(t, t.TempDir(), 7, "One", "Two")
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: rip}, model.KindTrack, waxbin.AcquiredMeta{
+		SourceType: model.SourceYouTube, SourceURL: "https://y/rip", Provider: "waxtap"})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	rep, err := lib.ApplyImport(ctx, res.Plan)
+	if err != nil || rep.Imported != 1 || rep.Sidecars != 1 {
+		t.Fatalf("ApplyImport: rep=%+v err=%v, want the file and its sheet carried in", rep, err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 2 || !items[0].Virtual || !items[1].Virtual {
+		t.Fatalf("items = %+v (err %v), want the rip's two tracks", items, err)
+	}
+	for _, it := range items {
+		if a, err := lib.Acquisition(ctx, it.PID); err != nil || a.SourceURL != "https://y/rip" {
+			t.Errorf("%s acquisition = %+v (err %v), want the rip's event", it.Title, a, err)
+		}
+	}
+	if f := rep.Files[0]; f.Verdict != scan.VerdictCreated || f.ItemPID != "" {
+		t.Errorf("outcome = %+v, want the tracks created with no one item named", f)
+	}
+	scanLib(t, ctx, lib)
+	after, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || !slices.Equal(sortedPIDs(after), sortedPIDs(items)) {
+		t.Errorf("items after a scan = %+v (err %v), want the same two tracks", after, err)
+	}
+}
+
+// TestReimportOfAGoneRipKeepsItsTracks: a rip whose file went missing, handed back with
+// its sheet, is carved again at import, so both tracks come back on their own pids and
+// take the event. Read as one whole file first, the second track would be folded into the
+// first and minted anew at the next scan, its plays and stars left on the first.
+func TestReimportOfAGoneRipKeepsItsTracks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	dir := filepath.Join(root, "Rip Artist", "Rip Album")
+	writeCueRip(t, dir, 7, "One", "Two")
+	scanLib(t, ctx, lib)
+	one, two := itemPIDByTitle(t, ctx, lib, "One"), itemPIDByTitle(t, ctx, lib, "Two")
+	acq := t.TempDir()
+	for _, n := range []string{"album.wav", "album.cue"} {
+		if err := os.Rename(filepath.Join(dir, n), filepath.Join(acq, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{ForceReconcile: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := lib.Get(ctx, two); err != nil || v.State != model.StateMissing {
+		t.Fatalf("second track after its file left = %+v (err %v), want it missing", v, err)
+	}
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: filepath.Join(acq, "album.wav")}, model.KindTrack,
+		waxbin.AcquiredMeta{SourceType: model.SourceYouTube, SourceURL: "https://y/again", Provider: "waxtap"})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	if a := res.Plan.Actions[0]; a.Outcome != inbox.OutcomeImport || a.Restores == "" {
+		t.Fatalf("action = %+v, want the gone rip restored", a)
+	}
+	rep, err := lib.ApplyImport(ctx, res.Plan)
+	if err != nil || rep.Imported != 1 || rep.Files[0].Restores != res.Plan.Actions[0].Restores {
+		t.Fatalf("ApplyImport: rep=%+v err=%v, want the restore reported", rep, err)
+	}
+	for _, pid := range []model.PID{one, two} {
+		v, err := lib.Get(ctx, pid)
+		if err != nil || v.State != model.StatePresent {
+			t.Errorf("track %s = %+v (err %v), want it back on its own pid", pid, v, err)
+			continue
+		}
+		if a, err := lib.Acquisition(ctx, pid); err != nil || a.SourceURL != "https://y/again" {
+			t.Errorf("%s acquisition = %+v (err %v), want the event it came back with", v.Title, a, err)
+		}
+	}
+	scanLib(t, ctx, lib)
+	after, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || !slices.Equal(sortedPIDs(after), sortedPIDs([]*model.ItemView{{PID: one}, {PID: two}})) {
+		t.Errorf("items after a scan = %+v (err %v), want the same two tracks", after, err)
+	}
+}
+
+// TestAnImportTakesAFilesOwnLyrics: a staged file's lyrics sidecar is beside it when the
+// import catalogs it, so the item has its lyrics without waiting for a scan.
+func TestAnImportTakesAFilesOwnLyrics(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	acq := t.TempDir()
+	src := filepath.Join(acq, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(3)))
+	writeFile(t, filepath.Join(acq, "song.lrc"), []byte("[00:00.00]hi\n[00:01.00]there\n"))
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, model.KindTrack, waxbin.AcquiredMeta{})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 1 || rep.Sidecars != 1 {
+		t.Fatalf("ApplyImport: rep=%+v err=%v, want the file and its lyrics carried in", rep, err)
+	}
+	ly, err := lib.Lyrics(ctx, itemPIDByTitle(t, ctx, lib, "Song"))
+	if err != nil || len(ly.Synced) != 2 {
+		t.Fatalf("lyrics = %+v (err %v), want the sidecar's two lines", ly, err)
+	}
+}
+
+// TestAnAcquiredCopyOfARipJoinsItsTracks: the same bytes as a cataloged rip, handed over
+// with their sheet, read as already present under either policy, named by the rip's first
+// track; going ahead, they are carved at import and attached as a copy of every track, so
+// the rip keeps its items and its local origin, and the report says the file joined as a
+// copy.
+func TestAnAcquiredCopyOfARipJoinsItsTracks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	writeCueRip(t, filepath.Join(root, "Rip Artist", "Rip Album"), 7, "One", "Two")
+	scanLib(t, ctx, lib)
+	before, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(before) != 2 {
+		t.Fatalf("items = %+v (err %v), want the rip's two tracks", before, err)
+	}
+	one := itemPIDByTitle(t, ctx, lib, "One")
+	copyOf := writeCueRip(t, t.TempDir(), 7, "One", "Two")
+	skipped, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: copyOf}, model.KindTrack, waxbin.AcquiredMeta{})
+	if err != nil {
+		t.Fatalf("ImportAcquired under skip: %v", err)
+	}
+	if a := skipped.Plan.Actions[0]; a.Outcome != inbox.OutcomeDuplicate || !skipped.AlreadyPresent || skipped.AlreadyPresentPID != one {
+		t.Errorf("under skip = %+v with action %+v, want a duplicate already present as %s", skipped, a, one)
+	}
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: copyOf}, model.KindTrack, waxbin.AcquiredMeta{
+		SourceType: model.SourceYouTube, SourceURL: "https://y/copy", Provider: "waxtap", DupPolicy: model.DupAllow})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	if !res.AlreadyPresent || res.AlreadyPresentPID != one || res.AttachedTo != one {
+		t.Errorf("under allow = %+v, want the rip's first track %s present and attached to", res, one)
+	}
+	rep, err := lib.ApplyImport(ctx, res.Plan)
+	if err != nil || rep.Imported != 1 || len(rep.Files) != 1 {
+		t.Fatalf("ApplyImport: rep=%+v err=%v", rep, err)
+	}
+	if f := rep.Files[0]; !f.AttachedAsCopy || f.Verdict != scan.VerdictCopy {
+		t.Errorf("outcome = %+v, want the file attached as a copy", f)
+	}
+	after, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || !slices.Equal(sortedPIDs(after), sortedPIDs(before)) {
+		t.Fatalf("items after the import = %+v (err %v), want the same two tracks", after, err)
+	}
+	for _, it := range after {
+		files, err := lib.ItemFiles(ctx, it.PID)
+		if err != nil || len(files) != 2 || files[0].Role != "primary" || files[1].Role != "alternate" {
+			t.Errorf("%s files = %+v (err %v), want its own and the copy", it.Title, files, err)
+		}
+		if _, err := lib.Acquisition(ctx, it.PID); !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Errorf("%s acquisition err = %v, want none recorded on a track that stood", it.Title, err)
 		}
 	}
 }

@@ -937,3 +937,109 @@ func TestARefusalKeepsADestinationOnlyWhereItHolds(t *testing.T) {
 		}
 	}
 }
+
+// cancelingCataloger catalogs a file as a new item and cancels the import's context as it
+// does, the way a caller's deadline landing between the put and the stamp would.
+type cancelingCataloger struct{ cancel context.CancelFunc }
+
+func (c cancelingCataloger) ScanFileWith(context.Context, *model.Library, string, scan.FileOptions) (*scan.Result, *model.ScanItemResult, error) {
+	c.cancel()
+	return &scan.Result{ItemsCreated: 1}, &model.ScanItemResult{ItemPID: "NEW", ItemCreated: true, Made: []model.PID{"NEW"}}, nil
+}
+
+// liveStampStore records whether each acquisition stamp arrived on a context still alive.
+type liveStampStore struct {
+	emptyStore
+	alive []bool
+}
+
+func (s *liveStampStore) PutAcquisitionForFile(ctx context.Context, _ []byte, _ model.AcquisitionInput, _ []model.PID) (model.PID, error) {
+	s.alive = append(s.alive, ctx.Err() == nil)
+	return "", nil
+}
+
+// TestTheStampOutlivesACancelDuringThePut: a file placed and cataloged is imported, so the
+// origin recorded on it is written even when the import's context was cancelled while the
+// put ran, rather than left off with nothing to retry it.
+func TestTheStampOutlivesACancelDuringThePut(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	staging := t.TempDir()
+	stage(t, filepath.Join(staging, "song.mp3"), testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Record",
+		Track: 1, Audio: testaudio.AudioWithSeed(1)})
+	st := &liveStampStore{}
+	svc := inbox.New(st, nil, cancelingCataloger{cancel}, nil)
+	req := importRequest(t, staging)
+	req.Acquisition = &model.AcquisitionInput{SourceType: model.SourceYouTube, SourceURL: "https://example.test/song"}
+	plan, err := svc.Plan(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := svc.Execute(ctx, plan)
+	if err != nil || rep.Imported != 1 {
+		t.Fatalf("Execute = %+v (err %v), want the file imported", rep, err)
+	}
+	if len(st.alive) != 1 || !st.alive[0] {
+		t.Errorf("stamps on a live context = %v, want one", st.alive)
+	}
+}
+
+// ripCataloger catalogs a file as a cue rip, which names no one item, and cancels the
+// import's context as it does.
+type ripCataloger struct{ cancel context.CancelFunc }
+
+func (c ripCataloger) ScanFileWith(context.Context, *model.Library, string, scan.FileOptions) (*scan.Result, *model.ScanItemResult, error) {
+	c.cancel()
+	return &scan.Result{ItemsCreated: 2}, &model.ScanItemResult{ItemCreated: true}, nil
+}
+
+// restoringStore holds the staged audio in one gone file of item X, and refuses a read on a
+// context that is done, as the real store does.
+type restoringStore struct {
+	emptyStore
+	essence string
+}
+
+func (s *restoringStore) FilesByEssence(_ context.Context, essence string) ([]model.FileOccupant, error) {
+	s.essence = essence
+	o := goneFile("X", model.KindTrack, 1)
+	o.Essence = essence
+	return []model.FileOccupant{o}, nil
+}
+
+func (s *restoringStore) FileOccupants(ctx context.Context, _ string) ([]model.FileOccupant, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	o := goneFile("X", model.KindTrack, 1)
+	o.Essence = s.essence
+	return []model.FileOccupant{o}, nil
+}
+
+// TestARestoreIsReportedAfterACancelDuringThePut: a gone rip's file handed back is restored
+// once its put commits, so the report names the item it brought back even when the
+// import's context was cancelled while the put ran.
+func TestARestoreIsReportedAfterACancelDuringThePut(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	staging := t.TempDir()
+	stage(t, filepath.Join(staging, "rip.mp3"), testaudio.MP3Spec{Title: "Rip", Artist: "Band", Album: "Record",
+		Track: 1, Audio: testaudio.AudioWithSeed(2)})
+	svc := inbox.New(&restoringStore{}, nil, ripCataloger{cancel}, nil)
+	plan, err := svc.Plan(ctx, importRequest(t, staging))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := plan.Actions[0]; a.Outcome != inbox.OutcomeImport || a.Restores != "X" {
+		t.Fatalf("action = %+v, want it to restore X", a)
+	}
+	rep, err := svc.Execute(ctx, plan)
+	if err != nil || rep.Imported != 1 || len(rep.Files) != 1 {
+		t.Fatalf("Execute = %+v (err %v), want the file imported", rep, err)
+	}
+	if rep.Files[0].Restores != "X" {
+		t.Errorf("outcome = %+v, want the restore of X reported", rep.Files[0])
+	}
+}

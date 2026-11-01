@@ -41,8 +41,9 @@ func (s *Store) PutAcquisition(ctx context.Context, itemPID model.PID, in model.
 // copyOf. An item the put that cataloged the file made from nothing (made, the put's
 // ScanItemResult.Made) takes the event whole; every other item stood before the file joined
 // it (a book's next part, an encoding taking it over, a missing item found again, a rip's
-// track read again) or took in one that did, so the event keeps that item's origin and only
-// fills what its record lacks (fillAcquisitionTx).
+// track read again) or took in one that did, so the event keeps that item's origin, and
+// only an event naming that same acquisition fills what its record lacks
+// (fillAcquisitionTx).
 func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput, made []model.PID) (copyOf model.PID, err error) {
 	const op = "store.PutAcquisitionForFile"
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -97,11 +98,16 @@ func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model
 
 // fillAcquisitionTx records an event against an item that stood before the file it came
 // with: an item with no record takes the event whole, and one with a record keeps every
-// field it holds, taking the event's url and options where it has none, and the event's
-// provider, id and version only where it names no provider or the same one (an id means
-// nothing outside its provider's namespace). An event of another source type fills
-// nothing, since its url and options describe a different acquisition. A curated record
-// is left alone.
+// field it holds and takes the event's values where it has none, but only from an event that
+// names the record's own acquisition (sameAcquisition). An event of another source type,
+// or for another acquisition (a book's next part, with a url and id of its own), fills
+// nothing: its url, id and options describe a different acquisition, and a record must
+// never hold one part's url beside another's id. The provider, and the id in its
+// namespace, are taken only where the record names no provider or the same one, or where
+// the event claims the record's own id under its provider, since an id means nothing
+// outside its provider's namespace; the version and the options describe the provider's
+// work, so they follow the provider, and a version is never recorded without one. A
+// curated record is left alone.
 func fillAcquisitionTx(ctx context.Context, tx *sql.Tx, itemID int64, itemPID model.PID, in model.AcquisitionInput) error {
 	const op = "store.PutAcquisition"
 	if locked, err := acquisitionLockedTx(ctx, tx, itemID); err != nil || locked {
@@ -119,16 +125,24 @@ func fillAcquisitionTx(ctx context.Context, tx *sql.Tx, itemID int64, itemPID mo
 	if in.SourceType != "" && in.SourceType != cur.SourceType {
 		return nil
 	}
+	if !sameAcquisition(cur, in) {
+		return nil
+	}
 	next := cur
 	next.SourceURL = cmp.Or(cur.SourceURL, in.SourceURL)
-	next.OptionsJSON = cmp.Or(cur.OptionsJSON, in.OptionsJSON)
 	switch {
 	case cur.Provider == "" && cur.SourceID == "":
 		next.Provider, next.SourceID = in.Provider, in.SourceID
-		next.ProviderVersion = cmp.Or(cur.ProviderVersion, in.ProviderVersion)
 	case in.Provider != "" && in.Provider == cur.Provider:
 		next.SourceID = cmp.Or(cur.SourceID, in.SourceID)
-		next.ProviderVersion = cmp.Or(cur.ProviderVersion, in.ProviderVersion)
+	case cur.Provider == "" && in.Provider != "" && in.SourceID == cur.SourceID:
+		next.Provider = in.Provider
+	}
+	if next.Provider == in.Provider {
+		next.OptionsJSON = cmp.Or(cur.OptionsJSON, in.OptionsJSON)
+		if in.Provider != "" {
+			next.ProviderVersion = cmp.Or(cur.ProviderVersion, in.ProviderVersion)
+		}
 	}
 	if next == cur {
 		return nil
@@ -139,6 +153,24 @@ func fillAcquisitionTx(ctx context.Context, tx *sql.Tx, itemID int64, itemPID mo
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+}
+
+// sameAcquisition reports whether an event names the acquisition a record holds: the
+// record's url, unless the two name different ids under one provider; or, for a record
+// holding an id and no url, that id under a compatible provider; or, for a record naming
+// neither a url nor an id, any acquisition by a compatible provider. Providers are
+// compatible when they agree or either side names none.
+func sameAcquisition(cur, in model.AcquisitionInput) bool {
+	compatible := cur.Provider == "" || in.Provider == "" || in.Provider == cur.Provider
+	switch {
+	case cur.SourceURL != "":
+		contradicted := cur.SourceID != "" && in.SourceID != "" && in.SourceID != cur.SourceID &&
+			cur.Provider != "" && in.Provider == cur.Provider
+		return in.SourceURL == cur.SourceURL && !contradicted
+	case cur.SourceID != "":
+		return in.SourceID == cur.SourceID && compatible
+	}
+	return compatible
 }
 
 // putAcquisitionTx writes the acquisition row and emits an item update delta so a
@@ -437,6 +469,18 @@ func insertAcquisitionIfAbsentTx(ctx context.Context, tx *sql.Tx, itemID int64, 
 		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return n > 0, nil
+}
+
+// inheritAcquisitionTx gives an item minted from another (a part leaving its book as a
+// track of its own, the tracks a cue sheet carves out of an item's whole file) that item's
+// origin, since its audio came from that acquisition and no other. A row the item already
+// holds stands: its own file's tags are evidence of their own.
+func inheritAcquisitionTx(ctx context.Context, tx *sql.Tx, fromItemID, toItemID int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO acquisition
+		(item_id, source_type, source_url, source_id, provider, provider_version, acquired_at, options_json)
+		SELECT ?, source_type, source_url, source_id, provider, provider_version, acquired_at, options_json
+		FROM acquisition WHERE item_id = ?`, toItemID, fromItemID)
+	return err
 }
 
 // acquisitionLockedTx reports whether an item's acquisition row is locked. The lock

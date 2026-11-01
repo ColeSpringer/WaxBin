@@ -606,8 +606,11 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		res.Absorbed = absorbedInto(o.folded, itemPID)
 		if res.ItemCreated && o.kept != "" {
 			res.Minted = map[model.PID]model.PID{itemPID: o.kept}
+			if err := inheritAcquisitionTx(ctx, tx, o.keptID, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
-		if res.ItemCreated && len(res.Absorbed) == 0 {
+		if res.ItemCreated && len(res.Absorbed) == 0 && res.Minted == nil {
 			res.Made = []model.PID{itemPID}
 		}
 		if err := recordLineageTx(ctx, tx, in.Job, res.Absorbed, res.Minted); err != nil {

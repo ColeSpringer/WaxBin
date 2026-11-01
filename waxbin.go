@@ -4042,9 +4042,10 @@ type AcquiredResult struct {
 
 	// AlreadyPresent reports that the acquired file's audio essence is already in the
 	// catalog, resolved independent of DupPolicy, so a DupAllow import of a genuine
-	// duplicate still reports it. AlreadyPresentPID names the existing item. Set for the
-	// track/book path only; the host can pre-check an episode via ResolveRef. Whether the
-	// file was skipped or imported is the action's Outcome.
+	// duplicate still reports it. AlreadyPresentPID names the existing item, for a cue
+	// rip's file its first track. Set for the track/book path only; the host can pre-check
+	// an episode via ResolveRef. Whether the file was skipped or imported is the action's
+	// Outcome.
 	AlreadyPresent    bool
 	AlreadyPresentPID model.PID
 	// AttachedTo names the item a DupAllow import going ahead joins as an alternate: the
@@ -4163,14 +4164,17 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 		}
 		if a := bySrc[src]; a != nil {
 			r.Outcome, r.Code, r.Restores = a.Outcome, a.Code, a.Restores
-			// Already-present is reported whatever the policy, so a DupAllow import of a
-			// genuine duplicate still says so; audio whose only file is gone is not present
-			// but restored. A resolve error is not fatal.
+			// Already-present is reported whatever the policy, from the cataloged files the
+			// plan's duplicate gate read, so a DupAllow import of a genuine duplicate still
+			// says so and a duplicate never reads as absent; audio whose only file is gone is
+			// not present but restored. A lookup error is not fatal.
 			if a.Restores == "" && a.Essence != "" {
-				if item, _, err := l.ResolveRef(ctx, model.PortableRef{Essence: a.Essence}); err == nil && item != nil {
-					r.AlreadyPresentPID = item.PID
-					if a.Outcome == inbox.OutcomeImport && item.Kind == kind {
-						r.AttachedTo = item.PID
+				if occ, err := l.store.FilesByEssence(ctx, a.Essence); err == nil {
+					if h := presentHolder(occ, kind); h != nil {
+						r.AlreadyPresentPID = h.ItemPID
+						if a.Outcome == inbox.OutcomeImport && h.Kind == kind {
+							r.AttachedTo = h.ItemPID
+						}
 					}
 				}
 			}
@@ -4178,6 +4182,28 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 		res.Files[i] = r
 	}
 	return res, nil
+}
+
+// presentHolder is the cataloged file that holds a staged file's audio, among the files
+// holding its essence: one on disk, or out of reach and so not known gone, of the import's
+// kind where there is one. It names the item it backs, for a cue rip's file the first
+// track. It reads the files by the rule the plan's duplicate gate does (inbox.HeldAudio),
+// so the two answers agree.
+func presentHolder(occ []model.FileOccupant, kind model.Kind) *model.FileOccupant {
+	var held *model.FileOccupant
+	for i := range occ {
+		o := &occ[i]
+		if !o.OnDisk && o.Reachable {
+			continue
+		}
+		if o.Kind == kind {
+			return o
+		}
+		if held == nil {
+			held = o
+		}
+	}
+	return held
 }
 
 // importAcquiredEpisode ingests an acquired episode into the internal podcast

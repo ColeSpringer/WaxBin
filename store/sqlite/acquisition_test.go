@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -881,7 +882,7 @@ func TestPutAcquisitionForFileFillsAStandingItem(t *testing.T) {
 		t.Errorf("acquisition after another kind of event = %+v (err %v), want it untouched", acq, err)
 	}
 	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/dune/2.mp3"), model.AcquisitionInput{
-		SourceType: model.SourceYouTube, SourceURL: "https://second.example/2", SourceID: "v2",
+		SourceType: model.SourceYouTube, SourceURL: "https://first.example/1", SourceID: "v2",
 		Provider: "uploader", ProviderVersion: "3", OptionsJSON: `{"q":1}`,
 	}, second.Made); err != nil {
 		t.Fatalf("stamp on the joined part: %v", err)
@@ -895,7 +896,7 @@ func TestPutAcquisitionForFileFillsAStandingItem(t *testing.T) {
 		t.Errorf("acquisition = %+v, want the book's own origin kept and the rest filled", acq)
 	}
 
-	// A record naming another provider keeps its id and version out of the fill.
+	// A record naming another provider takes nothing from the event.
 	track, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/t.mp3", "ET", "CT", "Song"))
 	if err != nil {
 		t.Fatal(err)
@@ -914,8 +915,8 @@ func TestPutAcquisitionForFileFillsAStandingItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	if acq, err := st.AcquisitionByItem(ctx, track.ItemPID); err != nil || acq.SourceType != model.SourceRSS ||
-		acq.Provider != "feeds" || acq.SourceID != "" || acq.ProviderVersion != "" || acq.SourceURL != "https://other.example" {
-		t.Errorf("fill across providers = %+v (err %v), want the url filled and the other provider's id and version left out", acq, err)
+		acq.Provider != "feeds" || acq.SourceID != "" || acq.ProviderVersion != "" || acq.SourceURL != "" {
+		t.Errorf("fill across providers = %+v (err %v), want nothing of another provider's acquisition", acq, err)
 	}
 }
 
@@ -975,5 +976,161 @@ func TestPutAcquisitionForFileFillsTheRipTracksThatStood(t *testing.T) {
 	if acq, err := st.AcquisitionByItem(ctx, second.Made[0]); err != nil || acq.SourceType != model.SourceManual ||
 		acq.SourceURL != "https://second.example" || acq.Provider != "uploader" {
 		t.Errorf("the new track's acquisition = %+v (err %v), want the event whole", acq, err)
+	}
+}
+
+// TestFillKeepsOneAcquisitionTogether: an event fills a standing record only when it names
+// the record's own acquisition: the same url, the same id under the record's provider when
+// it holds no url, or anything at all when the record names none. An event for another
+// acquisition, a book's next part with a url and id of its own, fills nothing, so a record
+// never holds one part's url beside another's id. The provider is named only where the
+// record has none, or where the event claims the record's own id under it.
+func TestFillKeepsOneAcquisitionTogether(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	yt := func(url, id, provider, version, options string) model.AcquisitionInput {
+		return model.AcquisitionInput{SourceType: model.SourceYouTube, SourceURL: url, SourceID: id,
+			Provider: provider, ProviderVersion: version, OptionsJSON: options}
+	}
+	for i, tc := range []struct {
+		name   string
+		record model.AcquisitionInput
+		events []model.AcquisitionInput
+		want   model.AcquisitionInput
+	}{
+		{"another url fills nothing", yt("https://y/1", "", "waxtap", "", ""),
+			[]model.AcquisitionInput{yt("https://y/2", "id2", "waxtap", "2", `{"q":1}`)},
+			yt("https://y/1", "", "waxtap", "", "")},
+		{"another url names no provider either", yt("https://y/1", "", "", "", ""),
+			[]model.AcquisitionInput{yt("https://y/2", "id2", "waxtap", "2", "")},
+			yt("https://y/1", "", "", "", "")},
+		{"an id alone takes only its own url", yt("", "id1", "waxtap", "", ""),
+			[]model.AcquisitionInput{yt("https://y/2", "id2", "waxtap", "", ""), yt("https://y/1", "id1", "waxtap", "3", "")},
+			yt("https://y/1", "id1", "waxtap", "3", "")},
+		{"the same url fills the rest", yt("https://y/1", "", "waxtap", "", ""),
+			[]model.AcquisitionInput{yt("https://y/1", "id1", "waxtap", "3", `{"q":1}`)},
+			yt("https://y/1", "id1", "waxtap", "3", `{"q":1}`)},
+		{"a record naming no acquisition takes one", model.AcquisitionInput{SourceType: model.SourceManual, Provider: "uploader"},
+			[]model.AcquisitionInput{{SourceType: model.SourceManual, SourceURL: "https://u/2", SourceID: "u2", Provider: "uploader"}},
+			model.AcquisitionInput{SourceType: model.SourceManual, SourceURL: "https://u/2", SourceID: "u2", Provider: "uploader"}},
+		{"a tag id the event claims takes its provider", yt("https://y/1", "id1", "", "", ""),
+			[]model.AcquisitionInput{yt("https://y/1", "id1", "waxtap", "3", `{"q":1}`)},
+			yt("https://y/1", "id1", "waxtap", "3", `{"q":1}`)},
+		{"a tag id another id contradicts keeps no provider, version or options", yt("https://y/1", "id1", "", "", ""),
+			[]model.AcquisitionInput{yt("https://y/1", "id9", "waxtap", "3", `{"q":1}`)},
+			yt("https://y/1", "id1", "", "", "")},
+		{"another id under the record's own provider is another acquisition", yt("https://y/1", "id1", "waxtap", "", ""),
+			[]model.AcquisitionInput{yt("https://y/1", "id9", "waxtap", "3", `{"q":1}`)},
+			yt("https://y/1", "id1", "waxtap", "", "")},
+		{"a record naming only a provider takes nothing from another", yt("", "", "uploader", "", ""),
+			[]model.AcquisitionInput{yt("https://y/2", "id2", "waxtap", "2", `{"q":1}`)},
+			yt("", "", "uploader", "", "")},
+		{"a record naming only a provider takes its own acquisition", yt("", "", "waxtap", "", ""),
+			[]model.AcquisitionInput{yt("https://y/2", "id2", "waxtap", "2", `{"q":1}`)},
+			yt("https://y/2", "id2", "waxtap", "2", `{"q":1}`)},
+		{"no version without a provider", yt("https://y/1", "id1", "", "", ""),
+			[]model.AcquisitionInput{yt("https://y/1", "id1", "", "3", `{"q":1}`)},
+			yt("https://y/1", "id1", "", "", `{"q":1}`)},
+	} {
+		path := fmt.Sprintf("/lib/t%d.mp3", i)
+		track, err := st.PutScannedTrack(ctx, input(lib.ID, path, fmt.Sprintf("E%d", i), fmt.Sprintf("C%d", i), "Song"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PutAcquisition(ctx, track.ItemPID, tc.record); err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range tc.events {
+			if _, err := st.PutAcquisitionForFile(ctx, []byte(path), ev, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		acq, err := st.AcquisitionByItem(ctx, track.ItemPID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := model.AcquisitionInput{SourceType: acq.SourceType, SourceURL: acq.SourceURL, SourceID: acq.SourceID,
+			Provider: acq.Provider, ProviderVersion: acq.ProviderVersion, OptionsJSON: acq.OptionsJSON}
+		if got != tc.want {
+			t.Errorf("%s: record = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCarvedTracksCarryTheWholeFilesOrigin: the tracks a cue sheet carves out of an item's
+// whole file carry its origin, the opener as that item and the rest by inheriting it, and
+// none is made from nothing, so an import of the file re-acquired elsewhere with its sheet
+// leaves every track with the one origin rather than the opener's beside the others'.
+func TestCarvedTracksCarryTheWholeFilesOrigin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	whole, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/rip.flac", "ER", "CR", "Whole"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := model.AcquisitionInput{SourceType: model.SourceYouTube, SourceURL: "https://a.example", Provider: "waxtap"}
+	if err := st.PutAcquisition(ctx, whole.ItemPID, first); err != nil {
+		t.Fatal(err)
+	}
+	carved, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "ER", "CR", 600000, [][2]int64{{0, 7500}, {7500, 0}}))
+	if err != nil || len(carved.Made) != 0 || len(carved.Minted) != 1 {
+		t.Fatalf("carve = %+v (err %v), want one track minted and none made from nothing", carved, err)
+	}
+	origins := func(want string) {
+		t.Helper()
+		tracks, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+		if err != nil || len(tracks) != 2 {
+			t.Fatalf("tracks = %d (err %v), want the rip's two", len(tracks), err)
+		}
+		for _, tr := range tracks {
+			if acq, err := st.AcquisitionByItem(ctx, tr.PID); err != nil || acq.SourceURL != want || acq.Provider != "waxtap" {
+				t.Errorf("%s acquisition = %+v (err %v), want %s", tr.Title, acq, err, want)
+			}
+		}
+	}
+	origins("https://a.example")
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/rip.flac"), model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://b.example", Provider: "waxtap"}, carved.Made); err != nil {
+		t.Fatal(err)
+	}
+	origins("https://a.example")
+}
+
+// TestAPartLeavingItsBookCarriesItsOrigin: a part read as a track of its own inherits the
+// book's origin, unless its own tags name one, and is not made from nothing.
+func TestAPartLeavingItsBookCarriesItsOrigin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	var book model.PID
+	for i := 1; i <= 3; i++ {
+		in := bookIn(lib.ID, fmt.Sprintf("/lib/dune/%d.mp3", i), fmt.Sprintf("ED%d", i), "Dune", "Frank Herbert", "", "", "")
+		in.Position = i
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		book = res.ItemPID
+	}
+	if err := st.PutAcquisition(ctx, book, model.AcquisitionInput{SourceType: model.SourceYouTube, SourceURL: "https://book.example", Provider: "waxtap"}); err != nil {
+		t.Fatal(err)
+	}
+	split, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/dune/2.mp3", "ED2", "C2", "Two"))
+	if err != nil || split.Minted[split.ItemPID] != book || len(split.Made) != 0 {
+		t.Fatalf("split = %+v (err %v), want the track minted from the book and not made from nothing", split, err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, split.ItemPID); err != nil || acq.SourceURL != "https://book.example" || acq.Provider != "waxtap" {
+		t.Errorf("the track's acquisition = %+v (err %v), want the book's origin inherited", acq, err)
+	}
+	tagged := input(lib.ID, "/lib/dune/3.mp3", "ED3", "C3", "Three")
+	tagged.Acquisition = model.TagAcquisition{SourceURL: "https://tag.example"}
+	own, err := st.PutScannedTrack(ctx, tagged)
+	if err != nil || own.Minted[own.ItemPID] != book {
+		t.Fatalf("tagged split = %+v (err %v), want the track minted from the book", own, err)
+	}
+	if acq, err := st.AcquisitionByItem(ctx, own.ItemPID); err != nil || acq.SourceURL != "https://tag.example" || acq.Provider != "" {
+		t.Errorf("the tagged track's acquisition = %+v (err %v), want its own tags' origin", acq, err)
 	}
 }

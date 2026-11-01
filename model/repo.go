@@ -258,12 +258,15 @@ type ScanItemResult struct {
 	Absorbed map[PID]PID
 	// Minted maps each item this write created for a file another item held to that item,
 	// which stood on without it: a part leaving its book to be a track of its own, or the
-	// tracks a cue sheet carves out of a whole-file item.
+	// tracks a cue sheet carves out of a whole-file item. A minted item inherits that
+	// item's origin (its acquisition row) unless its own file's tags gave it one.
 	Minted map[PID]PID
-	// Made lists the items this write created that took no item in: ItemPID when it made
-	// it, and each new track of a rip but one carrying on an item the write folded. An
-	// import records its event whole on these and only fills the record of every other item
-	// the file backs, which stood before it (Store.PutAcquisitionForFile).
+	// Made lists the items this write created that took no item in and carry no item's
+	// origin on: ItemPID when it made it from nothing, and each new track of a rip whose
+	// file no item held whole. An import records its event whole on these; every other
+	// item the file backs stood before it, or was minted from one that did, and keeps its
+	// origin, its record filled only by an event naming that same acquisition
+	// (Store.PutAcquisitionForFile).
 	Made []PID
 }
 

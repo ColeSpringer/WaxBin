@@ -308,14 +308,12 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		if len(absorbed) > 0 {
 			res.Absorbed = absorbed
 		}
-		// The tracks made from nothing: not the opener that took a folded item's pid, nor one
-		// a folded item went into.
-		took := map[model.PID]bool{}
-		for _, into := range absorbed {
-			took[into] = true
-		}
-		for id, pid := range fresh {
-			if id != handedRow && !took[pid] {
+		// The tracks made from nothing: every new track, unless the file was an item's whole,
+		// folded into the rip (the opener carrying its pid on, or absorbing it), which the
+		// tracks then carry on (the opener as that item, the rest by inheriting its origin),
+		// so an import fills their records rather than stamping them anew.
+		if handedRow == 0 && len(absorbed) == 0 {
+			for _, pid := range fresh {
 				res.Made = append(res.Made, pid)
 			}
 		}
@@ -773,6 +771,16 @@ func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, 
 		}
 		absorbed[pid] = openerPID
 		if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
+			return nil, 0, err
+		}
+	}
+	// The whole's origin went to the opener with the fold; the other tracks carved from it
+	// inherit it, since their audio came from that acquisition and no other.
+	for id := range fresh {
+		if id == opener {
+			continue
+		}
+		if err := inheritAcquisitionTx(ctx, tx, opener, id); err != nil {
 			return nil, 0, err
 		}
 	}
