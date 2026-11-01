@@ -27,11 +27,11 @@ func undoTrack(t *testing.T, path, title string, n int, extra ...testaudio.TXXXF
 // lastOrganizeJob returns the newest organize job's pid from the history.
 func lastOrganizeJob(t *testing.T, ctx context.Context, lib *waxbin.Library) model.PID {
 	t.Helper()
-	batches, err := lib.OrganizeHistory(ctx, 1)
-	if err != nil || len(batches) != 1 {
-		t.Fatalf("organize history = %+v (err %v), want the newest batch", batches, err)
+	page, err := lib.OrganizeHistory(ctx, "", 1)
+	if err != nil || len(page.Batches) != 1 {
+		t.Fatalf("organize history = %+v (err %v), want the newest batch", page, err)
 	}
-	return batches[0].JobPID
+	return page.Batches[0].JobPID
 }
 
 // TestUndoOrganizeMovesTheFilesBack: an undo moves every file an organize moved back
@@ -86,7 +86,8 @@ func TestUndoOrganizeMovesTheFilesBack(t *testing.T) {
 	if err != nil || len(jobs) != 1 || jobs[0].Kind != "organize-undo" || jobs[0].State != model.JobDone {
 		t.Fatalf("newest job = %+v (err %v), want the finished undo", jobs, err)
 	}
-	batches, err := lib.OrganizeHistory(ctx, 10)
+	page, err := lib.OrganizeHistory(ctx, "", 10)
+	batches := page.Batches
 	if err != nil || len(batches) != 2 || batches[0].JobPID != jobs[0].PID || batches[0].Committed != 2 ||
 		batches[1].JobPID != job || batches[1].Committed != 2 || batches[0].Kind != "organize-undo" {
 		t.Fatalf("history = %+v (err %v), want the undo above the organize, two moves each", batches, err)
@@ -203,8 +204,8 @@ func TestPruneOrganizeJournal(t *testing.T) {
 	if n, err := lib.PruneOrganizeJournal(ctx, 0); err != nil || n != 1 {
 		t.Fatalf("prune of everything settled = %d (err %v), want the one row", n, err)
 	}
-	if batches, err := lib.OrganizeHistory(ctx, 10); err != nil || len(batches) != 0 {
-		t.Errorf("history after the prune = %+v (err %v), want none", batches, err)
+	if page, err := lib.OrganizeHistory(ctx, "", 10); err != nil || len(page.Batches) != 0 {
+		t.Errorf("history after the prune = %+v (err %v), want none", page, err)
 	}
 }
 

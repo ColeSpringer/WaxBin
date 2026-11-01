@@ -21,11 +21,11 @@ import (
 // same collation key ("Beatles" vs "The Beatles"), which the match-key dedup keeps apart.
 // The names are compared, not the sort keys, which a sort spelling moves.
 func (s *Store) DuplicateArtists(ctx context.Context) ([]model.DuplicateSet, error) {
-	byMBID, err := s.artistDupSets(ctx, "mbid", "shared MBID")
+	byMBID, err := s.artistDupSets(ctx, "mbid", model.ReasonSharedMBID)
 	if err != nil {
 		return nil, err
 	}
-	bySort, err := s.artistDupSets(ctx, "name_key", "same collation key")
+	bySort, err := s.artistDupSets(ctx, "name_key", model.ReasonSameCollationKey)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ const (
 	genreLiveTracks  = `(SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig ` + liveGenreMembers + ` WHERE ig.genre_id = e.id)`
 )
 
-func (s *Store) artistDupSets(ctx context.Context, col, reason string) ([]model.DuplicateSet, error) {
+func (s *Store) artistDupSets(ctx context.Context, col string, reason model.DuplicateReason) ([]model.DuplicateSet, error) {
 	q := `SELECT e.` + col + `, e.pid, e.name, ` + artistLiveTracks + ` AS n
 		FROM artist e
 		WHERE e.` + col + ` IN (
@@ -59,7 +59,7 @@ func (s *Store) DuplicateGenres(ctx context.Context) ([]model.DuplicateSet, erro
 		WHERE e.facet || char(31) || e.sort_key IN (
 			SELECT facet || char(31) || sort_key FROM genre GROUP BY 1 HAVING COUNT(*) > 1)
 		ORDER BY 1, n DESC, e.pid`
-	return s.scanDupSets(ctx, q, model.MergeGenre, "same collation key")
+	return s.scanDupSets(ctx, q, model.MergeGenre, model.ReasonSameCollationKey)
 }
 
 // DuplicateAlbums finds album entities that share a MusicBrainz release id, and ones
@@ -71,7 +71,7 @@ func (s *Store) DuplicateAlbums(ctx context.Context) ([]model.DuplicateSet, erro
 	// most tracks as the survivor (re-pointing the fewest tracks), matching the
 	// "survivor = most tracks" contract the artist/genre queries honor.
 	byMBID, err := s.scanDupSets(ctx, effectiveMBIDDupQuery("album", fmt.Sprintf(liveAlbumMembers, "k.id")),
-		model.MergeAlbum, "shared MBID")
+		model.MergeAlbum, model.ReasonSharedMBID)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ const liveAlbumMembers = `(SELECT COUNT(*) FROM track t ` + liveMembers + ` WHER
 func (s *Store) DuplicateReleaseGroups(ctx context.Context) ([]model.DuplicateSet, error) {
 	return s.scanDupSets(ctx, effectiveMBIDDupQuery("release_group",
 		"(SELECT COUNT(*) FROM album a WHERE a.release_group_id = k.id)"),
-		model.MergeReleaseGroup, "shared MBID")
+		model.MergeReleaseGroup, model.ReasonSharedMBID)
 }
 
 // effectiveMBIDDupQuery builds the duplicate scan for an entity that keys MBID-first,
@@ -216,8 +216,9 @@ func effectiveMBIDDupQuery(table, count string) string {
 
 // scanDupSets buckets rows ordered by a group key into DuplicateSets. Each row is
 // (groupKey, pid, name, trackCount); the survivor (first member) is the highest
-// track count within a group, so re-pointing moves the fewest children.
-func (s *Store) scanDupSets(ctx context.Context, q string, et model.MergeEntity, reason string) ([]model.DuplicateSet, error) {
+// track count within a group, so re-pointing moves the fewest children. A shared-MBID
+// set's key is the id, which it names.
+func (s *Store) scanDupSets(ctx context.Context, q string, et model.MergeEntity, reason model.DuplicateReason) ([]model.DuplicateSet, error) {
 	rows, err := s.rdb().QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.audit", err)
@@ -234,6 +235,9 @@ func (s *Store) scanDupSets(ctx context.Context, q string, et model.MergeEntity,
 		}
 		if cur == nil || key != curKey {
 			sets = append(sets, model.DuplicateSet{EntityType: et, Reason: reason})
+			if reason == model.ReasonSharedMBID {
+				sets[len(sets)-1].MBID = key
+			}
 			cur = &sets[len(sets)-1]
 			curKey = key
 		}

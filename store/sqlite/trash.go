@@ -30,13 +30,60 @@ type detachedFile struct {
 	promoted []model.PromotedFile
 }
 
+// PlanTrash records a trash move before the file moves: everything the journal row will
+// hold, read from the file's row as it stands, under the pid the row will take. An open
+// after a crash between the move and TrashFile settles the record (recoverTrash). The
+// record covers the file alone: its sidecars and its folder's companions go by the run's
+// own reckoning, so a recovered move leaves them where the crash did. It is as durable as
+// any write here: the WAL at synchronous NORMAL keeps it through a process crash, while a
+// power cut can lose the last writes, this one among them.
+func (s *Store) PlanTrash(ctx context.Context, in model.TrashPending) error {
+	const op = "store.PlanTrash"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		err := tx.QueryRowContext(ctx, "SELECT id FROM file WHERE pid = ?", string(in.FilePID)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(in.FilePID))
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		itemPID, itemKind, err := journalItemTx(ctx, tx, id)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO trash_pending
+			(pid, file_id, item_pid, item_kind, library_id, orig_path, orig_display, essence_hash, size,
+			 trash_path, trash_display, reason, job_pid, created_at)
+			SELECT ?, id, ?, ?, library_id, path, display_path, COALESCE(essence_hash, ''), size, ?, ?, ?, NULLIF(?, ''), ?
+			FROM file WHERE id = ?`,
+			string(in.PID), string(itemPID), itemKind, in.TrashPath, in.TrashDisplay, reasonOr(in.Reason),
+			string(in.JobPID), nowNS(), id)
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	})
+}
+
+// AbortTrash drops the record of a trash move that did not happen. A missing record is
+// no error.
+func (s *Store) AbortTrash(ctx context.Context, pid model.PID) error {
+	const op = "store.AbortTrash"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM trash_pending WHERE pid = ?", string(pid))
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	})
+}
+
 // TrashFile drops a file's catalog row (after the file has been moved into the
-// trash on disk) and records the undo journal row, all in one transaction. The
-// logical item is preserved: an alternate takes the file's place when it has one
-// (see detachFileTx), and it becomes archived when it loses its last file.
+// trash on disk) and records the undo journal row, all in one transaction, which also
+// drops the move's pending record. The logical item is preserved: an alternate takes the
+// file's place when it has one (see detachFileTx), and it becomes archived when it loses
+// its last file.
 func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.DetachResult, error) {
 	const op = "store.TrashFile"
-	res := &model.DetachResult{TrashPID: model.NewPID()}
+	res := &model.DetachResult{TrashPID: in.PID}
+	if res.TrashPID == "" {
+		res.TrashPID = model.NewPID()
+	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		d, err := detachFileTx(ctx, tx, in.FilePID, op)
 		if err != nil {
@@ -48,10 +95,10 @@ func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(res.TrashPID), d.libraryID, string(d.itemPID), d.itemKind, d.path, d.display,
 			in.TrashPath, in.TrashDisplay, d.essence, reasonOr(in.Reason), d.size, nowNS())
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, "DELETE FROM trash_pending WHERE pid = ?", string(res.TrashPID))
 		}
-		return nil
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	})
 	if err != nil {
 		return nil, err
@@ -146,18 +193,8 @@ func (b *detachBatch) detachTx(ctx context.Context, tx *sql.Tx, fileID int64) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.QueryRowContext(ctx,
-		`SELECT pi.pid, pi.kind FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
-		 WHERE itf.file_id = ? AND itf.role = 'primary'
-		 ORDER BY itf.item_id LIMIT 1`, d.id).Scan(&d.itemPID, &d.itemKind); err != nil &&
-		!errors.Is(err, sql.ErrNoRows) {
+	if d.itemPID, d.itemKind, err = journalItemTx(ctx, tx, d.id); err != nil {
 		return nil, err
-	}
-	if d.itemPID == "" && len(itemIDs) > 0 {
-		if err := tx.QueryRowContext(ctx,
-			"SELECT pid, kind FROM playable_item WHERE id = ?", itemIDs[0]).Scan(&d.itemPID, &d.itemKind); err != nil {
-			return nil, err
-		}
 	}
 
 	// The rollups sum durations from the file row and count live members, so dropping
@@ -266,6 +303,20 @@ func (b *detachBatch) settleTx(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// journalItemTx returns the item a trash journal row records for a file: the item of its
+// primary edge, else any item it backs (a book's later parts are part edges), the lowest
+// id first; none for a file that backs no item.
+func journalItemTx(ctx context.Context, tx *sql.Tx, fileID int64) (model.PID, string, error) {
+	var pid model.PID
+	var kind string
+	err := tx.QueryRowContext(ctx, `SELECT pi.pid, pi.kind FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
+		WHERE itf.file_id = ? ORDER BY itf.role = 'primary' DESC, itf.item_id LIMIT 1`, fileID).Scan(&pid, &kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	return pid, kind, err
 }
 
 // itemIDsForFile returns the distinct item ids linked to a file by any role, in id

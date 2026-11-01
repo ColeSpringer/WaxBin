@@ -103,6 +103,17 @@ type AuditFinding struct {
 	// HeaderMS and DecodedMS are a duration_mismatch finding's two lengths.
 	HeaderMS  int64
 	DecodedMS int64
+	// Reason says which of its check's causes a finding has, in the check's own words: a
+	// duplicate's DuplicateReason, a duplicate copy's CopyReason, an IntegrityReason, a
+	// CorruptReason, a FeedReason, or a file diagnostic's code. Empty for a check with
+	// one cause.
+	Reason string
+	// Members are a duplicate finding's entities with their names and live track
+	// counts, the suggested survivor first.
+	Members []DuplicateMember
+	// More is set on the roll-up a check capped at its sample ends with: how many
+	// findings it stands for beyond those shown.
+	More int
 }
 
 // DuplicateMember is one entity in a duplicate set.
@@ -118,13 +129,52 @@ type DuplicateMember struct {
 // member backing the most tracks).
 type DuplicateSet struct {
 	EntityType MergeEntity
-	Reason     string
-	Members    []DuplicateMember
+	Reason     DuplicateReason
+	// MBID is the MusicBrainz id a ReasonSharedMBID set's members share.
+	MBID    string
+	Members []DuplicateMember
 }
 
-// ReasonSameAlbumName is the reason of a duplicate album set found by name, the albums
-// a folder keeps apart.
-const ReasonSameAlbumName = "same title and album artist"
+// DuplicateReason says why a duplicate set's members are probably one entity.
+type DuplicateReason string
+
+const (
+	// ReasonSharedMBID is members sharing a MusicBrainz id, the strongest evidence: a set
+	// found by it and by another reason is reported by this one.
+	ReasonSharedMBID DuplicateReason = "shared MBID"
+	// ReasonSameCollationKey is names that fold to one collation key ("Beatles" and "The
+	// Beatles"), which the match-key dedup keeps apart.
+	ReasonSameCollationKey DuplicateReason = "same collation key"
+	// ReasonSameAlbumName is albums carrying one title under one album artist, which a
+	// folder keeps apart.
+	ReasonSameAlbumName DuplicateReason = "same title and album artist"
+)
+
+// IntegrityReason is the cause of an integrity finding.
+type IntegrityReason string
+
+const (
+	IntegrityUnreadable  IntegrityReason = "unreadable"   // the file cannot be read, or is not on disk
+	IntegrityHashChanged IntegrityReason = "hash changed" // its bytes no longer hash to what the catalog holds
+)
+
+// CorruptReason is the cause of a corrupt_audio finding.
+type CorruptReason string
+
+const (
+	CorruptUndecodable CorruptReason = "undecodable" // a decode failed on it, or the scan found it truncated
+	// CorruptDamaged is audio that decodes around damage, or that a scan found a sign of
+	// damage in short of a failure (no audio frames where it looked).
+	CorruptDamaged CorruptReason = "damaged"
+)
+
+// FeedReason is the cause of an invalid_feed finding.
+type FeedReason string
+
+const (
+	FeedBadURL     FeedReason = "bad feed url" // the feed address is not an http or https URL
+	FeedNoEpisodes FeedReason = "no episodes"  // a synced show holds no episode
+)
 
 // SplitAlbum reports one album title by one artist spread across multiple album
 // entities (its tracks split by folder/tags into separate rows).

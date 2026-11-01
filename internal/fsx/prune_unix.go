@@ -17,3 +17,6 @@ func device(info fs.FileInfo) (uint64, bool) {
 }
 
 func inUse(err error) bool { return errors.Is(err, syscall.EBUSY) }
+
+// crossDevice reports a rename refused because it would cross filesystems.
+func crossDevice(err error) bool { return errors.Is(err, syscall.EXDEV) }

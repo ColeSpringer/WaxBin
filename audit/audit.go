@@ -272,8 +272,9 @@ func (a *Auditor) needsFiles(cfg Config) bool {
 		(a.runs(cfg, model.CheckCorruptAudio) && cfg.Integrity && a.probe != nil)
 }
 
-// checkDuplicates turns duplicate sets into merge-candidate findings, deduping
-// sets that name the same members (an MBID and a collation-key match can overlap).
+// checkDuplicates turns duplicate sets into merge-candidate findings, deduping sets that
+// name the same members: the first set wins, and the store lists a type's shared-MBID sets
+// first, so a pair found by its id and by its collation key is the id's finding.
 func (a *Auditor) checkDuplicates(ctx context.Context, fetch func(context.Context) ([]model.DuplicateSet, error), check model.AuditCheck, add func(model.AuditFinding)) error {
 	sets, err := fetch(ctx)
 	if err != nil {
@@ -302,12 +303,18 @@ func (a *Auditor) checkDuplicates(ctx context.Context, fetch func(context.Contex
 		if set.Reason == model.ReasonSameAlbumName {
 			fix = oneRelease("waxbin merge")
 		}
+		why := string(set.Reason)
+		if set.MBID != "" {
+			why += " " + set.MBID
+		}
 		add(model.AuditFinding{
 			Check:     check,
 			Severity:  model.SeverityWarn,
-			Message:   "duplicate " + string(set.EntityType) + " (" + set.Reason + "): " + strings.Join(names, " / ") + fix,
+			Message:   "duplicate " + string(set.EntityType) + " (" + why + "): " + strings.Join(names, " / ") + fix,
 			Entities:  pids, // survivor first (store orders by track count)
 			MergeType: set.EntityType,
+			Reason:    string(set.Reason),
+			Members:   set.Members,
 		})
 	}
 	return nil
@@ -410,7 +417,7 @@ func reportSampledItems(ctx context.Context, list itemLister, check model.AuditC
 	if total > len(items) {
 		add(model.AuditFinding{
 			Check: check, Severity: model.SeverityInfo,
-			Message: rollup(total, len(items)),
+			Message: rollup(total, len(items)), More: total - len(items),
 		})
 	}
 	return nil
@@ -465,6 +472,7 @@ func (a *Auditor) checkDurationMismatch(ctx context.Context, sample int, add fun
 			Severity: model.SeverityWarn,
 			Message: strconv.Itoa(total) + " files whose header duration disagrees with the decoded audio (" +
 				strconv.Itoa(len(ms)) + " shown)",
+			More: total - len(ms),
 		})
 	}
 	return nil
@@ -503,6 +511,7 @@ func (a *Auditor) checkDuplicateCopies(ctx context.Context, sample int, add func
 				Entities: []model.PID{it.ItemPID},
 				Path:     f.DisplayPath,
 				FilePID:  f.FilePID,
+				Reason:   string(f.Reason),
 			})
 		}
 		if held {

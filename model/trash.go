@@ -82,12 +82,27 @@ type TrashEntry struct {
 
 // TrashFileInput records a file that was moved into the trash on disk so the
 // store can drop its catalog row, archive its now-fileless item, and write the
-// undo journal row in one transaction.
+// undo journal row in one transaction. PID names the pending row the move was planned
+// under (TrashPending), which the journal row takes over; empty mints a pid.
 type TrashFileInput struct {
+	PID          PID
 	FilePID      PID
 	Reason       string
 	TrashPath    []byte
 	TrashDisplay string
+}
+
+// TrashPending is a trash move recorded before the file moves, so an open after a crash
+// between the move and its catalog write can finish it or drop it. The store fills in
+// what the journal row needs from the file's row as it stands. PID becomes the journal
+// row's pid, and JobPID names the run, when it has one.
+type TrashPending struct {
+	PID          PID
+	FilePID      PID
+	Reason       string
+	TrashPath    []byte
+	TrashDisplay string
+	JobPID       PID
 }
 
 // PromotedFile is an alternate that took the place of a file its item lost. The caller

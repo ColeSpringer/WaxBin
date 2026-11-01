@@ -102,7 +102,37 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 		return nil, err
 	}
 	info.LibraryPIDs = libs
+	if kind == read.EntityArtist {
+		aliases, err := s.artistAliases(ctx, []int64{id}, op)
+		if err != nil {
+			return nil, err
+		}
+		info.Aliases = aliases[id]
+	}
 	return info, nil
+}
+
+// artistAliases lists the other names of each artist, by name, keyed by artist id.
+func (s *Store) artistAliases(ctx context.Context, ids []int64, op string) (map[int64][]string, error) {
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), `SELECT artist_id, name FROM artist_alias
+		WHERE artist_id IN `+inArray+` AND is_primary = 0 ORDER BY artist_id, name`, idArray(ids))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	out := map[int64][]string{}
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out[id] = append(out[id], name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
 }
 
 // entityTable returns the table backing an entity kind. The value is a constant
@@ -466,6 +496,17 @@ func (s *Store) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []m
 		for id, pids := range libs {
 			if info := byID[id]; info != nil {
 				info.LibraryPIDs = pids
+			}
+		}
+		if kind == read.EntityArtist {
+			aliases, err := s.artistAliases(ctx, ids, op)
+			if err != nil {
+				return err
+			}
+			for id, names := range aliases {
+				if info := byID[id]; info != nil {
+					info.Aliases = names
+				}
 			}
 		}
 		return nil

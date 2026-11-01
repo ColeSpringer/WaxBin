@@ -150,7 +150,7 @@ func (c thumbsConnector) attachFile(ctx context.Context, ex driver.ExecerContext
 	if c.role == thumbsReadOnly {
 		mode = "ro"
 	}
-	if err := execConn(ctx, ex, "ATTACH DATABASE ? AS thumbs", fileURI(c.file)+"?mode="+mode); err != nil {
+	if err := execConn(ctx, ex, "ATTACH DATABASE ? AS thumbs", FileURI(c.file)+"?mode="+mode); err != nil {
 		return err
 	}
 	if err := c.ready(ctx, ex, q); err != nil {
@@ -271,9 +271,11 @@ func execConn(ctx context.Context, ex driver.ExecerContext, q string, args ...an
 	return err
 }
 
-// fileURI is path as an SQLite file: URI, escaping what its parser would read as URI
-// syntax.
-func fileURI(path string) string {
+// FileURI is path as an SQLite file: URI, escaping what SQLite's URI parser, and the
+// driver's split of its own parameters at the first "?", would read as URI syntax: "%",
+// "?" and "#". Separators and a drive's colon stay as they are, which SQLite reads as a
+// path on every platform.
+func FileURI(path string) string {
 	return "file:" + strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
 }
 

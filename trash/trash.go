@@ -27,6 +27,11 @@ import (
 
 // Store is the persistence the deletion service needs (satisfied by store/sqlite).
 type Store interface {
+	// PlanTrash records a trash move before the file moves, and AbortTrash drops the record
+	// of one that did not happen; TrashFile drops the record in the transaction that writes
+	// the journal row.
+	PlanTrash(ctx context.Context, in model.TrashPending) error
+	AbortTrash(ctx context.Context, pid model.PID) error
 	TrashFile(ctx context.Context, in model.TrashFileInput) (*model.DetachResult, error)
 	DetachFile(ctx context.Context, filePID model.PID) (*model.DetachResult, error)
 	// ItemFiles returns every file backing an item, so a multi-file book's parts are
@@ -40,6 +45,7 @@ type Store interface {
 type Service struct {
 	store Store
 	log   *slog.Logger
+	move  func(src, dst string) error // fsx.Move; tests fail it
 }
 
 // New builds a deletion service.
@@ -47,7 +53,7 @@ func New(store Store, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{store: store, log: log}
+	return &Service{store: store, log: log, move: fsx.Move}
 }
 
 // Action is one planned file deletion.
@@ -100,6 +106,8 @@ type Plan struct {
 	// Reason is what each trash row the plan writes records, in place of the mode's own
 	// (see CheckReason); empty takes the mode's. A bypass mode writes no row.
 	Reason string
+	// JobPID is the job running the plan, recorded on each trash move's pending row.
+	JobPID model.PID
 	// SkippedPodcast counts items a caller dropped before planning because they are
 	// podcast episodes, where `podcast unfetch` owns the bytes. Plan never sets it; the
 	// caller does (see Library.PlanDelete), and the guard stays there rather than
@@ -183,16 +191,63 @@ type Report struct {
 	// Promoted lists the alternates that took a removed file's place, for the caller
 	// to re-read once the run is over.
 	Promoted []model.PromotedFile
-	// DirsPruned counts the folders the run emptied and removed.
+	// Pruned lists the folders the run emptied and removed, with the junk and companions
+	// that went with each, and DirsPruned counts them.
+	Pruned     []PrunedFolder
 	DirsPruned int
 }
 
-// Failure records one deletion that could not be applied.
-type Failure struct {
-	FilePID model.PID
-	Src     string
-	Err     string
+// PrunedFolder is a folder a run removes once its files are gone, with the junk deleted
+// from it and the companions taken out of it: into the trash's folder store, or deleted
+// by a mode that bypasses the trash. An in-place library's companions keep their folder.
+type PrunedFolder struct {
+	Dir        string   `json:"dir"`
+	Junk       []string `json:"junk,omitempty"`
+	Companions []string `json:"companions,omitempty"`
 }
+
+func prunedFolders(dirs []fsx.PrunedDir) []PrunedFolder {
+	var out []PrunedFolder
+	for _, d := range dirs {
+		out = append(out, PrunedFolder{Dir: d.Dir, Junk: d.Junk, Companions: d.Companions})
+	}
+	return out
+}
+
+// Failure records one deletion that could not be applied and where it left the file:
+// an action's file, or a sidecar the run could not take with it (Errored counts only the
+// actions). TrashPath is where a stranded file now is, or, beside a file in place, where a
+// failed move left a copy; the next read-write open settles either.
+type Failure struct {
+	FilePID   model.PID `json:"filePid"`
+	Src       string    `json:"src"`
+	Disk      DiskState `json:"disk"`
+	TrashPath string    `json:"trashPath,omitempty"`
+	Err       string    `json:"error"`
+}
+
+// DiskState says where a failed deletion left its file.
+type DiskState string
+
+const (
+	DiskInPlace DiskState = "in-place" // the file is where it was
+	DiskRemoved DiskState = "removed"  // the file left the disk, and the catalog still holds it
+	// DiskStranded is a file in the trash whose catalog write and move back both failed.
+	// Its pending row stays, and the next read-write open finishes the move, or rolls it
+	// back when the file has been put back at its path.
+	DiskStranded DiskState = "stranded"
+)
+
+// applyError is a failed deletion and where it left the file.
+type applyError struct {
+	disk      DiskState
+	trashPath string
+	err       error
+}
+
+func (e *applyError) Error() string { return e.err.Error() }
+
+func (e *applyError) Unwrap() error { return e.err }
 
 // Plan computes the deletion for each item under the mode. Every backing file is
 // planned, so a multi-file book is removed in full rather than losing only its
@@ -444,10 +499,12 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	}
 	rep := &Report{SkippedPodcast: plan.SkippedPodcast, SkippedReadOnly: plan.SkippedReadOnly, SkippedRipTracks: plan.SkippedRipTracks}
 	emptied := map[string]*Action{}
+	// A sidecar the run could not take stays where it was, keeping its folder.
+	left := map[string]bool{}
 	sib := organize.NewSiblings()
 	for i := range plan.Actions {
 		if ctx.Err() != nil {
-			rep.DirsPruned = s.prune(emptied, plan.Mode)
+			s.prune(rep, emptied, plan.Mode, left)
 			return rep, waxerr.FromContext("trash.Execute", ctx.Err(), waxerr.CodeIO)
 		}
 		a := &plan.Actions[i]
@@ -456,13 +513,25 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Skips = append(rep.Skips, Skip{FilePID: a.FilePID, Src: a.Src, Code: a.Code, Reason: a.Reason})
 			continue
 		}
-		size, promoted, err := s.apply(ctx, a, plan.Mode, plan.reason(), sib)
+		size, promoted, err := s.apply(ctx, a, plan, sib)
 		rep.Promoted = append(rep.Promoted, promoted...)
 		if err != nil {
+			f := Failure{FilePID: a.FilePID, Src: a.Src, Disk: DiskInPlace, Err: err.Error()}
+			var ae *applyError
+			if errors.As(err, &ae) {
+				f.Disk, f.TrashPath = ae.disk, ae.trashPath
+			}
+			if f.Disk == DiskRemoved {
+				rep.ReclaimedBytes += size
+			}
 			rep.Errored++
-			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Err: err.Error()})
-			s.log.Warn("delete action failed", "src", a.Src, "mode", plan.Mode, "err", err)
+			rep.Failures = append(rep.Failures, f)
+			s.log.Warn("delete action failed", "src", a.Src, "mode", plan.Mode, "disk", f.Disk, "err", err)
 			continue
+		}
+		for _, f := range s.sidecars(a, plan.Mode, sib) {
+			rep.Failures = append(rep.Failures, f)
+			left[f.Src] = true
 		}
 		emptied[filepath.Dir(a.Src)] = a
 		if plan.Mode.BypassesTrash() {
@@ -472,8 +541,46 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Trashed++
 		}
 	}
-	rep.DirsPruned = s.prune(emptied, plan.Mode)
+	s.prune(rep, emptied, plan.Mode, left)
 	return rep, nil
+}
+
+// Folders lists the folders the run would empty and remove, with the junk and companions
+// that would go with each, as they stand now less the files and sidecars the plan takes
+// (sidecars, as Sidecars returns them): Execute's prune replayed over every action that
+// deletes, touching nothing. A file that arrives or a deletion that fails meanwhile keeps a
+// folder the list names.
+func (p *Plan) Folders(sidecars [][]string) []PrunedFolder {
+	removed, emptied := map[string]bool{}, map[string]*Action{}
+	for i := range p.Actions {
+		a := &p.Actions[i]
+		if a.Skip {
+			continue
+		}
+		removed[a.Src] = true
+		for _, sc := range sidecars[i] {
+			removed[sc] = true
+		}
+		emptied[filepath.Dir(a.Src)] = a
+	}
+	return prunedFolders(fsx.PreviewPrune(slices.Sorted(maps.Keys(emptied)), func(dir string) fsx.PruneOptions {
+		return folderPrune(emptied[dir], nil, func() (func(string) error, func(string) error) {
+			return func(string) error { return nil }, nil
+		})
+	}, removed))
+}
+
+// folderPrune is the prune a run gives the folder a's file leaves: junk goes with it, an
+// in-place library's companions keep it, and a managed library's go where take says. A
+// sidecar in left is no companion, so it keeps its folder.
+func folderPrune(a *Action, left map[string]bool, take func() (dispose, undo func(string) error)) fsx.PruneOptions {
+	opts := organize.PruneOptions(a.Root, nil)
+	companion := opts.Companion
+	opts.Companion = func(p string) bool { return !left[p] && companion(p) }
+	if !a.InPlace {
+		opts.Dispose, opts.Undo = take()
+	}
+	return opts
 }
 
 // foldersDir names the trash's store of folder companions, beside the entries. A run keeps
@@ -488,8 +595,9 @@ const foldersDir = "folders"
 // a folder. A managed library's companions go into the folder store under the key of that
 // file's entry, or in a bypass mode are held there until their folder is gone and then
 // deleted, so a folder that stays after all gets them back. An in-place library's
-// companions are the user's and keep their folder.
-func (s *Service) prune(emptied map[string]*Action, mode model.DeleteMode) int {
+// companions are the user's and keep their folder, and so does a sidecar in left. What
+// went is recorded on rep.
+func (s *Service) prune(rep *Report, emptied map[string]*Action, mode model.DeleteMode, left map[string]bool) {
 	var held []string
 	defer func() {
 		for _, h := range held {
@@ -498,23 +606,21 @@ func (s *Service) prune(emptied map[string]*Action, mode model.DeleteMode) int {
 			_ = os.Remove(pathx.Long(filepath.Dir(filepath.Dir(h))))
 		}
 	}()
-	return fsx.PruneAll(slices.Sorted(maps.Keys(emptied)), func(dir string) fsx.PruneOptions {
+	pruned := fsx.PruneAll(slices.Sorted(maps.Keys(emptied)), func(dir string) fsx.PruneOptions {
 		a := emptied[dir]
-		opts := organize.PruneOptions(a.Root, nil)
-		if a.InPlace {
-			return opts
-		}
-		key := filepath.Base(filepath.Dir(a.TrashDst))
-		if mode.BypassesTrash() {
-			key = "pruning-" + model.NewPID().String()
-		}
-		store := filepath.Join(a.Root, model.TrashDirName, foldersDir, key)
-		if mode.BypassesTrash() {
-			held = append(held, store)
-		}
-		opts.Dispose, opts.Undo = moveUnder(a.Root, store)
-		return opts
+		return folderPrune(a, left, func() (func(string) error, func(string) error) {
+			key := filepath.Base(filepath.Dir(a.TrashDst))
+			if mode.BypassesTrash() {
+				key = "pruning-" + model.NewPID().String()
+			}
+			store := filepath.Join(a.Root, model.TrashDirName, foldersDir, key)
+			if mode.BypassesTrash() {
+				held = append(held, store)
+			}
+			return moveUnder(a.Root, store)
+		})
 	}, func(dir string, err error) { s.log.Warn("pruning an emptied folder", "dir", dir, "err", err) })
+	rep.Pruned, rep.DirsPruned = prunedFolders(pruned), len(pruned)
 }
 
 // moveUnder returns a Dispose that moves a companion under dir at its path below root,
@@ -541,43 +647,69 @@ func moveUnder(root, dir string) (dispose, undo func(string) error) {
 	return dispose, undo
 }
 
-// apply performs one deletion. For the trash mode it moves the file into the
-// trash and then records the journal row; if the catalog write fails after the
-// move, the file is moved back so disk and catalog stay consistent. For a bypass
-// mode it removes the file and then detaches it. It returns the alternates promoted in
-// the file's place.
-func (s *Service) apply(ctx context.Context, a *Action, mode model.DeleteMode, reason string, sib *organize.Siblings) (int64, []model.PromotedFile, error) {
+// apply performs one deletion. A failure is an applyError saying where it left the file.
+// Once the disk has changed, the catalog write runs on whatever the run's context does,
+// since a cancel there would strand the file.
+//
+// For the trash mode the move is recorded first (PlanTrash), so a crash between the move
+// and the journal row leaves a pending row the next open settles. A move that failed
+// leaving a copy in the trash beside the file keeps the row too, for that open to settle
+// the pair. When the catalog write fails after the move, the file is moved back and the
+// pending row dropped; when the move back fails too, the row stays as the file's only
+// record. For a bypass mode it removes the file and then detaches it. It returns the
+// alternates promoted in the file's place.
+func (s *Service) apply(ctx context.Context, a *Action, plan *Plan, sib *organize.Siblings) (int64, []model.PromotedFile, error) {
 	size := onDiskSize(a.Src)
-	if mode.BypassesTrash() {
+	settle := context.WithoutCancel(ctx)
+	if plan.Mode.BypassesTrash() {
 		if err := os.Remove(pathx.Long(a.Src)); err != nil && !os.IsNotExist(err) {
-			return 0, nil, waxerr.Wrap(waxerr.CodeIO, "trash.delete", err)
+			return 0, nil, &applyError{disk: DiskInPlace, err: waxerr.Wrap(waxerr.CodeIO, "trash.delete", err)}
 		}
-		res, err := s.store.DetachFile(ctx, a.FilePID)
+		res, err := s.store.DetachFile(settle, a.FilePID)
 		if err != nil {
-			return size, nil, err
+			return size, nil, &applyError{disk: DiskRemoved, err: err}
 		}
-		s.sidecars(a.Src, "", sib)
 		return size, res.Promoted, nil
 	}
 
-	// fsx.Move creates the unique trash sub-directory and is long-path-safe.
-	if err := fsx.Move(a.Src, a.TrashDst); err != nil {
-		return 0, nil, waxerr.Wrap(waxerr.CodeIO, "trash.move", err)
+	pid := model.NewPID()
+	if err := s.store.PlanTrash(ctx, model.TrashPending{PID: pid, FilePID: a.FilePID, Reason: plan.reason(),
+		TrashPath: []byte(a.TrashDst), TrashDisplay: a.TrashDst, JobPID: plan.JobPID}); err != nil {
+		return 0, nil, &applyError{disk: DiskInPlace, err: err}
 	}
-	res, err := s.store.TrashFile(ctx, model.TrashFileInput{
-		FilePID: a.FilePID, Reason: reason,
+	// fsx.Move creates the unique trash sub-directory and is long-path-safe.
+	if err := s.move(a.Src, a.TrashDst); err != nil {
+		if errors.Is(err, fsx.ErrCopyLeft) {
+			return 0, nil, &applyError{disk: DiskInPlace, trashPath: a.TrashDst, err: waxerr.Wrap(waxerr.CodeIO, "trash.move", err)}
+		}
+		s.abort(settle, pid, a.TrashDst)
+		return 0, nil, &applyError{disk: DiskInPlace, err: waxerr.Wrap(waxerr.CodeIO, "trash.move", err)}
+	}
+	res, err := s.store.TrashFile(settle, model.TrashFileInput{
+		PID: pid, FilePID: a.FilePID, Reason: plan.reason(),
 		TrashPath: []byte(a.TrashDst), TrashDisplay: a.TrashDst,
 	})
 	if err != nil {
-		// Put the file back so a failed catalog write does not strand it in the trash.
 		if back := fsx.Move(a.TrashDst, a.Src); back != nil {
 			s.log.Error("trashed file stranded: catalog write and rollback both failed",
 				"file", a.Src, "trash", a.TrashDst, "err", back)
+			return 0, nil, &applyError{disk: DiskStranded, trashPath: a.TrashDst, err: err}
 		}
-		return 0, nil, err
+		s.abort(settle, pid, a.TrashDst)
+		return 0, nil, &applyError{disk: DiskInPlace, err: err}
 	}
-	s.sidecars(a.Src, a.TrashDst, sib)
 	return size, res.Promoted, nil
+}
+
+// abort drops the pending row of a trash move that did not happen, and the entry folder
+// made for it (and the trash folder, when that leaves it empty).
+func (s *Service) abort(ctx context.Context, pid model.PID, trashDst string) {
+	if err := s.store.AbortTrash(ctx, pid); err != nil {
+		s.log.Warn("dropping the record of a trash move that did not happen", "trash", trashDst, "err", err)
+	}
+	entry := filepath.Dir(trashDst)
+	_ = os.Remove(pathx.Long(entry))
+	_ = os.Remove(pathx.Long(filepath.Dir(entry)))
 }
 
 // Sidecars lists, for each action, the file's own sidecars its deletion takes, replaying
@@ -601,29 +733,31 @@ func (p *Plan) Sidecars() [][]string {
 	return out
 }
 
-// sidecars takes a removed file's own sidecars with it: into its trash entry beside it,
-// or deleted when trashDst is empty. One another file of its name still uses stays, and a
-// failure leaves one where it was.
-func (s *Service) sidecars(src, trashDst string, sib *organize.Siblings) {
-	sib.Left(src)
-	dst := trashDst
-	if dst == "" {
-		dst = src
+// sidecars takes a removed file's own sidecars with it: into its trash entry beside it, or
+// deleted in a bypass mode. One another file of its name still uses stays, and one the run
+// could not take stays where it was, as a failure.
+func (s *Service) sidecars(a *Action, mode model.DeleteMode, sib *organize.Siblings) []Failure {
+	sib.Left(a.Src)
+	dst := a.TrashDst
+	if mode.BypassesTrash() {
+		dst = a.Src
 	}
-	for _, m := range organize.SidecarMoves(src, dst, sib) {
+	var failed []Failure
+	for _, m := range organize.SidecarMoves(a.Src, dst, sib) {
 		if m.Shared {
 			continue
 		}
 		var err error
-		if trashDst == "" {
+		if mode.BypassesTrash() {
 			err = os.Remove(pathx.Long(m.Src))
 		} else {
 			err = fsx.Move(m.Src, m.Dst)
 		}
 		if err != nil {
-			s.log.Warn("sidecar left in place", "file", m.Src, "err", err)
+			failed = append(failed, Failure{FilePID: a.FilePID, Src: m.Src, Disk: DiskInPlace, Err: err.Error()})
 		}
 	}
+	return failed
 }
 
 // Restore ensures a trashed file is back at its original path, with its sidecars and its

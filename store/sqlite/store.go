@@ -308,6 +308,12 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 	} else if n > 0 {
 		log.Info("recovered interrupted organize moves on open", "count", n)
 	}
+	if n, err := s.recoverTrash(ctx); err != nil {
+		_ = s.Close()
+		return nil, err
+	} else if n > 0 {
+		log.Info("recovered interrupted trash moves on open", "count", n)
+	}
 	s.settleOnOpen(ctx, "open")
 
 	// Seed the default playback user so single-user setups need no configuration.
@@ -498,6 +504,12 @@ func (s *Store) Reopen(ctx context.Context) (_ ReopenResult, err error) {
 		return ReopenResult{}, err
 	} else if n > 0 {
 		s.log.Info("recovered interrupted organize moves on reopen", "count", n)
+	}
+	if n, err := s.recoverTrash(ctx); err != nil {
+		_ = s.teardown(false)
+		return ReopenResult{}, err
+	} else if n > 0 {
+		s.log.Info("recovered interrupted trash moves on reopen", "count", n)
 	}
 	s.settleOnOpen(ctx, "reopen")
 	if err := s.ensureDefaultUser(ctx); err != nil {
@@ -707,18 +719,18 @@ func commonPragmas(opt OpenOptions) []string {
 // does; nothing but this connection writes that file.
 func rwDSN(opt OpenOptions) string {
 	p := append([]string{pragma("journal_mode", "WAL"), pragma("synchronous", "NORMAL")}, commonPragmas(opt)...)
-	return "file:" + opt.Path + "?_txlock=immediate&" + strings.Join(p, "&")
+	return FileURI(opt.Path) + "?_txlock=immediate&" + strings.Join(p, "&")
 }
 
 // readDSN is the DSN for the read pool against a writable DB file (same process
 // as the writer). It does not set journal_mode (inherited from the file header).
 func readDSN(opt OpenOptions) string {
-	return "file:" + opt.Path + "?" + strings.Join(commonPragmas(opt), "&")
+	return FileURI(opt.Path) + "?" + strings.Join(commonPragmas(opt), "&")
 }
 
 // roDSN is the DSN for a read-only consumer process.
 func roDSN(opt OpenOptions) string {
-	return "file:" + opt.Path + "?mode=ro&" + strings.Join(commonPragmas(opt), "&")
+	return FileURI(opt.Path) + "?mode=ro&" + strings.Join(commonPragmas(opt), "&")
 }
 
 func pragma(name, value string) string { return "_pragma=" + name + "(" + value + ")" }

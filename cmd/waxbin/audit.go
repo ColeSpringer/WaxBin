@@ -110,15 +110,24 @@ func printAuditText(cmd *cobra.Command, rep *audit.Report) {
 }
 
 type auditFindingView struct {
-	Check     string   `json:"check"`
-	Severity  string   `json:"severity"`
-	Message   string   `json:"message"`
-	Entities  []string `json:"entities,omitempty"`
-	Path      string   `json:"path,omitempty"`
-	FilePID   string   `json:"filePid,omitempty"`
-	HeaderMS  *int64   `json:"headerMs,omitempty"`
-	DecodedMS *int64   `json:"decodedMs,omitempty"`
-	MergeType string   `json:"mergeType,omitempty"`
+	Check     string            `json:"check"`
+	Severity  string            `json:"severity"`
+	Message   string            `json:"message"`
+	Entities  []string          `json:"entities,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	FilePID   string            `json:"filePid,omitempty"`
+	HeaderMS  *int64            `json:"headerMs,omitempty"`
+	DecodedMS *int64            `json:"decodedMs,omitempty"`
+	MergeType string            `json:"mergeType,omitempty"`
+	Reason    string            `json:"reason,omitempty"`
+	Members   []auditMemberView `json:"members,omitempty"`
+	More      int               `json:"more,omitempty"`
+}
+
+type auditMemberView struct {
+	PID        string `json:"pid"`
+	Name       string `json:"name"`
+	TrackCount int    `json:"trackCount"`
 }
 
 type auditView struct {
@@ -144,6 +153,11 @@ func toAuditView(rep *audit.Report) auditView {
 			Path:      f.Path,
 			FilePID:   string(f.FilePID),
 			MergeType: string(f.MergeType),
+			Reason:    f.Reason,
+			More:      f.More,
+		}
+		for _, m := range f.Members {
+			v.Members = append(v.Members, auditMemberView{string(m.PID), m.Name, m.TrackCount})
 		}
 		// A mismatch always has a header length, and its decoded length may be zero.
 		if f.HeaderMS > 0 {

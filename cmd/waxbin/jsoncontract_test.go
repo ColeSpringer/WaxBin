@@ -367,10 +367,10 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 				c.args[i] = libraryAt(t, fx, added)
 			case "FOLD":
 				c.args = append([]string(nil), c.args...)
-				c.args[i] = firstListed(t, fx, "key", "entity", "folds", "artist")
+				c.args[i] = firstListedIn(t, fx, "folds", "key", "entity", "folds", "artist")
 			case "ORGJOB":
 				c.args = append([]string(nil), c.args...)
-				c.args[i] = firstListed(t, fx, "jobPid", "organize", "history")
+				c.args[i] = firstListedIn(t, fx, "batches", "jobPid", "organize", "history")
 			}
 		}
 		stdout, stderr, err := runJSONCommand(fx, c.args, c.bare)
@@ -421,24 +421,35 @@ func libraryAt(t *testing.T, fx *jsonFixture, root string) string {
 	return ""
 }
 
-// firstListed runs a listing command and returns field of its first row, or a pid no row
-// holds when it lists none, for a case that wants the refusal.
-func firstListed(t *testing.T, fx *jsonFixture, field string, args ...string) string {
+// firstListedIn runs a listing command and returns field of its first row, the rows being
+// data itself or, for a page, data's list field; or a pid no row holds when it lists none,
+// for a case that wants the refusal.
+func firstListedIn(t *testing.T, fx *jsonFixture, list, field string, args ...string) string {
 	t.Helper()
 	stdout, _, err := runJSONCommand(fx, args, false)
 	if err != nil {
 		t.Fatalf("%s: %v", strings.Join(args, " "), err)
 	}
 	var env struct {
-		Data []map[string]any `json:"data"`
+		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+	var rows []map[string]any
+	err = json.Unmarshal([]byte(stdout), &env)
+	if err == nil && list == "" {
+		err = json.Unmarshal(env.Data, &rows)
+	} else if err == nil {
+		var page map[string]json.RawMessage
+		if err = json.Unmarshal(env.Data, &page); err == nil {
+			err = json.Unmarshal(page[list], &rows)
+		}
+	}
+	if err != nil {
 		t.Fatalf("%s printed %q: %v", strings.Join(args, " "), stdout, err)
 	}
-	if len(env.Data) == 0 {
+	if len(rows) == 0 {
 		return string(model.NewPID())
 	}
-	v, _ := env.Data[0][field].(string)
+	v, _ := rows[0][field].(string)
 	return v
 }
 

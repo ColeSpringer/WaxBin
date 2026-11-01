@@ -568,7 +568,7 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 				"UPDATE release_group SET title=?, match_key=? WHERE id=?", rgTitle, newKey, rgID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := renameFoldsTx(ctx, tx, model.MergeReleaseGroup, curKey, newKey, model.PID(pid), fold); err != nil {
+			if err := renameFoldsTx(ctx, tx, model.MergeReleaseGroup, curKey, newKey, model.PID(pid), fold, foldSpelling{name: curTitle}); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeReleaseGroup, rgID); err != nil {
@@ -947,7 +947,7 @@ func renameArtistTx(ctx context.Context, tx *sql.Tx, id int64, curName, curKey, 
 		"UPDATE artist SET name=?, name_key=?, match_key=? WHERE id=?", n, model.SortKey(n), newKey, id); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if err := renameFoldsTx(ctx, tx, model.MergeArtist, curKey, newKey, model.PID(pid), fold); err != nil {
+	if err := renameFoldsTx(ctx, tx, model.MergeArtist, curKey, newKey, model.PID(pid), fold, foldSpelling{name: curName}); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return finishArtistRenameTx(ctx, tx, id, pid, true, affected, op)
@@ -1111,7 +1111,7 @@ func renameSeriesTx(ctx context.Context, tx *sql.Tx, id int64, n string, fold bo
 			n, model.SortKey(n), newKey, id); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := renameFoldsTx(ctx, tx, model.MergeSeries, curKey, newKey, model.PID(pid), fold); err != nil {
+		if err := renameFoldsTx(ctx, tx, model.MergeSeries, curKey, newKey, model.PID(pid), fold, foldSpelling{name: curName}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -1302,12 +1302,18 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 			if titleEdited {
 				title = newTitle
 			}
+			left := foldSpelling{name: curTitle}
+			if fold {
+				if left, err = albumFoldFolderTx(ctx, tx, albumID, left); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
 			if _, err := tx.ExecContext(ctx,
 				"UPDATE album SET match_key=?, title=?, title_key=? WHERE id=?",
 				newAlbumKey, title, model.SortKey(title), albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := renameFoldsTx(ctx, tx, model.MergeAlbum, curKey, newAlbumKey, model.PID(curPID), fold); err != nil {
+			if err := renameFoldsTx(ctx, tx, model.MergeAlbum, curKey, newAlbumKey, model.PID(curPID), fold, left); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, albumID); err != nil {

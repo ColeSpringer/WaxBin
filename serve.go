@@ -891,7 +891,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			pid, err := l.StartScan(ctx, ScanRequest{
 				LibraryPID: model.PID(p.LibraryPID), SubPath: p.SubPath, Force: p.Force,
 				AdoptStampedPIDs: p.AdoptStampedPIDs, ForceReconcile: p.ForceReconcile,
-				IgnoreLocks: p.IgnoreLocks,
+				IgnoreLocks: p.IgnoreLocks, ReResolve: p.ReResolve,
 			})
 			if err != nil {
 				return nil, err
@@ -933,6 +933,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			pid, err := l.RunOrganize(ctx, q, OrganizeOptions{ProfileName: p.Profile})
+			if err != nil {
+				return nil, err
+			}
+			return proxy.JobStartResult{JobPID: string(pid)}, nil
+		},
+		proxy.MethodRunUnfold: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.UnfoldParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			pid, err := l.StartUnfold(ctx, model.MergeEntity(p.EntityType), p.Keys, UnfoldOptions{ReResolve: p.ReResolve})
 			if err != nil {
 				return nil, err
 			}

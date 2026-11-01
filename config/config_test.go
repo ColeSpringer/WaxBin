@@ -1,11 +1,13 @@
 package config_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -175,9 +177,24 @@ func TestCheckFolder(t *testing.T) {
 		{filepath.Join(dir, "later"), false, waxerr.CodeInvalid}, {filepath.Join(dir, "later"), true, ""},
 		{filepath.Join(file, "sub"), false, waxerr.CodeInvalid}, {filepath.Join(file, "sub"), true, ""},
 	} {
-		err := config.CheckFolder(c.path, c.absent)
+		err := config.CheckFolder(context.Background(), c.path, c.absent)
 		if (c.want == "" && err != nil) || (c.want != "" && !waxerr.Is(err, c.want)) {
 			t.Errorf("CheckFolder(%s, absent %v) = %v, want %q", c.path, c.absent, err, c.want)
+		}
+	}
+	// A stat that did not answer in time passes only as an absent root, and a canceled
+	// check is canceled either way.
+	for _, c := range []struct {
+		reach  error
+		absent bool
+		want   waxerr.Code
+	}{
+		{fsx.ErrUnverified, true, ""}, {fsx.ErrUnverified, false, waxerr.CodeIO},
+		{context.Canceled, true, waxerr.CodeCanceled}, {context.Canceled, false, waxerr.CodeCanceled},
+	} {
+		err := config.FolderVerdict(dir, c.absent, c.reach)
+		if (c.want == "" && err != nil) || (c.want != "" && !waxerr.Is(err, c.want)) {
+			t.Errorf("FolderVerdict(%v, absent %v) = %v, want %q", c.reach, c.absent, err, c.want)
 		}
 	}
 }

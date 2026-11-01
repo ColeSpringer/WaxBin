@@ -66,6 +66,11 @@ type PutScannedTrackInput struct {
 	// of recomputing their rollups and album years in the put, which a scan of many files
 	// would otherwise pay once per file for every member an entity has.
 	DeferRollups bool
+	// ReResolve resolves the item's artists, album, release group and genres from the put's
+	// tags even when the file's bytes and the stored metadata are unchanged, which a put
+	// otherwise skips; locked fields still hold. An unfold uses it to file what a fold kept
+	// under the names the files state.
+	ReResolve bool
 	// Job names the kind change the put reads its file for, under which the store records
 	// each item the put folds away and makes (item_lineage), so a change a crash or a cancel
 	// cuts off can still say what it did; empty for any other put, which records none.
@@ -145,8 +150,10 @@ type PutScannedBookInput struct {
 	// holds keeps the one stored for it: the name organize or an import gave the file has
 	// replaced the one that stated it.
 	DiscUnstated, PlaceUnstated bool
-	// DeferRollups and Job are PutScannedTrackInput's.
+	// DeferRollups, ReResolve and Job are PutScannedTrackInput's; ReResolve resolves the
+	// book's author, narrators, series and genres.
 	DeferRollups bool
+	ReResolve    bool
 	Job          PID
 }
 

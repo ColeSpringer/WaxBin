@@ -351,3 +351,55 @@ func TestParkRecordsItsPathBelowTheActionsRoot(t *testing.T) {
 		t.Fatalf("parked rel_path = %q, want %q", f.RelPath, want)
 	}
 }
+
+// cancelingCatalog cancels the run once a move is planned, as a cancel arriving while the
+// file moves would.
+type cancelingCatalog struct {
+	*sqlite.Store
+	cancel context.CancelFunc
+}
+
+func (c cancelingCatalog) PlanMove(ctx context.Context, in model.RelocateInput) (model.PID, error) {
+	jpid, err := c.Store.PlanMove(ctx, in)
+	c.cancel()
+	return jpid, err
+}
+
+// TestACancelAfterTheMoveStillCommitsIt: a move a cancel catches on disk is still
+// committed, so the catalog follows the file instead of leaving a planned row to recovery.
+func TestACancelAfterTheMoveStillCommitsIt(t *testing.T) {
+	t.Parallel()
+	st, err := sqlite.Open(context.Background(), sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	root := t.TempDir()
+	src, dst := filepath.Join(root, "Rip", "Song.mp3"), filepath.Join(root, "Album", "01 - Song.mp3")
+	mustMkdir(t, filepath.Dir(src))
+	mustWrite(t, src)
+	lib, err := st.EnsureLibrary(context.Background(), &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("ensure library: %v", err)
+	}
+	res, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
+		LibraryID: lib.ID,
+		File: model.File{Path: []byte(src), DisplayPath: src, RelPath: []byte(filepath.Join("Rip", "Song.mp3")),
+			Kind: model.FileAudio, Size: 1, MTimeNS: 1, ContentHash: "c", EssenceHash: "e", ScanState: model.ScanIndexed},
+		Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "Song", IdentityKey: "essence:e"},
+		Track: model.Track{Artist: "A", AlbumArtist: "A", Album: "Album", TrackNo: 1},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	plan := &Plan{Actions: []Action{{FilePID: res.FilePID, ItemPID: res.ItemPID, Src: src, SrcBytes: []byte(src), Dst: dst, Root: root}}}
+	rep, _ := New(cancelingCatalog{Store: st, cancel: cancel}, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).Execute(ctx, plan, "", nil)
+	if rep == nil || rep.Moved != 1 || rep.Errored != 0 {
+		t.Fatalf("report = %+v, want the move made and committed", rep)
+	}
+	if f, err := st.FileByPath(context.Background(), []byte(dst)); err != nil || f.PID != res.FilePID {
+		t.Fatalf("file at the destination = %+v (err %v), want the catalog to follow the move", f, err)
+	}
+}

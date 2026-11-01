@@ -8,10 +8,14 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
@@ -364,8 +368,105 @@ type BackupOptions struct {
 	RedactSecrets bool
 }
 
-// TrimBackupFile strips what opts leaves out from a backup copy, then VACUUMs once so
-// the removed bytes do not linger in free pages. A table the backup's schema lacks is
+// WriteBackup writes a backup to dest through dest+".part": the part file is made
+// owner-only before copyTo writes the catalog into it (a store's BackupTo, VACUUM INTO,
+// which takes an empty file), TrimBackupFile strips what opts leaves out, the part file and
+// then its folder are synced (VACUUM INTO never syncs what it writes), a rename publishes
+// it, and the folder is synced again (as far as it can be: the backup is complete by then).
+// So a backup is at dest whole or not at all, and a failure at any step before the rename
+// removes the part file, which may hold secrets half written. A dest
+// holding anything is refused (an empty file, a temp name made for the backup, takes it,
+// as VACUUM INTO allows); a part file a crashed backup left is replaced.
+func WriteBackup(ctx context.Context, dest string, opts BackupOptions, copyTo func(ctx context.Context, path string) error) (err error) {
+	const op = "port.WriteBackup"
+	if strings.TrimSpace(dest) == "" {
+		return waxerr.New(waxerr.CodeInvalid, op, "empty backup destination")
+	}
+	if err := destinationFree(op, dest); err != nil {
+		return err
+	}
+	part := dest + ".part"
+	removeDB(part)
+	defer func() {
+		if err != nil {
+			removeDB(part)
+		}
+	}()
+	f, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := f.Close(); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := copyTo(ctx, part); err != nil {
+		return err
+	}
+	if err := TrimBackupFile(ctx, part, opts); err != nil {
+		return err
+	}
+	dir := filepath.Dir(dest)
+	for _, p := range []string{part, dir} {
+		if err := syncPath(p); err != nil {
+			return waxerr.Wrapf(waxerr.CodeIO, op, err, "syncing %s", p)
+		}
+	}
+	if err := destinationFree(op, dest); err != nil {
+		return err
+	}
+	if err := os.Rename(part, dest); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	// Published whole: a failure to sync the folder now only risks the rename to a power
+	// cut, so it does not report a backup that is there as failed.
+	_ = syncPath(dir)
+	return nil
+}
+
+// destinationFree refuses a backup destination that holds anything but an empty file.
+func destinationFree(op, dest string) error {
+	if fi, err := os.Lstat(dest); err == nil && !(fi.Mode().IsRegular() && fi.Size() == 0) {
+		return waxerr.New(waxerr.CodeConflict, op, "backup destination already exists: "+dest)
+	}
+	return nil
+}
+
+// syncPath flushes a file, or a folder's entries, to disk. A file is opened for writing,
+// which Windows' flush requires of its handle; Windows cannot sync a folder handle, and its
+// folder entries need none.
+var syncPath = func(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() && runtime.GOOS == "windows" {
+		return nil
+	}
+	flag := os.O_RDONLY
+	if !fi.IsDir() {
+		flag = os.O_RDWR
+	}
+	f, err := os.OpenFile(path, flag, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// removeDB removes a database file and what SQLite keeps beside it.
+func removeDB(path string) {
+	for _, p := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
+		_ = os.Remove(p)
+	}
+}
+
+// TrimBackupFile strips what opts leaves out from a backup copy. Secrets go with
+// secure_delete on, which zeroes the space they took, so no VACUUM has to rewrite the copy
+// for their bytes not to linger in free pages. A table the backup's schema lacks is
 // skipped, and a copy with nothing to strip is left alone. A copy the trim fails on is
 // removed, since it may still hold what it was to lose.
 func TrimBackupFile(ctx context.Context, path string, opts BackupOptions) (err error) {
@@ -377,19 +478,19 @@ func TrimBackupFile(ctx context.Context, path string, opts BackupOptions) (err e
 	if len(tables) == 0 {
 		return nil
 	}
-	db, err := sql.Open("sqlite", "file:"+path)
+	// The pragma rides the DSN so every connection of the pool takes it.
+	db, err := sql.Open("sqlite", sqlite.FileURI(path)+"?_pragma=secure_delete(1)")
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer func() {
-		_ = db.Close()
+		if cerr := db.Close(); err == nil && cerr != nil {
+			err = waxerr.Wrap(waxerr.CodeIO, op, cerr)
+		}
 		if err != nil {
-			for _, p := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
-				_ = os.Remove(p)
-			}
+			removeDB(path)
 		}
 	}()
-	trimmed := false
 	for _, table := range tables {
 		if _, err := db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			if strings.Contains(err.Error(), "no such table") {
@@ -397,15 +498,63 @@ func TrimBackupFile(ctx context.Context, path string, opts BackupOptions) (err e
 			}
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		trimmed = true
-	}
-	if !trimmed {
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, "VACUUM"); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return nil
+}
+
+// BaselineStamp is the stamp this build writes into a catalog it creates (its header's
+// user_version), the fingerprint of its schema baseline. A catalog or backup holding
+// another is one this build refuses to open or restore.
+func BaselineStamp() (int32, error) { return sqlite.BaselineFingerprint() }
+
+// ReadStamp reads the baseline stamp from an SQLite database's header, without opening it:
+// a CodeInvalid refusal for anything that is not one. The header is reliable for a backup
+// or a cleanly closed catalog; a live catalog copied without its WAL can hold a stale one.
+func ReadStamp(r io.ReaderAt) (int32, error) {
+	const op = "port.ReadStamp"
+	var h [100]byte
+	if n, err := r.ReadAt(h[:], 0); n < len(h) {
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return 0, waxerr.New(waxerr.CodeInvalid, op, "not an SQLite database: too short for its header")
+	}
+	if string(h[:16]) != "SQLite format 3\x00" {
+		return 0, waxerr.New(waxerr.CodeInvalid, op, "not an SQLite database")
+	}
+	return int32(binary.BigEndian.Uint32(h[60:64])), nil
+}
+
+// CheckStamp refuses a database whose header holds another baseline's stamp, in the words
+// ValidateBackup uses; r names the file in them when it is one (an *os.File).
+func CheckStamp(r io.ReaderAt) error {
+	const op = "port.CheckStamp"
+	got, err := ReadStamp(r)
+	if err != nil {
+		return err
+	}
+	want, err := BaselineStamp()
+	if err != nil {
+		return err
+	}
+	if got != want {
+		name := "<file>"
+		if f, ok := r.(interface{ Name() string }); ok {
+			name = f.Name()
+		}
+		return staleBaselineError(op, name, got, want)
+	}
+	return nil
+}
+
+// staleBaselineError is the refusal of a backup another baseline stamped, which
+// ValidateBackup and CheckStamp share so their words cannot drift.
+func staleBaselineError(op, path string, got, want int32) error {
+	return waxerr.New(waxerr.CodeUnsupported, op, fmt.Sprintf(
+		"backup was built from a different schema baseline (backup %08x, this build %08x); "+
+			"restoring it would leave a catalog this build refuses to open. Read what it still "+
+			"holds with `waxbin --db %s --read-only --allow-stale ...` instead",
+		uint32(got), uint32(want), path))
 }
 
 // ValidateBackup opens a backup read-only and returns its recorded schema
@@ -421,7 +570,7 @@ func ValidateBackup(ctx context.Context, path string) (int, error) {
 	if _, err := os.Stat(path); err != nil {
 		return 0, waxerr.Wrapf(waxerr.CodeNotFound, op, err, "opening backup %s", path)
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	db, err := sql.Open("sqlite", sqlite.FileURI(path)+"?mode=ro")
 	if err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -442,11 +591,7 @@ func ValidateBackup(ctx context.Context, path string) (int, error) {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if int32(stamp) != want {
-		return 0, waxerr.New(waxerr.CodeUnsupported, op, fmt.Sprintf(
-			"backup was built from a different schema baseline (backup %08x, this build %08x); "+
-				"restoring it would leave a catalog this build refuses to open. Read what it still "+
-				"holds with `waxbin --db %s --read-only --allow-stale ...` instead",
-			uint32(int32(stamp)), uint32(want), path))
+		return 0, staleBaselineError(op, path, int32(stamp), want)
 	}
 	return v, nil
 }
@@ -486,7 +631,7 @@ func ReadCensus(ctx context.Context, path string) (*Census, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, waxerr.Wrapf(waxerr.CodeNotFound, op, err, "opening catalog %s", path)
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	db, err := sql.Open("sqlite", sqlite.FileURI(path)+"?mode=ro")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

@@ -367,15 +367,29 @@ func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRo
 // relocateTrashTx moves the trash journal paths of the rows where selects (with args) from
 // under oldRoot to the same places under newRoot, the raw paths by the raw root and the
 // display paths by the display root: a library's rows for a root move, the rows below a
-// folder for a respell. A path outside the old root stays as it is.
+// folder for a respell. A path outside the old root stays as it is. It moves the journal
+// and the moves still pending alike (trashTables).
 func relocateTrashTx(ctx context.Context, tx *sql.Tx, where string, args []any, oldRoot, oldDisplay, newRoot string) error {
+	for _, table := range trashTables {
+		if err := relocateTrashTableTx(ctx, tx, table, where, args, oldRoot, oldDisplay, newRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// trashTables are the tables holding a trashed file's original and trash paths: the
+// journal, and the moves planned and not yet journaled (PlanTrash).
+var trashTables = []string{"trash", "trash_pending"}
+
+func relocateTrashTableTx(ctx context.Context, tx *sql.Tx, table, where string, args []any, oldRoot, oldDisplay, newRoot string) error {
 	type entry struct {
 		id                    int64
 		orig, trashed         []byte
 		origShown, trashShown string
 	}
 	rows, err := tx.QueryContext(ctx,
-		"SELECT id, orig_path, orig_display, trash_path, trash_display FROM trash WHERE "+where, args...)
+		"SELECT rowid, orig_path, orig_display, trash_path, trash_display FROM "+table+" WHERE "+where, args...)
 	if err != nil {
 		return err
 	}
@@ -399,7 +413,7 @@ func relocateTrashTx(ctx context.Context, tx *sql.Tx, where string, args []any, 
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE trash SET orig_path = ?, orig_display = ?, trash_path = ?, trash_display = ? WHERE id = ?",
+			"UPDATE "+table+" SET orig_path = ?, orig_display = ?, trash_path = ?, trash_display = ? WHERE rowid = ?",
 			[]byte(orig), origShown, []byte(trashed), trashShown, e.id); err != nil {
 			return err
 		}

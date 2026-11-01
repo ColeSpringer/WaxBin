@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/port"
 )
 
 // TestDoctorPrintsEnrichmentPhases: the phase line sits under the enrichment line, so an
@@ -111,5 +113,25 @@ func TestDoctorPrintsLyricsCoverage(t *testing.T) {
 	}
 	if want := "\nlyrics:         1 of 2 tracks (1 looked up, none found)\n"; !strings.Contains(stdout.String(), want) {
 		t.Errorf("doctor output lacks %q:\n%s", strings.TrimSpace(want), stdout.String())
+	}
+}
+
+// TestDoctorPrintsTheBaselineStamp: doctor names the schema stamp this build writes, the
+// one port.ReadStamp reads off a backup, in text and JSON.
+func TestDoctorPrintsTheBaselineStamp(t *testing.T) {
+	t.Parallel()
+	db, root, _ := creditCLIFixture(t)
+	stamp, err := port.BaselineStamp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%08x", uint32(stamp))
+	text, err := runCLIText(t, db, root, "doctor")
+	if err != nil || !strings.Contains(text, "baseline:       "+want) {
+		t.Fatalf("doctor printed %q (err %v), want the baseline stamp %s", text, err, want)
+	}
+	out, err := runCLIJSON(t, db, root, "doctor")
+	if err != nil || !strings.Contains(out, `"BaselineStamp": "`+want+`"`) {
+		t.Fatalf("doctor JSON = %s (err %v), want BaselineStamp %s", out, err, want)
 	}
 }

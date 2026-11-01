@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -11,6 +12,7 @@ import (
 	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
+	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -41,14 +43,14 @@ func TestServeProxiedMergeAndUnfold(t *testing.T) {
 	if err := c.UnfoldEntity(ctx, model.MergeArtist, []string{"beatles", "nobody"}); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("unfold with an unknown key = %v, want CodeNotFound", err)
 	}
-	if folds, err := lib.EntityFolds(ctx, model.MergeArtist); err != nil || len(folds) != 1 {
-		t.Fatalf("folds after a refused unfold = %+v (err %v), want the merge's still there", folds, err)
+	if page, err := lib.EntityFolds(ctx, model.MergeArtist, "", 0); err != nil || len(page.Folds) != 1 {
+		t.Fatalf("folds after a refused unfold = %+v (err %v), want the merge's still there", page, err)
 	}
 	if err := c.UnfoldEntity(ctx, model.MergeArtist, []string{"beatles"}); err != nil {
 		t.Fatalf("proxied unfold: %v", err)
 	}
-	if folds, err := lib.EntityFolds(ctx, model.MergeArtist); err != nil || len(folds) != 0 {
-		t.Errorf("folds after the unfold = %+v (err %v), want none", folds, err)
+	if page, err := lib.EntityFolds(ctx, model.MergeArtist, "", 0); err != nil || len(page.Folds) != 0 {
+		t.Errorf("folds after the unfold = %+v (err %v), want none", page, err)
 	}
 }
 
@@ -67,9 +69,10 @@ func TestServeProxiedRunOrganizeUndo(t *testing.T) {
 	if _, err := lib.Organize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	batches, err := lib.OrganizeHistory(ctx, 1)
+	page, err := lib.OrganizeHistory(ctx, "", 1)
+	batches := page.Batches
 	if err != nil || len(batches) != 1 {
-		t.Fatalf("history = %+v (err %v)", batches, err)
+		t.Fatalf("history = %+v (err %v)", page, err)
 	}
 	jobs, err := lib.Jobs(ctx, 10)
 	if err != nil {
@@ -98,5 +101,58 @@ func TestServeProxiedRunOrganizeUndo(t *testing.T) {
 	}
 	if !fileExists(src) {
 		t.Error("the file is not back")
+	}
+}
+
+// TestServeProxiedUnfoldJob: run_unfold forgets a fold and reads again the file it kept, as a
+// job in the server whose result is the report, and run_scan carries reResolve, which an
+// older server would drop.
+func TestServeProxiedUnfoldJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3WithAudio("One", "The Beatles", "One", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3WithAudio("Two", "Beatles", "Two", 1, testaudio.AudioWithSeed(2)))
+	lib := openServed(t, ctx, db, root, sock)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	c := dialWhenReady(t, sock)
+	survivor := artistPIDByName(t, ctx, db, "The Beatles")
+	merge := func() {
+		t.Helper()
+		if _, err := c.Merge(ctx, model.MergeArtist, survivor, []model.PID{artistPIDByName(t, ctx, db, "Beatles")}); err != nil {
+			t.Fatalf("proxied merge: %v", err)
+		}
+	}
+	two := itemPIDByTitle(t, ctx, lib, "Two")
+	merge()
+	job, err := c.RunUnfold(ctx, model.MergeArtist, []string{"beatles"}, true)
+	if err != nil {
+		t.Fatalf("run_unfold: %v", err)
+	}
+	var rep waxbin.UnfoldReport
+	if err := json.Unmarshal([]byte(waitForJobDone(t, ctx, lib, job).Result), &rep); err != nil || rep.Folds != 1 ||
+		len(rep.Reread) != 2 || !slices.Contains(rep.Reread, two) {
+		t.Fatalf("unfold job result %+v (err %v), want the fold forgotten and both items read again", rep, err)
+	}
+	if v, err := lib.Get(ctx, two); err != nil || v.ArtistPID == survivor {
+		t.Fatalf("Two after the proxied unfold = %+v (err %v), want it off the survivor", v, err)
+	}
+
+	// Merged again and unfolded alone, an unchanged file stays until a re-resolving scan.
+	merge()
+	if err := c.UnfoldEntity(ctx, model.MergeArtist, []string{"beatles"}); err != nil {
+		t.Fatal(err)
+	}
+	scanJob, err := c.RunScan(ctx, proxy.ScanParams{ReResolve: true})
+	if err != nil {
+		t.Fatalf("run_scan: %v", err)
+	}
+	waitForJobDone(t, ctx, lib, scanJob)
+	if v, err := lib.Get(ctx, two); err != nil || v.ArtistPID == survivor {
+		t.Fatalf("Two after a proxied re-resolving scan = %+v (err %v), want it off the survivor", v, err)
 	}
 }

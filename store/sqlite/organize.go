@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
@@ -24,8 +26,12 @@ import (
 //     with a warning instead, so a stale row never keeps the catalog from opening; the
 //     next scan reconciles it.
 //   - otherwise (source still present, or both gone): the move did not take
-//     effect, so mark rolled_back and leave the catalog's path authoritative.
+//     effect, so mark rolled_back and leave the catalog's path authoritative. A copy a
+//     move across filesystems left at the destination beside the source is removed
+//     first (dropMoveCopyTx).
 //
+// A move under a library root that does not answer (a drive not mounted, a check that
+// timed out) says nothing either way, so it stays planned for an open that finds the root.
 // It returns the number of rows recovered, for logging.
 func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 	const op = "store.recoverOrganize"
@@ -49,7 +55,11 @@ func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 		}
 		lister := fsx.NewLister()
 		present := func(root, path []byte) bool { return pathExists(path) && lister.Spelled(string(root), string(path)) }
+		roots := recoveryGate(s.log, "organize recovery: a library root does not answer; its interrupted moves wait for an open that finds it")
 		for _, p := range pending {
+			if p.root != nil && roots.Root(ctx, string(p.root)) != nil {
+				continue
+			}
 			committed := p.fileID.Valid && present(p.root, p.dst) && !present(p.root, p.src)
 			if committed {
 				held, err := pathHeldByAnotherTx(ctx, tx, p.dst, p.fileID.Int64)
@@ -61,20 +71,62 @@ func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 					committed = false
 				}
 			}
-			if committed {
+			switch {
+			case committed:
 				if err := commitMoveTx(ctx, tx, p.fileID.Int64, p.journalPID, model.RelocateInput{FilePID: model.PID(p.filePID.String),
 					NewPath: p.dst, NewDisplayPath: string(p.dst), NewRelPath: []byte(pathx.RelUnder(string(p.root), string(p.dst)))}); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-			} else if _, err := tx.ExecContext(ctx,
-				"UPDATE organize_journal SET state='rolled_back' WHERE pid=?", p.journalPID); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			case p.fileID.Valid && present(p.root, p.src) && present(p.root, p.dst):
+				dropped, err := s.dropMoveCopyTx(ctx, tx, p)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if !dropped {
+					continue
+				}
+				fallthrough
+			default:
+				if _, err := tx.ExecContext(ctx,
+					"UPDATE organize_journal SET state='rolled_back' WHERE pid=?", p.journalPID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 			n++
 		}
 		return nil
 	})
 	return n, err
+}
+
+// dropMoveCopyTx settles a planned move whose source and destination both stand. A move
+// across filesystems copies and then removes, so one cut off before its source went, or
+// unable to remove it, leaves a copy at the destination: a file there holding the
+// source's bytes, or the start of them, that no other file row holds and that is not the
+// source under a second name. That copy is removed. It reports whether the move can be
+// rolled back: false keeps the row planned for the next open, with a warning, when the
+// copy cannot be read or removed now.
+func (s *Store) dropMoveCopyTx(ctx context.Context, tx *sql.Tx, p pendingMove) (bool, error) {
+	held, err := pathHeldByAnotherTx(ctx, tx, p.dst, p.fileID.Int64)
+	if err != nil || held {
+		return err == nil, err
+	}
+	src, dst := string(p.src), string(p.dst)
+	a, errA := os.Stat(pathx.Long(src))
+	b, errB := os.Stat(pathx.Long(dst))
+	if errA != nil || errB != nil || os.SameFile(a, b) {
+		return true, nil
+	}
+	copied, err := copyOfStart(src, dst)
+	if err == nil && copied {
+		err = os.Remove(pathx.Long(dst))
+	}
+	if err != nil {
+		s.log.Warn("organize recovery: could not settle a copy an interrupted move left; it waits for the next open",
+			"src", src, "dst", dst, "err", err)
+		return false, nil
+	}
+	return true, nil
 }
 
 type pendingMove struct {
@@ -165,20 +217,58 @@ func (s *Store) OrganizeJobMoved(ctx context.Context, jobPID model.PID) (bool, e
 	return moved, nil
 }
 
-// OrganizeHistory lists the jobs the organize journal holds moves for, newest first, each
-// with its file moves counted by state; a non-positive limit lists them all.
-func (s *Store) OrganizeHistory(ctx context.Context, limit int) ([]model.OrganizeBatch, error) {
+// organizeRuns selects the organize and undo jobs whose journal holds a file move (one
+// that only carried companions moved nothing to list or undo), each with its file moves
+// counted by state. %s narrows the jobs and orders and limits them; organize_journal_job
+// serves both the narrowing and the counts.
+const organizeRuns = `SELECT j.pid, j.kind, j.state, j.started_at,
+		SUM(jo.kind = 'file' AND jo.state = 'committed'), SUM(jo.kind = 'file' AND jo.state = 'rolled_back'),
+		SUM(jo.kind = 'file' AND jo.state = 'planned')
+	FROM (SELECT pid, kind, state, started_at FROM job
+		WHERE kind IN ('organize', 'organize-undo')
+		  AND EXISTS (SELECT 1 FROM organize_journal f WHERE f.job_pid = job.pid AND f.kind = 'file') %s) j
+	JOIN organize_journal jo ON jo.job_pid = j.pid
+	GROUP BY j.pid ORDER BY j.pid DESC`
+
+// OrganizeHistory pages the organize and undo runs whose journal holds a file move,
+// newest started first (a job pid is a time-ordered ULID, so pid order is start order),
+// each with its file moves counted by state. after is the last job of the previous page,
+// empty for the first; a non-positive limit takes the default page size.
+func (s *Store) OrganizeHistory(ctx context.Context, after model.PID, limit int) (model.OrganizeBatchPage, error) {
 	const op = "store.OrganizeHistory"
-	q := `SELECT jo.job_pid, COALESCE(j.kind, ''), COALESCE(j.state, ''), COALESCE(j.started_at, MIN(jo.created_at)),
-			SUM(jo.kind = 'file' AND jo.state = 'committed'), SUM(jo.kind = 'file' AND jo.state = 'rolled_back'),
-			SUM(jo.kind = 'file' AND jo.state = 'planned')
-		FROM organize_journal jo LEFT JOIN job j ON j.pid = jo.job_pid
-		GROUP BY jo.job_pid HAVING SUM(jo.kind = 'file') > 0 ORDER BY MAX(jo.id) DESC`
-	var args []any
-	if limit > 0 {
-		q += " LIMIT ?"
-		args = append(args, limit)
+	if limit <= 0 {
+		limit = defaultPageSize
 	}
+	narrow, args := "ORDER BY pid DESC LIMIT ?", []any{limit + 1}
+	if after != "" {
+		narrow, args = "AND pid < ? "+narrow, []any{string(after), limit + 1}
+	}
+	batches, err := s.organizeBatches(ctx, op, fmt.Sprintf(organizeRuns, narrow), args...)
+	if err != nil {
+		return model.OrganizeBatchPage{}, err
+	}
+	page := model.OrganizeBatchPage{Batches: batches}
+	if len(batches) > limit {
+		page.Batches, page.HasMore, page.Next = batches[:limit], true, batches[limit-1].JobPID
+	}
+	return page, nil
+}
+
+// OrganizeBatchByJob reads one organize or undo run by its job, CodeNotFound when the job
+// is no such run or its journal holds no file move.
+func (s *Store) OrganizeBatchByJob(ctx context.Context, jobPID model.PID) (*model.OrganizeBatch, error) {
+	const op = "store.OrganizeBatchByJob"
+	batches, err := s.organizeBatches(ctx, op, fmt.Sprintf(organizeRuns, "AND pid = ?"), string(jobPID))
+	if err != nil {
+		return nil, err
+	}
+	if len(batches) == 0 {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no organize run with file moves: "+string(jobPID))
+	}
+	return &batches[0], nil
+}
+
+func (s *Store) organizeBatches(ctx context.Context, op, q string, args ...any) ([]model.OrganizeBatch, error) {
 	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -200,21 +290,24 @@ func (s *Store) OrganizeHistory(ctx context.Context, limit int) ([]model.Organiz
 	return out, nil
 }
 
-// PruneOrganizeJournal deletes the journal rows of every job whose moves have all settled
-// (committed or rolled back) and whose newest was made no later than olderThanNS ago,
-// returning how many went. A move's age is when the job made it, which a crash recovery
-// settling it later does not change. A job goes whole or not at all, so an undo never
-// finds half of one: a running job stays whatever its age, and so does one with a planned
-// row, which the next read-write open settles. A pruned job can no longer be undone, and
-// its moves no longer vouch for a scan's album re-key.
+// PruneOrganizeJournal deletes the journal rows of every organize or undo job whose moves
+// have all settled (committed or rolled back) and whose newest was made no later than
+// olderThanNS ago, returning how many went. A move's age is when the job made it, which a
+// crash recovery settling it later does not change. A job goes whole or not at all, so an
+// undo never finds half of one: a running job stays whatever its age, and so does one with
+// a planned row, which the next read-write open settles. A pruned job can no longer be
+// undone, and its moves no longer vouch for a scan's album re-key. It walks the jobs, not
+// the journal, which is the larger of the two.
 func (s *Store) PruneOrganizeJournal(ctx context.Context, olderThanNS int64) (int, error) {
 	const op = "store.PruneOrganizeJournal"
 	var n int64
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		r, err := tx.ExecContext(ctx, `DELETE FROM organize_journal WHERE job_pid IN (
-				SELECT jo.job_pid FROM organize_journal jo GROUP BY jo.job_pid
-				HAVING MAX(jo.created_at) <= ? AND SUM(jo.state = 'planned') = 0
-				   AND NOT EXISTS (SELECT 1 FROM job j WHERE j.pid = jo.job_pid AND j.state = 'running'))`,
+				SELECT j.pid FROM job j
+				WHERE j.kind IN ('organize', 'organize-undo') AND j.state <> 'running'
+				  AND EXISTS (SELECT 1 FROM organize_journal jo WHERE jo.job_pid = j.pid)
+				  AND NOT EXISTS (SELECT 1 FROM organize_journal jo
+					WHERE jo.job_pid = j.pid AND (jo.state = 'planned' OR jo.created_at > ?)))`,
 			nowNS()-olderThanNS)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)

@@ -2,6 +2,7 @@ package waxbin_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -370,5 +371,55 @@ func TestImportAcquiredTakesTheCatalogsSpellings(t *testing.T) {
 	}
 	if want := filepath.Join(root, "Amir Obe", "Night", "02 - Two.mp3"); res.Plan.Actions[0].Dst != want {
 		t.Errorf("acquired track lands at %s, want %s", res.Plan.Actions[0].Dst, want)
+	}
+}
+
+// TestPlanOrganizeSkipDiskCheckIsRefusedByTheRunners: a plan from the catalog alone is a
+// dry run's answer; the verbs that plan and move at once refuse it before any job starts.
+func TestPlanOrganizeSkipDiskCheckIsRefusedByTheRunners(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	all, opts := query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{SkipDiskCheck: true}
+	if _, err := lib.Organize(ctx, all, opts); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("Organize with SkipDiskCheck = %v, want CodeInvalid", err)
+	}
+	if _, err := lib.RunOrganize(ctx, all, opts); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("RunOrganize with SkipDiskCheck = %v, want CodeInvalid", err)
+	}
+	plan, err := lib.PlanOrganize(ctx, all, opts)
+	if err != nil || plan.DiskChecked || plan.Pending() != 1 {
+		t.Fatalf("PlanOrganize with SkipDiskCheck = %+v (err %v), want one unchecked move", plan, err)
+	}
+	if !fileExists(src) {
+		t.Error("a refused run moved the file")
+	}
+}
+
+// TestApplyOrganizeReholdsAnUncheckedPlan: applying a plan made without the disk pass looks
+// at the disk then, so a source gone since is held as missing rather than failing.
+func TestApplyOrganizeReholdsAnUncheckedPlan(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	kept, gone := filepath.Join(root, "one.mp3"), filepath.Join(root, "two.mp3")
+	writeFile(t, kept, testaudio.BuildMP3WithAudio("One", "The Foobars", "Night Moves", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, gone, testaudio.BuildMP3WithAudio("Two", "The Foobars", "Night Moves", 2, testaudio.AudioWithSeed(2)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{SkipDiskCheck: true})
+	if err != nil || plan.Pending() != 2 {
+		t.Fatalf("plan = %+v (err %v), want two unchecked moves", plan, err)
+	}
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := lib.ApplyOrganize(ctx, plan)
+	if err != nil || rep.Moved != 1 || rep.Errored != 0 || len(rep.Holds) != 1 || rep.Holds[0].Code != organize.HoldMissing {
+		t.Fatalf("apply = %+v (err %v), want one move and the gone source held missing", rep, err)
 	}
 }

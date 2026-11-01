@@ -36,8 +36,9 @@ import (
 // playlist_import_m3u8 carry a description an older server would drop, and
 // playlist_set_description is an added method. On 25 the KindReport a run_set_kind job
 // records maps each created item to the item it came from, where an older client reads a
-// list, and carries the targets and how many it read.
-const ProtocolVersion = 25
+// list, and carries the targets and how many it read. On 26 run_scan carries reResolve,
+// which an older server would drop and scan without, and run_unfold is an added method.
+const ProtocolVersion = 26
 
 // ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
 // client meets a server built before the method was added.
@@ -119,6 +120,7 @@ const (
 	MethodRunSetKind  = "run_set_kind"
 
 	MethodRunOrganizeUndo = "run_organize_undo"
+	MethodRunUnfold       = "run_unfold"
 
 	MethodRunRemoveRoot = "run_remove_root"
 )
@@ -918,8 +920,9 @@ type PodcastRemoveParams struct {
 // register at runtime. The response is the resulting model.Library row. The
 // server validates the spec against its own registered set (Library.AddRoot),
 // so mode/media/profile vocabulary and defaults live server-side. Path must be
-// absolute and name a folder; AllowAbsent registers one that does not exist yet.
-// A server that predates AllowAbsent registers any path, so the field rides on 22.
+// absolute and name a folder; AllowAbsent registers one that does not exist yet, or
+// whose stat does not answer in 5 s (without it such a root is CodeIO). A server that
+// predates AllowAbsent registers any path, so the field rides on 22.
 type AddRootParams struct {
 	Path        string `json:"path"`
 	Mode        string `json:"mode,omitempty"`
@@ -958,6 +961,7 @@ type ScanParams struct {
 	AdoptStampedPIDs bool   `json:"adoptStampedPids,omitempty"`
 	ForceReconcile   bool   `json:"forceReconcile,omitempty"`
 	IgnoreLocks      bool   `json:"ignoreLocks,omitempty"`
+	ReResolve        bool   `json:"reResolve,omitempty"`
 }
 
 // AnalyzeParams is the run_analyze request payload.
@@ -999,6 +1003,15 @@ type OrganizeParams struct {
 // job's result is an organize RunResult.
 type OrganizeUndoParams struct {
 	JobPID string `json:"jobPid"`
+}
+
+// UnfoldParams is the run_unfold request payload: unfold_entity's, with reResolve to read
+// again the files the folds kept (Library.StartUnfold). The job's result is the
+// waxbin.UnfoldReport.
+type UnfoldParams struct {
+	EntityType string   `json:"entityType"`
+	Keys       []string `json:"keys"`
+	ReResolve  bool     `json:"reResolve,omitempty"`
 }
 
 // SetKindParams is the run_set_kind request payload: the items to change and the kind

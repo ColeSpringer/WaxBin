@@ -111,3 +111,60 @@ func TestDeleteReportNamesItsSkips(t *testing.T) {
 		t.Errorf("report json = %+v (err %v)", env.Data, err)
 	}
 }
+
+// TestDeleteReportSaysWhereAFailureLeftItsFile: each failure names where it left the file,
+// and a stranded one where it now is, in camelCase JSON and in text.
+func TestDeleteReportSaysWhereAFailureLeftItsFile(t *testing.T) {
+	t.Parallel()
+	plan := &trash.Plan{Mode: model.DeleteTrash}
+	rep := &trash.Report{Errored: 1, Failures: []trash.Failure{{FilePID: "FILEA", Src: "/lib/a.mp3", Disk: trash.DiskStranded,
+		TrashPath: "/lib/.waxbin-trash/X/a.mp3", Err: "catalog write failed"}}}
+	render := func(asJSON bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := emitDeleteReport(cmd, &globals{jsonOut: asJSON}, plan, rep); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if text := render(false); !strings.Contains(text, "FAIL /lib/a.mp3 [stranded]: catalog write failed") ||
+		!strings.Contains(text, "now in the trash at /lib/.waxbin-trash/X/a.mp3") {
+		t.Errorf("report text does not say where the file is:\n%s", text)
+	}
+	var env struct {
+		Data struct {
+			Failures []map[string]any `json:"failures"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || len(env.Data.Failures) != 1 {
+		t.Fatalf("report json: %v (%+v)", err, env)
+	}
+	want := map[string]any{"filePid": "FILEA", "src": "/lib/a.mp3", "disk": "stranded", "trashPath": "/lib/.waxbin-trash/X/a.mp3", "error": "catalog write failed"}
+	for k, v := range want {
+		if env.Data.Failures[0][k] != v {
+			t.Errorf("failure %s = %v, want %v (got %v)", k, env.Data.Failures[0][k], v, env.Data.Failures[0])
+		}
+	}
+	rep.Failures = nil
+	if out := render(true); !strings.Contains(out, `"failures": []`) && !strings.Contains(out, `"failures":[]`) {
+		t.Errorf("an empty failure list prints %s, want []", out)
+	}
+}
+
+// TestDeleteReportSaysACopyIsLeftBesideAFileInPlace: a failure leaving the file in place
+// with a copy in the trash names the copy as left there, not the file as moved.
+func TestDeleteReportSaysACopyIsLeftBesideAFileInPlace(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	rep := &trash.Report{Errored: 1, Failures: []trash.Failure{{FilePID: "FILEA", Src: "/lib/a.mp3", Disk: trash.DiskInPlace,
+		TrashPath: "/lib/.waxbin-trash/X/a.mp3", Err: "held open"}}}
+	if err := emitDeleteReport(cmd, &globals{}, &trash.Plan{Mode: model.DeleteTrash}, rep); err != nil {
+		t.Fatal(err)
+	}
+	if text := buf.String(); !strings.Contains(text, "a copy is left in the trash at /lib/.waxbin-trash/X/a.mp3") || strings.Contains(text, "now in the trash") {
+		t.Errorf("report text:\n%s\nwant the copy named as left in the trash", text)
+	}
+}

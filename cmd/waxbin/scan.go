@@ -17,6 +17,7 @@ func newScanCmd(g *globals) *cobra.Command {
 		force          bool
 		reconcileDelet bool
 		ignoreLocks    bool
+		reResolve      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "scan",
@@ -33,7 +34,7 @@ func newScanCmd(g *globals) *cobra.Command {
 				defer px.Close()
 				jobPID, err := px.RunScan(ctx(cmd), proxy.ScanParams{
 					LibraryPID: libraryPID, SubPath: subPath, Force: force, ForceReconcile: reconcileDelet,
-					IgnoreLocks: ignoreLocks,
+					IgnoreLocks: ignoreLocks, ReResolve: reResolve,
 				})
 				if err != nil {
 					return err
@@ -64,6 +65,7 @@ func newScanCmd(g *globals) *cobra.Command {
 				Force:          force,
 				ForceReconcile: reconcileDelet,
 				IgnoreLocks:    ignoreLocks,
+				ReResolve:      reResolve,
 			})
 			if err != nil {
 				return err
@@ -80,6 +82,8 @@ func newScanCmd(g *globals) *cobra.Command {
 		"reconcile deletions even past the survival-gate floor (recovery for a deliberate large deletion)")
 	cmd.Flags().BoolVar(&ignoreLocks, "ignore-locks", false,
 		"re-derive locked fields from disk too, discarding curated edits (use with --force)")
+	cmd.Flags().BoolVar(&reResolve, "re-resolve", false,
+		"read every file and file it again under the artists, album and genres its tags name (after an unfold)")
 	cmd.PreRun = func(*cobra.Command, []string) { force = force || full }
 	return cmd
 }

@@ -66,13 +66,25 @@ func TestMergeFoldsAndUnfold(t *testing.T) {
 		t.Fatalf("entity folds: %v", err)
 	}
 	var folds struct {
-		Data []struct {
-			Key       string `json:"key"`
-			EntityPID string `json:"entityPid"`
+		Data struct {
+			Folds []struct {
+				Key        string `json:"key"`
+				Name       string `json:"name"`
+				EntityPID  string `json:"entityPid"`
+				EntityName string `json:"entityName"`
+			} `json:"folds"`
+			HasMore bool `json:"hasMore"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(out), &folds); err != nil || len(folds.Data) != 1 || folds.Data[0].Key != "beatles" {
-		t.Fatalf("entity folds printed %q (err %v), want the merged key", out, err)
+	if err := json.Unmarshal([]byte(out), &folds); err != nil || len(folds.Data.Folds) != 1 || folds.Data.HasMore {
+		t.Fatalf("entity folds printed %q (err %v), want one fold", out, err)
+	}
+	if f := folds.Data.Folds[0]; f.Key != "beatles" || f.Name != "Beatles" || f.EntityName != "The Beatles" {
+		t.Fatalf("fold = %+v, want the key beatles read from Beatles, on The Beatles", f)
+	}
+	if text, err := runCLIText(t, db, root, "entity", "folds", "artist", "--limit", "1"); err != nil ||
+		!strings.Contains(text, "beatles  Beatles") {
+		t.Fatalf("entity folds text = %q (err %v), want the key beside the spelling it was read from", text, err)
 	}
 	if _, err := runCLIJSON(t, db, root, "entity", "unfold", "artist", "beatles"); err != nil {
 		t.Fatalf("entity unfold: %v", err)
@@ -136,4 +148,56 @@ func runCLIText(t *testing.T, db, root string, args ...string) (string, error) {
 	cmd.SetArgs(append([]string{"--db", db, "--root", root + ":managed:waxbin-native"}, args...))
 	err := cmd.ExecuteContext(context.Background())
 	return stdout.String(), err
+}
+
+// TestEntityUnfoldReResolveReadsWhatTheFoldKept: `entity unfold --re-resolve` forgets the
+// fold and reads again the file it kept, naming it, so the file's item is filed under the
+// artist it states.
+func TestEntityUnfoldReResolveReadsWhatTheFoldKept(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for i, artist := range []string{"Beatles", "The Beatles"} {
+		path := filepath.Join(root, strconv.Itoa(i)+".mp3")
+		if err := os.WriteFile(path, testaudio.BuildMP3WithAudio("Song "+strconv.Itoa(i), artist, "Album "+strconv.Itoa(i), 1,
+			testaudio.AudioWithSeed(byte(i+1))), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib := openCLILib(t, ctx, db, root, false)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pidOf := func(name string) string {
+		t.Helper()
+		var pid string
+		if err := rawDB(t, db).QueryRowContext(ctx, "SELECT pid FROM artist WHERE name = ?", name).Scan(&pid); err != nil {
+			t.Fatalf("pid of %q: %v", name, err)
+		}
+		return pid
+	}
+	if out, err := runCLIJSON(t, db, root, "merge", "artist", pidOf("The Beatles"), pidOf("Beatles")); err != nil {
+		t.Fatalf("merge: %v (%s)", err, out)
+	}
+	out, err := runCLIJSON(t, db, root, "entity", "unfold", "artist", "beatles", "--re-resolve")
+	if err != nil {
+		t.Fatalf("entity unfold --re-resolve: %v (%s)", err, out)
+	}
+	var rep struct {
+		Data struct {
+			Unfolded []string `json:"unfolded"`
+			Reread   []string `json:"reread"`
+			Skipped  []string `json:"skipped"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil || len(rep.Data.Unfolded) != 1 || len(rep.Data.Reread) != 2 || rep.Data.Skipped == nil {
+		t.Fatalf("entity unfold --re-resolve printed %s (err %v), want the key unfolded, both items read again and an empty skip list", out, err)
+	}
+	if n := len(pidOf("Beatles")); n == 0 {
+		t.Error("no artist Beatles after the re-resolve")
+	}
 }

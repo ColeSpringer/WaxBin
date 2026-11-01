@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -110,6 +111,8 @@ type Watcher struct {
 	degraded atomic.Bool
 	// openSource opens the live layer's event source; tests swap in one they feed.
 	openSource func() (source, error)
+	// rootCheck asks whether a root answers; tests swap in a stat they hold.
+	rootCheck fsx.RootChecker
 }
 
 // New builds a watcher over an engine and roots.

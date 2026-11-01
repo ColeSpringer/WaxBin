@@ -598,3 +598,29 @@ func TestRollupsLeaveTheTrashOut(t *testing.T) {
 	putTrack(t, st, lib.ID, oneSpec)
 	check("restored", 2, 350)
 }
+
+// TestEntityInfoListsAliases: an artist's info names the other spellings it answers to (a
+// merged loser's name), in the single and the batch read alike, and another kind names none.
+func TestEntityInfoListsAliases(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "The Beatles", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "Beatles", album: "B"})
+	survivor := entityPIDByName(t, st, "artist", "name", "The Beatles")
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, entityPIDByName(t, st, "artist", "name", "Beatles")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := st.EntityByPID(ctx, read.EntityArtist, survivor)
+	if err != nil || !reflect.DeepEqual(info.Aliases, []string{"Beatles"}) {
+		t.Fatalf("artist info = %+v (err %v), want the alias Beatles", info, err)
+	}
+	batch, err := st.EntityByPIDs(ctx, read.EntityArtist, []model.PID{survivor})
+	if err != nil || batch[survivor] == nil || !reflect.DeepEqual(batch[survivor].Aliases, []string{"Beatles"}) {
+		t.Fatalf("batch artist info = %+v (err %v), want the alias Beatles", batch[survivor], err)
+	}
+	album, err := st.EntityByPID(ctx, read.EntityAlbum, entityPIDByName(t, st, "album", "title", "A"))
+	if err != nil || len(album.Aliases) != 0 {
+		t.Errorf("album info = %+v (err %v), want no aliases", album, err)
+	}
+}

@@ -2,6 +2,7 @@ package fsx
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -417,5 +418,94 @@ func TestRootUnreachable(t *testing.T) {
 	}
 	if err := RootUnreachable(filepath.Join(dir, "gone")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a missing path = %v, want not-exist", err)
+	}
+}
+
+// TestACopiedMoveThatCannotRemoveItsSourceLeavesNoCopy: a move across filesystems copies and
+// then removes the source; when the removal fails the move did not happen, so the copy goes
+// too and nothing is left at the destination to be taken for the file.
+func TestACopiedMoveThatCannotRemoveItsSourceLeavesNoCopy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "a", "song.mp3"), filepath.Join(dir, "b", "song.mp3")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("source held open")
+	refuseSource := func(p string) error {
+		if p == src {
+			return refused
+		}
+		return os.Remove(p)
+	}
+	if err := copyThenRemove(src, dst, refuseSource); !errors.Is(err, refused) || errors.Is(err, ErrCopyLeft) {
+		t.Fatalf("err = %v, want the removal's and no copy left", err)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("the source is gone: %v", err)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("the copy is still at the destination (err %v)", err)
+	}
+}
+
+// copyFixture writes a source file for a copied move and returns it and a destination.
+func copyFixture(t *testing.T) (src, dst string) {
+	t.Helper()
+	dir := t.TempDir()
+	src, dst = filepath.Join(dir, "a", "song.mp3"), filepath.Join(dir, "b", "song.mp3")
+	for _, d := range []string{filepath.Dir(src), filepath.Dir(dst)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return src, dst
+}
+
+// TestACopiedMoveWhoseSourceWentMeanwhileKeepsTheCopy: a source another process removed
+// after the copy is a move that happened, so the copy, the only one left, stays.
+func TestACopiedMoveWhoseSourceWentMeanwhileKeepsTheCopy(t *testing.T) {
+	t.Parallel()
+	src, dst := copyFixture(t)
+	gone := func(p string) error {
+		if err := os.Remove(p); err != nil {
+			return err
+		}
+		if p == src {
+			return &fs.PathError{Op: "remove", Path: p, Err: fs.ErrNotExist}
+		}
+		return nil
+	}
+	if err := copyThenRemove(src, dst, gone); err != nil {
+		t.Fatalf("err = %v, want the move counted as made", err)
+	}
+	if b, err := os.ReadFile(dst); err != nil || string(b) != "audio" {
+		t.Errorf("the copy = %q (err %v), want it kept", b, err)
+	}
+}
+
+// TestACopiedMoveThatCannotRemoveEitherFileSaysACopyIsLeft: when the source stays and the
+// copy cannot be removed either, the error says a copy is left, so a caller keeps its
+// record of the move.
+func TestACopiedMoveThatCannotRemoveEitherFileSaysACopyIsLeft(t *testing.T) {
+	t.Parallel()
+	src, dst := copyFixture(t)
+	refused := errors.New("held open")
+	if err := copyThenRemove(src, dst, func(string) error { return refused }); !errors.Is(err, refused) || !errors.Is(err, ErrCopyLeft) {
+		t.Fatalf("err = %v, want the removal's and ErrCopyLeft", err)
+	}
+	for _, p := range []string{src, dst} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s is gone (%v), want both left", p, err)
+		}
 	}
 }

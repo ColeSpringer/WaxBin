@@ -3,8 +3,11 @@ package waxbin_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -930,5 +934,160 @@ func TestEditTitleSortOrdersAndWritesBack(t *testing.T) {
 	}
 	if v, err := lib.Get(ctx, book); err != nil || v.TitleSort != "Hobbit, The" {
 		t.Errorf("book after the rescan = %+v (err %v), want its spelling read back", v, err)
+	}
+}
+
+// beatlesPair scans a file credited to "The Beatles" and one to "Beatles" that states its
+// artist's MusicBrainz id, merges the second artist into the first, and returns the
+// library, the second file's item and the survivor it now sits on.
+func beatlesPair(t *testing.T, ctx context.Context) (lib *waxbin.Library, root string, item, survivor model.PID) {
+	t.Helper()
+	root = t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3WithAudio("One", "The Beatles", "One", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Two", Artist: "Beatles", Album: "Two", Track: 1,
+		TXXX:  []testaudio.TXXXFrame{{Desc: "MusicBrainz Artist Id", Value: beatlesMBID}},
+		Audio: testaudio.AudioWithSeed(2)}))
+	lib = openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	survivor = artistPIDByName(t, ctx, db, "The Beatles")
+	loser := artistPIDByName(t, ctx, db, "Beatles")
+	if _, err := lib.Merge(ctx, model.MergeArtist, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	item = itemPIDByTitle(t, ctx, lib, "Two")
+	if v, err := lib.Get(ctx, item); err != nil || v.ArtistPID != survivor {
+		t.Fatalf("after the merge Two = %+v (err %v), want it on the survivor", v, err)
+	}
+	return lib, root, item, survivor
+}
+
+const beatlesMBID = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+
+// TestUnfoldWithReResolveFilesTheKeptFilesUnderTheirOwnName: an unfold that re-resolves
+// reads again the files the fold kept on the survivor, so each is filed under the name it
+// states, its MusicBrainz id with it, and the report names what it read.
+func TestUnfoldWithReResolveFilesTheKeptFilesUnderTheirOwnName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, _, item, survivor := beatlesPair(t, ctx)
+	job, err := lib.StartUnfold(ctx, model.MergeArtist, []string{"beatles"}, waxbin.UnfoldOptions{ReResolve: true})
+	if err != nil {
+		t.Fatalf("start unfold: %v", err)
+	}
+	j := waitForJobDone(t, ctx, lib, job)
+	var rep waxbin.UnfoldReport
+	// Every item credited to the artist is read again, the survivor's own One with Two.
+	if err := json.Unmarshal([]byte(j.Result), &rep); err != nil || rep.Folds != 1 || len(rep.Reread) != 2 ||
+		!slices.Contains(rep.Reread, item) || len(rep.Skipped) != 0 {
+		t.Fatalf("unfold report %s (err %v), want one fold and both items read again", j.Result, err)
+	}
+	v, err := lib.Get(ctx, item)
+	if err != nil || v.ArtistPID == survivor {
+		t.Fatalf("Two after the unfold = %+v (err %v), want it off the survivor", v, err)
+	}
+	info, err := lib.EntityByPID(ctx, read.EntityArtist, v.ArtistPID)
+	if err != nil || info.Name != "Beatles" || info.MBID != beatlesMBID {
+		t.Errorf("Two's artist = %+v (err %v), want Beatles with its MusicBrainz id", info, err)
+	}
+}
+
+// TestRescanReResolveRelinksUnchangedFiles: a rescan with re-resolve links unchanged files
+// to the entities their tags name, which a fold forgotten by a plain unfold leaves them
+// apart from until then.
+func TestRescanReResolveRelinksUnchangedFiles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, _, item, survivor := beatlesPair(t, ctx)
+	if err := lib.UnfoldEntity(ctx, model.MergeArtist, "beatles"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := lib.Get(ctx, item); v.ArtistPID != survivor {
+		t.Fatal("a forced rescan without re-resolve relinked the unchanged file; the test's premise is gone")
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{ReResolve: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := lib.Get(ctx, item); err != nil || v.ArtistPID == survivor || v.ArtistPID == "" {
+		t.Fatalf("Two after a re-resolving rescan = %+v (err %v), want it filed under an artist of its own", v, err)
+	}
+}
+
+// TestUnfoldReResolveSkipsAnOfflineFileAndNamesIt: an item whose file is not on disk is not
+// read again, and the report names it.
+func TestUnfoldReResolveSkipsAnOfflineFileAndNamesIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, root, item, _ := beatlesPair(t, ctx)
+	if err := os.Remove(filepath.Join(root, "b.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	job, err := lib.StartUnfold(ctx, model.MergeArtist, []string{"beatles"}, waxbin.UnfoldOptions{ReResolve: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep waxbin.UnfoldReport
+	if err := json.Unmarshal([]byte(waitForJobDone(t, ctx, lib, job).Result), &rep); err != nil ||
+		rep.Folds != 1 || len(rep.Reread) != 1 || slices.Contains(rep.Reread, item) || !slices.Equal(rep.Skipped, []model.PID{item}) {
+		t.Fatalf("unfold report %+v (err %v), want Two skipped and named, One read", rep, err)
+	}
+}
+
+// TestUnfoldReResolveFindsAFeaturedCredit: a track whose credit names the folded artist
+// among others is read again too, and lands on that artist rather than the survivor.
+func TestUnfoldReResolveFindsAFeaturedCredit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for i, credit := range []string{"Shawn Carter", "Jay-Z", "Jay-Z feat. Rihanna"} {
+		writeFile(t, filepath.Join(root, string(rune('a'+i))+".mp3"),
+			testaudio.BuildMP3WithAudio("T"+string(rune('a'+i)), credit, "Album "+string(rune('a'+i)), 1, testaudio.AudioWithSeed(byte(i+1))))
+	}
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	survivor := artistPIDByName(t, ctx, db, "Shawn Carter")
+	if _, err := lib.Merge(ctx, model.MergeArtist, survivor, artistPIDByName(t, ctx, db, "Jay-Z")); err != nil {
+		t.Fatal(err)
+	}
+	featured := itemPIDByTitle(t, ctx, lib, "Tc")
+	if v, _ := lib.Get(ctx, featured); v.ArtistPID != survivor {
+		t.Fatalf("after the merge the featured track sits on %s, want the survivor", v.ArtistPID)
+	}
+	rep, err := lib.Unfold(ctx, model.MergeArtist, []string{"jay z"}, waxbin.UnfoldOptions{ReResolve: true})
+	if err != nil || !slices.Contains(rep.Reread, featured) {
+		t.Fatalf("unfold = %+v (err %v), want the featured track read again", rep, err)
+	}
+	if v, err := lib.Get(ctx, featured); err != nil || v.ArtistPID == survivor {
+		t.Fatalf("the featured track after the unfold = %+v (err %v), want it off the survivor", v, err)
+	}
+}
+
+// TestStartUnfoldRefusesAKeyNoFoldHoldsBeforeItsJob: a key no fold holds is refused at once,
+// by StartUnfold and Unfold alike, rather than starting a job that fails.
+func TestStartUnfoldRefusesAKeyNoFoldHoldsBeforeItsJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, _, _, _ := beatlesPair(t, ctx)
+	before, err := lib.Jobs(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.StartUnfold(ctx, model.MergeArtist, []string{"beatles", "nobody"}, waxbin.UnfoldOptions{ReResolve: true}); !waxerr.Is(err, waxerr.CodeNotFound) ||
+		!strings.Contains(err.Error(), "nobody") {
+		t.Fatalf("start unfold of an unknown key = %v, want CodeNotFound naming it", err)
+	}
+	if _, err := lib.Unfold(ctx, model.MergeArtist, []string{"nobody"}, waxbin.UnfoldOptions{}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("unfold of an unknown key = %v, want CodeNotFound", err)
+	}
+	if after, err := lib.Jobs(ctx, 100); err != nil || len(after) != len(before) {
+		t.Errorf("jobs = %d after the refusals (err %v), want %d: no job started", len(after), err, len(before))
+	}
+	var rep waxbin.UnfoldReport
+	if err := json.Unmarshal([]byte(`{"folds":2,"reread":["a"],"skipped":["b"]}`), &rep); err != nil || rep.Folds != 2 || len(rep.Reread) != 1 || len(rep.Skipped) != 1 {
+		t.Errorf("report from camelCase JSON = %+v (err %v), want each field read", rep, err)
 	}
 }

@@ -62,12 +62,15 @@ var errCoverageLost = errors.New("watch: live coverage lost")
 func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, sets <-chan []Root) {
 	defer src.Close()
 
-	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs)}
+	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs), check: w.rootCheck}
 	exhausted := false
 	for _, r := range w.rootSet() {
-		if _, ex := lw.armRoot(r.Path); ex {
+		if _, ex := lw.armRoot(ctx, r.Path); ex {
 			exhausted = true
 		}
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	switch {
 	case lw.total() == 0 && lw.outOfReach():
@@ -120,7 +123,7 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 				}
 				w.handleEvent(lw, deb, ev)
 			case set := <-sets:
-				if lw.follow(set) {
+				if lw.follow(ctx, set) {
 					w.degraded.Store(true)
 				}
 			}
@@ -256,13 +259,15 @@ type liveWatch struct {
 	// unreachable the ones among them that were not there when it tried.
 	roots       map[string]bool
 	unreachable map[string]bool
+	check       fsx.RootChecker
 }
 
 // armRoot arms a root's tree unless the root is still armed, and remembers it as a root.
 // It reports how many folders it armed and whether it hit a ceiling, as addTree does. A
-// root that is not there, or is not a folder, is a library out of reach (a drive not
-// mounted, say), said once until it is back rather than taken for a failed watch.
-func (lw *liveWatch) armRoot(root string) (int, bool) {
+// root that is not there, or is not a folder, or does not answer a stat in time, is a
+// library out of reach (a drive not mounted, say), said once until it is back rather than
+// taken for a failed watch.
+func (lw *liveWatch) armRoot(ctx context.Context, root string) (int, bool) {
 	root = filepath.Clean(root)
 	lw.mu.Lock()
 	if lw.roots == nil {
@@ -274,7 +279,11 @@ func (lw *liveWatch) armRoot(root string) (int, bool) {
 	if held {
 		return 0, false
 	}
-	err := fsx.RootUnreachable(root)
+	err := lw.check.Check(ctx, root)
+	if ctx.Err() != nil {
+		// A check cut off by the watch stopping says nothing of the root.
+		return 0, false
+	}
 	reachable := err == nil
 	lw.mu.Lock()
 	was := lw.unreachable[root]
@@ -305,7 +314,7 @@ func (lw *liveWatch) outOfReach() bool {
 
 // follow arms the roots in set it does not hold and releases those it armed that set no
 // longer names, reporting whether an arm hit a ceiling.
-func (lw *liveWatch) follow(set []Root) bool {
+func (lw *liveWatch) follow(ctx context.Context, set []Root) bool {
 	keep := make(map[string]bool, len(set))
 	for _, r := range set {
 		keep[filepath.Clean(r.Path)] = true
@@ -323,7 +332,7 @@ func (lw *liveWatch) follow(set []Root) bool {
 	}
 	exhausted := false
 	for _, r := range set {
-		if _, ex := lw.armRoot(r.Path); ex {
+		if _, ex := lw.armRoot(ctx, r.Path); ex {
 			exhausted = true
 		}
 	}

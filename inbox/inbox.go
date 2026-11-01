@@ -780,11 +780,11 @@ func (s *Service) pruneStaging(root string, placed []organize.SidecarMove) int {
 		dirs = append(dirs, filepath.Dir(m.Src))
 	}
 	d := organize.FolderDisposal(placed, func(string) string { return root })
-	return fsx.PruneAll(dirs, func(string) fsx.PruneOptions {
+	return len(fsx.PruneAll(dirs, func(string) fsx.PruneOptions {
 		opts := organize.PruneOptions(root, d.Dispose)
 		opts.Undo = d.Undo
 		return opts
-	}, func(dir string, err error) { s.log.Warn("pruning an emptied staging folder", "dir", dir, "err", err) })
+	}, func(dir string, err error) { s.log.Warn("pruning an emptied staging folder", "dir", dir, "err", err) }))
 }
 
 // importOne places one file in the managed tree, catalogs it under its target

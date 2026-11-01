@@ -137,6 +137,10 @@ type Library struct {
 	// cadence when set (kindCheckpointEvery, kindCheckpointAfter in kind.go).
 	kindCheckpointEvery int
 	kindCheckpointAfter time.Duration
+
+	// roots checks the roots AddRoot, RelocateRoot and MarkMissing stat, bounded in time;
+	// its zero value is the plain bounded stat.
+	roots fsx.RootChecker
 }
 
 // Open opens (creating if needed) the catalog and wires the subsystems. A
@@ -478,8 +482,9 @@ type RootOption func(*rootOptions)
 type rootOptions struct{ allowAbsent bool }
 
 // AllowAbsent lets AddRoot register, or RelocateRoot move a library to, a root whose
-// folder does not exist yet, such as a drive or volume mounted later. A scan of it
-// reports the root unreachable until the folder is there.
+// folder does not exist yet, such as a drive or volume mounted later, or whose stat does
+// not answer within fsx.RootCheckTimeout (5 s). A scan of it reports the root unreachable
+// until the folder is there.
 func AllowAbsent() RootOption { return func(o *rootOptions) { o.allowAbsent = true } }
 
 // AddRoot registers a library root at runtime, without reopening the Library. The
@@ -490,7 +495,8 @@ func AllowAbsent() RootOption { return func(o *rootOptions) { o.allowAbsent = tr
 //
 // Unlike a configured root, which Open resolves against the working directory, the path
 // must be absolute, and it must be a folder a scan can walk: a file is refused, and so
-// is a path that does not exist unless AllowAbsent is passed.
+// is a path that does not exist unless AllowAbsent is passed. The stat is bounded, and
+// one that does not answer in 5 s is CodeIO unless AllowAbsent is passed.
 //
 // The store is the single source of truth for roots, so scan, organize, and import
 // pick the new root up immediately and the row survives a restart even if the embedder
@@ -509,7 +515,7 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...RootOpt
 	}
 	// Stat the folder before taking rootMu, so a hung mount blocks no other root
 	// mutation; its refusal is reported after the overlap checks, which say more.
-	walkable := config.CheckFolder(filepath.Clean(spec.Path), o.allowAbsent)
+	walkable := l.checkFolder(ctx, spec.Path, o.allowAbsent)
 	// Hold rootMu across validate + upsert so a concurrent root mutation cannot
 	// slip an overlapping row in between the two.
 	l.rootMu.Lock()
@@ -1122,6 +1128,10 @@ type ScanRequest struct {
 	// DB edit back onto disk. A value enrichment filled, or a normalize pass respelled,
 	// that the file says nothing about is kept either way.
 	IgnoreLocks bool
+	// ReResolve reads every file and resolves its artists, album, genres and a book's
+	// author and series from its tags again (scan.Request.ReResolve), so unchanged files
+	// land under the names they state, as after an unfold.
+	ReResolve bool
 }
 
 // fsMutateScope is the shared lease scope held by every job that mutates files on
@@ -1840,14 +1850,18 @@ func (l *Library) MergeMany(ctx context.Context, entityType model.MergeEntity, s
 	return l.store.MergeEntities(ctx, entityType, survivorPID, loserPIDs)
 }
 
-// EntityFolds lists the keys merges of one entity type retired, each with the entity it
-// still folds into.
-func (l *Library) EntityFolds(ctx context.Context, entityType model.MergeEntity) ([]model.EntityFold, error) {
-	return l.store.EntityFolds(ctx, entityType)
+// EntityFolds pages the keys merges and locked renames of one entity type retired, in key
+// order, each with the spelling it was read from and the entity it still folds into.
+// afterKey is the previous page's Next, empty for the first; a non-positive limit takes the
+// default page size.
+func (l *Library) EntityFolds(ctx context.Context, entityType model.MergeEntity, afterKey string, limit int) (model.EntityFoldPage, error) {
+	return l.store.EntityFolds(ctx, entityType, afterKey, limit)
 }
 
 // UnfoldEntity forgets folds, so the next scan of a file carrying one of the keys mints
-// its own entity again. It is all or nothing: CodeNotFound names the keys no fold holds.
+// its own entity again (a file whose bytes have not changed is not read for it; Unfold with
+// ReResolve reads the kept files at once), and an artist's fold takes the alias it was
+// read from with it. It is all or nothing: CodeNotFound names the keys no fold holds.
 func (l *Library) UnfoldEntity(ctx context.Context, entityType model.MergeEntity, keys ...string) error {
 	return l.store.UnfoldEntity(ctx, entityType, keys...)
 }
@@ -2800,6 +2814,11 @@ type OrganizeOptions struct {
 	// added to the Library's set. It is for an embedder alone: the proxy's run_organize
 	// carries a name.
 	Profile *organize.Profile
+	// SkipDiskCheck makes PlanOrganize plan from the catalog alone
+	// (organize.PlanOptions.SkipDiskCheck), for a quick look at where files belong.
+	// Organize and RunOrganize refuse it, since they move what they plan with no second
+	// look; ApplyOrganize looks at the disk again before it moves anything.
+	SkipDiskCheck bool
 }
 
 // PlanOrganize computes a dry-run move plan for the selected items across every
@@ -2830,7 +2849,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 	if err != nil {
 		return nil, err
 	}
-	merged := &organize.Plan{Profile: opts.ProfileName}
+	merged := &organize.Plan{Profile: opts.ProfileName, DiskChecked: !opts.SkipDiskCheck}
 	if opts.Profile != nil {
 		merged.Profile = opts.Profile.Name
 	}
@@ -2875,7 +2894,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 		}
 		// organize.Plan filters items to those under this library's root, so passing the
 		// full item set to each library partitions the work by current location.
-		p, err := l.organizer.Plan(ctx, lib, prof, items, organize.PlanOptions{AlbumYears: years, Names: names})
+		p, err := l.organizer.Plan(ctx, lib, prof, items, organize.PlanOptions{AlbumYears: years, Names: names, SkipDiskCheck: opts.SkipDiskCheck})
 		if err != nil {
 			return nil, err
 		}
@@ -3183,6 +3202,7 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 		if err := l.trasher.Recheck(ctx, &live); err != nil {
 			return err
 		}
+		live.JobPID = h.JobPID()
 		r, err := l.trasher.Execute(ctx, &live)
 		rep = r
 		if err != nil {
@@ -3307,12 +3327,14 @@ type MarkMissingOptions struct {
 // happened, refusals included: files-present means the bytes really are on disk and the
 // caller's failure is something else.
 //
-// It verifies before it writes. Every backing file is stat'ed, and a file that comes back
-// absent counts as gone only when its library root is a readable directory: an absent,
-// unreadable, or non-directory root is a dropped mount rather than a deletion. The gate
-// is on the root and not each file's parent directory because the ordinary genuine
-// deletion is a user removing an album folder, which a parent gate would refuse. A file
-// under no registered root has no mount to check. An item that keeps a file on disk is
+// It verifies before it writes. Each backing file's library root is checked first, once,
+// with a bounded stat: a root that is absent, unreadable, not a directory or slow past the
+// check's timeout is a dropped mount rather than a deletion, and its files are not stat'ed
+// (their stat would wait on the same mount, and could not confirm them gone). The other
+// files are stat'ed, and one that comes back absent counts as gone. The gate is on the root
+// and not each file's parent directory because the ordinary genuine deletion is a user
+// removing an album folder, which a parent gate would refuse. A file under no registered
+// root has no mount to check. An item that keeps a file on disk is
 // settled (promoted or dropped, see settleGoneFiles) over its gone files only, leaving one
 // it cannot confirm gone alone. An item with no file on disk is marked only when every
 // file is confirmed gone; a stat failing with anything other than "does not exist", or a
@@ -3330,24 +3352,43 @@ func (l *Library) MarkMissing(ctx context.Context, itemPID model.PID, opts MarkM
 		if err != nil {
 			return "", err
 		}
+		libs, err := l.store.Libraries(ctx)
+		if err != nil {
+			return "", err
+		}
 		present := false
-		var absent []model.ItemFileRef
+		var gone []model.ItemFileRef
 		var unsure error
+		var unmounted string
+		gate := fsx.RootGate{Checker: l.roots}
 		for _, ref := range files {
-			// pathx.Long or a Windows long path reports a present file as absent, which
-			// here would flip a perfectly present item to missing.
-			switch _, err := os.Stat(pathx.Long(string(ref.Path))); {
+			// A file under a root that does not answer as a folder (a dropped mount, or one
+			// whose check timed out) is not statted: that stat would wait on the same mount,
+			// and its answer could not confirm the file gone. A file under no root has no
+			// mount to check.
+			var err error
+			if lib := libraryForRawPath(libs, ref.Path); lib != nil {
+				_, err = gate.Stat(ctx, rawRoot(lib), string(ref.Path))
+				if ctx.Err() != nil {
+					return "", waxerr.FromContext(op, ctx.Err(), waxerr.CodeIO)
+				}
+				if errors.Is(err, fsx.ErrRootDown) {
+					if unmounted == "" {
+						unmounted = lib.DisplayRoot
+					}
+					continue
+				}
+			} else {
+				_, err = os.Stat(pathx.Long(string(ref.Path)))
+			}
+			switch {
 			case err == nil:
 				present = true
 			case errors.Is(err, fs.ErrNotExist):
-				absent = append(absent, ref)
+				gone = append(gone, ref)
 			default:
 				unsure = waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-		}
-		gone, unmounted, err := l.goneUnderMountedRoots(ctx, absent)
-		if err != nil {
-			return "", err
 		}
 		if present {
 			return l.settleGoneFiles(ctx, itemPID, gone)
@@ -3388,42 +3429,6 @@ func (l *Library) settleGoneFiles(ctx context.Context, itemPID model.PID, gone [
 		return model.OutcomeDropped, nil
 	}
 	return model.OutcomeFilesPresent, nil
-}
-
-// goneUnderMountedRoots returns the absent files whose library root is a readable
-// directory, which are gone, and the display root of the first that is not (a dropped
-// mount rather than a deletion), empty when there is none. The roots are listed once per
-// call and each distinct one is stat'ed once, however many parts sit under it.
-func (l *Library) goneUnderMountedRoots(ctx context.Context, absent []model.ItemFileRef) ([]model.ItemFileRef, string, error) {
-	if len(absent) == 0 {
-		return nil, "", nil
-	}
-	libs, err := l.store.Libraries(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	var gone []model.ItemFileRef
-	var unmounted string
-	mounted := map[model.PID]bool{}
-	for _, ref := range absent {
-		lib := libraryForRawPath(libs, ref.Path)
-		if lib == nil {
-			gone = append(gone, ref)
-			continue
-		}
-		ok, seen := mounted[lib.PID]
-		if !seen {
-			ok = fsx.RootUnreachable(rawRoot(lib)) == nil
-			mounted[lib.PID] = ok
-		}
-		switch {
-		case ok:
-			gone = append(gone, ref)
-		case unmounted == "":
-			unmounted = lib.DisplayRoot
-		}
-	}
-	return gone, unmounted, nil
 }
 
 // libraryForRawPath returns the library whose root contains a raw path, or nil. It
@@ -4281,14 +4286,13 @@ func (l *Library) writeBackAcquisition(ctx context.Context, op string, itemPID m
 
 // Backup writes a self-contained byte copy of the catalog to dest. The copy contains
 // every table, the secret table included, less what opts leaves out (secrets for a copy
-// that will leave the host); the live catalog is untouched. The generated thumbnails live
-// in a file of their own beside the catalog, which no backup copies. A full backup is
-// the disaster-recovery artifact.
+// that will leave the host); the live catalog is untouched. It is written owner-only
+// through dest+".part", synced, and published whole by a rename (port.WriteBackup), and a
+// dest holding a file is refused. The generated thumbnails live in a file of their own
+// beside the catalog, which no backup copies. A full backup is the disaster-recovery
+// artifact.
 func (l *Library) Backup(ctx context.Context, dest string, opts port.BackupOptions) error {
-	if err := l.store.BackupTo(ctx, dest); err != nil {
-		return err
-	}
-	return port.TrimBackupFile(ctx, dest, opts)
+	return port.WriteBackup(ctx, dest, opts, l.store.BackupTo)
 }
 
 // Export writes a versioned logical JSON export of catalog metadata, critical
@@ -4411,26 +4415,37 @@ func (l *Library) Manifest(ctx context.Context) (*port.Manifest, error) {
 // root path, for a portable restore onto a different machine or mount. The new path is
 // validated with the moved library's entry substituted, so a relocation cannot create the
 // overlap Open would refuse, and like AddRoot's it must be an absolute folder a scan can
-// walk, one not there yet only with AllowAbsent. It holds the filesystem lease, so it is
+// walk, one not there yet only with AllowAbsent. It stats the new root, bounded as AddRoot
+// does, before it takes the filesystem lease, and then holds the lease, so it is
 // CodeConflict while a scan, organize, import or delete runs. The internal podcast
 // library is not relocatable: its root follows the podcasts dir config.
 func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot string, opts ...RootOption) error {
-	return l.jobs.RunLeased(ctx, fsMutateScope, func(ctx context.Context) error {
-		return l.relocateRoot(ctx, libPID, newRoot, opts)
-	})
-}
-
-func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot string, opts []RootOption) error {
-	const op = "Library.RelocateRoot"
 	if !filepath.IsAbs(newRoot) {
-		return waxerr.New(waxerr.CodeInvalid, op, "new library root must be an absolute path: "+newRoot)
+		return waxerr.New(waxerr.CodeInvalid, "Library.RelocateRoot", "new library root must be an absolute path: "+newRoot)
 	}
 	var o rootOptions
 	for _, opt := range opts {
 		opt(&o)
 	}
-	// Stat before rootMu, as AddRoot does, and report after the overlap checks.
-	walkable := config.CheckFolder(filepath.Clean(newRoot), o.allowAbsent)
+	// Stat before the lease and rootMu, as AddRoot does, so a hung mount holds up no scan
+	// or other root mutation; the refusal is reported after the overlap checks.
+	walkable := l.checkFolder(ctx, newRoot, o.allowAbsent)
+	if ctx.Err() != nil {
+		return walkable
+	}
+	return l.jobs.RunLeased(ctx, fsMutateScope, func(ctx context.Context) error {
+		return l.relocateRoot(ctx, libPID, newRoot, walkable)
+	})
+}
+
+// checkFolder is config.CheckFolder through the Library's root checker.
+func (l *Library) checkFolder(ctx context.Context, path string, absent bool) error {
+	path = filepath.Clean(path)
+	return config.FolderVerdict(path, absent, l.roots.Check(ctx, path))
+}
+
+func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot string, walkable error) error {
+	const op = "Library.RelocateRoot"
 	// Serialize with AddRoot (and other relocations) so the read-validate-write is
 	// atomic against a concurrent root mutation; see rootMu.
 	l.rootMu.Lock()

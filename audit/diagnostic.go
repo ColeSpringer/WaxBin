@@ -41,6 +41,7 @@ func (a *Auditor) reportFileDiagnostics(ds []model.FileDiagnostic, sample int, a
 			Message:  diagMessage(d),
 			Path:     d.DisplayPath,
 			FilePID:  d.FilePID,
+			Reason:   string(d.Code),
 		})
 	}
 	for _, sev := range diagSeverities {
@@ -80,12 +81,18 @@ func (a *Auditor) reportCorruptDiagnostics(ds []model.FileDiagnostic, sample int
 		if !ok {
 			c = caps[model.SeverityWarn]
 		}
+		// An error is audio that does not decode; a warning, damage short of that.
+		why := model.CorruptDamaged
+		if d.Severity == model.SeverityError {
+			why = model.CorruptUndecodable
+		}
 		c.emit(model.AuditFinding{
 			Check:    model.CheckCorruptAudio,
 			Severity: d.Severity,
 			Message:  diagMessage(d),
 			Path:     d.DisplayPath,
 			FilePID:  d.FilePID,
+			Reason:   string(why),
 		})
 	}
 	for _, sev := range diagSeverities {

@@ -305,7 +305,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// can't clobber the book's narrator/series/etc. by scan order. The genres are still
 		// collected for every changed part so the genre rollup's summed-across-parts
 		// duration reflects a newly attached part.
-		changed := created || res.FileCreated || res.ContentChanged || res.Relinked || link.changed || rekinded
+		changed := created || res.FileCreated || res.ContentChanged || res.Relinked || link.changed || rekinded || in.ReResolve
 		// The fields the primary part's put re-derives, judged before upsertBook replaces
 		// them. Any read of the primary re-derives, a forced rescan of unchanged bytes
 		// included, the way a track's put does.

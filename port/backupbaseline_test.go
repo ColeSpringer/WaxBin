@@ -3,9 +3,11 @@ package port_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/testcatalog"
@@ -97,5 +99,67 @@ func stampUserVersion(t *testing.T, path string, v int32) {
 	if _, err := raw.ExecContext(context.Background(),
 		"PRAGMA user_version = "+strconv.FormatInt(int64(v), 10)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReadStampMatchesValidateBackup: the stamp read off a backup's header is the one this
+// build writes, which ValidateBackup and CheckStamp accept.
+func TestReadStampMatchesValidateBackup(t *testing.T) {
+	t.Parallel()
+	backup := backupOfFreshCatalog(t)
+	f, err := os.Open(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := port.ReadStamp(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := port.BaselineStamp()
+	if err != nil || got != want {
+		t.Fatalf("stamp = %08x, build's = %08x (err %v); want them equal", uint32(got), uint32(want), err)
+	}
+	if _, err := port.ValidateBackup(context.Background(), backup); err != nil {
+		t.Errorf("ValidateBackup: %v", err)
+	}
+	if err := port.CheckStamp(f); err != nil {
+		t.Errorf("CheckStamp: %v", err)
+	}
+}
+
+// TestCheckStampRefusesAForeignStampWithTheSameMessage: a file another baseline stamped is
+// refused by the header check in the words ValidateBackup uses.
+func TestCheckStampRefusesAForeignStampWithTheSameMessage(t *testing.T) {
+	t.Parallel()
+	backup := backupOfFreshCatalog(t)
+	stampUserVersion(t, backup, 0x5a5a5a5a)
+	f, err := os.Open(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if got, err := port.ReadStamp(f); err != nil || got != 0x5a5a5a5a {
+		t.Fatalf("stamp = %08x (err %v), want 5a5a5a5a", uint32(got), err)
+	}
+	checkErr := port.CheckStamp(f)
+	_, validErr := port.ValidateBackup(context.Background(), backup)
+	var c, v *waxerr.Error
+	if !errors.As(checkErr, &c) || !errors.As(validErr, &v) || c.Code != waxerr.CodeUnsupported || v.Code != waxerr.CodeUnsupported || c.Msg != v.Msg {
+		t.Fatalf("CheckStamp = %v, ValidateBackup = %v; want one CodeUnsupported message", checkErr, validErr)
+	}
+}
+
+// TestReadStampRefusesANonSQLiteFile: a file that is not an SQLite database, or too short to
+// hold a header, has no stamp to read.
+func TestReadStampRefusesANonSQLiteFile(t *testing.T) {
+	t.Parallel()
+	for name, content := range map[string]string{
+		"text":  strings.Repeat("not a database at all ", 10),
+		"short": "SQLite format 3\x00",
+	} {
+		if _, err := port.ReadStamp(strings.NewReader(content)); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s: err = %v, want CodeInvalid", name, err)
+		}
 	}
 }

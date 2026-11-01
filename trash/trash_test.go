@@ -2,10 +2,13 @@ package trash
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -91,6 +94,10 @@ func (fakeStore) DetachFile(context.Context, model.PID) (*model.DetachResult, er
 func (fakeStore) ItemFiles(context.Context, model.PID) ([]model.ItemFileRef, error) { return nil, nil }
 
 func (fakeStore) RipTracks(context.Context, model.PID) ([]model.ItemRef, error) { return nil, nil }
+
+func (fakeStore) PlanTrash(context.Context, model.TrashPending) error { return nil }
+
+func (fakeStore) AbortTrash(context.Context, model.PID) error { return nil }
 
 func writeAt(t *testing.T, p, content string) {
 	t.Helper()
@@ -464,5 +471,309 @@ func TestExecuteNamesEverySkip(t *testing.T) {
 		if rep.Skips[i] != want[i] {
 			t.Errorf("skip %d = %+v, want %+v", i, rep.Skips[i], want[i])
 		}
+	}
+}
+
+// stubStore answers the catalog writes a run makes with the errors and hooks a test sets,
+// refusing a canceled context the way the store does, and records what it was asked.
+type stubStore struct {
+	fakeStore
+	planErr, trashErr, detachErr error
+	onPlan, onTrash              func()
+	planned                      []model.TrashPending
+	aborted                      []model.PID
+	committed                    []model.TrashFileInput
+	detached                     int
+}
+
+func (s *stubStore) PlanTrash(ctx context.Context, in model.TrashPending) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.onPlan != nil {
+		s.onPlan()
+	}
+	if s.planErr != nil {
+		return s.planErr
+	}
+	s.planned = append(s.planned, in)
+	return nil
+}
+
+func (s *stubStore) AbortTrash(ctx context.Context, pid model.PID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.aborted = append(s.aborted, pid)
+	return nil
+}
+
+func (s *stubStore) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.DetachResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.onTrash != nil {
+		s.onTrash()
+	}
+	if s.trashErr != nil {
+		return nil, s.trashErr
+	}
+	s.committed = append(s.committed, in)
+	return &model.DetachResult{TrashPID: in.PID}, nil
+}
+
+func (s *stubStore) DetachFile(ctx context.Context, _ model.PID) (*model.DetachResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.detached++
+	if s.detachErr != nil {
+		return nil, s.detachErr
+	}
+	return &model.DetachResult{}, nil
+}
+
+// runOne plans and runs the deletion of the file at src under mode against st.
+func runOne(t *testing.T, ctx context.Context, st Store, root, src string, mode model.DeleteMode) (*Plan, *Report) {
+	t.Helper()
+	lib := &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged}
+	s := New(st, nil)
+	plan, err := s.PlanFiles(context.Background(), []*model.Library{lib},
+		[]FileTarget{{ItemPID: "i", File: model.ItemFileRef{FilePID: "f", Path: []byte(src), DisplayPath: src}}}, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.JobPID = "JOB"
+	rep, err := s.Execute(ctx, plan)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	return plan, rep
+}
+
+// TestAFailedDetachSaysTheFileIsGone: a permanent delete whose catalog write fails after
+// the file left the disk says so, and counts the bytes it reclaimed.
+func TestAFailedDetachSaysTheFileIsGone(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "Album", "song.mp3")
+	writeAt(t, src, "audio")
+	_, rep := runOne(t, context.Background(), &stubStore{detachErr: waxerr.New(waxerr.CodeIO, "test", "catalog write failed")}, root, src, model.DeletePermanent)
+	if rep.Errored != 1 || len(rep.Failures) != 1 || rep.Failures[0].Disk != DiskRemoved || rep.ReclaimedBytes != int64(len("audio")) {
+		t.Fatalf("report = %+v, want one failure saying the file left the disk and its bytes reclaimed", rep)
+	}
+	if fileExists(src) {
+		t.Error("the file is still on disk")
+	}
+}
+
+// TestAFailedRemoveSaysTheFileStayed: a permanent delete that could not remove the file
+// says it is where it was and writes nothing to the catalog.
+func TestAFailedRemoveSaysTheFileStayed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// A folder holding a file is something os.Remove refuses on every platform.
+	src := filepath.Join(root, "Album", "song.mp3")
+	writeAt(t, filepath.Join(src, "inside"), "x")
+	st := &stubStore{}
+	_, rep := runOne(t, context.Background(), st, root, src, model.DeletePermanent)
+	if rep.Errored != 1 || len(rep.Failures) != 1 || rep.Failures[0].Disk != DiskInPlace || rep.ReclaimedBytes != 0 || st.detached != 0 {
+		t.Fatalf("report = %+v (detached %d), want one failure leaving the file in place and no catalog write", rep, st.detached)
+	}
+}
+
+// TestAFailedRollbackSaysTheFileIsStranded: a trash move whose catalog write fails and
+// whose move back fails too (something took the original path meanwhile) names where the
+// file now is.
+func TestAFailedRollbackSaysTheFileIsStranded(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "Album", "song.mp3")
+	writeAt(t, src, "audio")
+	st := &stubStore{trashErr: waxerr.New(waxerr.CodeIO, "test", "catalog write failed")}
+	st.onTrash = func() { writeAt(t, src, "another") }
+	plan, rep := runOne(t, context.Background(), st, root, src, model.DeleteTrash)
+	trashed := plan.Actions[0].TrashDst
+	if rep.Errored != 1 || len(rep.Failures) != 1 || rep.Failures[0].Disk != DiskStranded || rep.Failures[0].TrashPath != trashed {
+		t.Fatalf("report = %+v, want one failure naming the file stranded at %s", rep, trashed)
+	}
+	if b, _ := os.ReadFile(trashed); string(b) != "audio" {
+		t.Errorf("trash copy = %q, want the file there", b)
+	}
+}
+
+// TestAFailedRollbackKeepsThePendingRow: the pending row of a stranded file stays, since it
+// is the file's only record until the next open finishes the move.
+func TestAFailedRollbackKeepsThePendingRow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "Album", "song.mp3")
+	writeAt(t, src, "audio")
+	st := &stubStore{trashErr: waxerr.New(waxerr.CodeIO, "test", "catalog write failed")}
+	st.onTrash = func() { writeAt(t, src, "another") }
+	runOne(t, context.Background(), st, root, src, model.DeleteTrash)
+	if len(st.planned) != 1 || len(st.aborted) != 0 {
+		t.Fatalf("planned %v, aborted %v; want the pending row planned and kept", st.planned, st.aborted)
+	}
+}
+
+// TestAFailedMoveLeavesNoPendingRowAndNoEntryFolder: a move that never happened drops its
+// pending row and the entry folder made for it.
+func TestAFailedMoveLeavesNoPendingRowAndNoEntryFolder(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "Album", "song.mp3") // never written: the move fails
+	writeAt(t, filepath.Join(root, "Album", "other.mp3"), "x")
+	st := &stubStore{}
+	plan, rep := runOne(t, context.Background(), st, root, src, model.DeleteTrash)
+	if rep.Errored != 1 || rep.Failures[0].Disk != DiskInPlace {
+		t.Fatalf("report = %+v, want one failure leaving the file in place", rep)
+	}
+	if len(st.planned) != 1 || len(st.aborted) != 1 || st.aborted[0] != st.planned[0].PID || len(st.committed) != 0 {
+		t.Fatalf("planned %v, aborted %v, committed %v; want the planned row aborted", st.planned, st.aborted, st.committed)
+	}
+	if fileExists(filepath.Dir(plan.Actions[0].TrashDst)) {
+		t.Error("the entry folder made for the move is still there")
+	}
+}
+
+// TestACancelAfterTheMoveStillWritesTheRow: a cancel that arrives once the move is under
+// way still lets the catalog write land, under the pid the pending row was planned with.
+func TestACancelAfterTheMoveStillWritesTheRow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "Album", "song.mp3")
+	writeAt(t, src, "audio")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st := &stubStore{onPlan: cancel}
+	plan, rep := runOne(t, ctx, st, root, src, model.DeleteTrash)
+	if rep.Trashed != 1 || rep.Errored != 0 || len(st.committed) != 1 {
+		t.Fatalf("report = %+v, committed %v; want the file trashed and its row written", rep, st.committed)
+	}
+	if len(st.planned) != 1 || st.committed[0].PID != st.planned[0].PID || st.planned[0].JobPID != "JOB" ||
+		string(st.planned[0].TrashPath) != plan.Actions[0].TrashDst {
+		t.Fatalf("planned %+v, committed %+v; want one pending row, written under its own pid", st.planned, st.committed)
+	}
+}
+
+// TestASidecarLeftBehindIsAFailure: a sidecar the run could not take with its file is a
+// failure naming it, left in place, beside the file's own success.
+func TestASidecarLeftBehindIsAFailure(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	album := filepath.Join(root, "Album")
+	src, lrc := filepath.Join(album, "Song.mp3"), filepath.Join(album, "Song.lrc")
+	writeAt(t, src, "audio")
+	writeAt(t, lrc, "lyrics")
+	lib := &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged}
+	s := New(&stubStore{}, nil)
+	plan, err := s.PlanFiles(context.Background(), []*model.Library{lib},
+		[]FileTarget{{ItemPID: "i", File: model.ItemFileRef{FilePID: "f", Path: []byte(src), DisplayPath: src}}}, model.DeleteTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file already where the lyrics would go in the entry keeps them out.
+	writeAt(t, filepath.Join(filepath.Dir(plan.Actions[0].TrashDst), "Song.lrc"), "taken")
+	rep, err := s.Execute(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Trashed != 1 || len(rep.Failures) != 1 || rep.Failures[0].Src != lrc || rep.Failures[0].Disk != DiskInPlace || rep.Failures[0].FilePID != "f" {
+		t.Fatalf("report = %+v, want the file trashed and its lyrics named as left in place", rep)
+	}
+	if !fileExists(lrc) {
+		t.Error("the lyrics are gone from the folder")
+	}
+}
+
+// TestPlanFoldersFollowTheRun: the folders a plan says its run will remove are the ones the
+// run removes: two deletes sharing a folder empty it, its parent goes in turn with the
+// companions each held, and an in-place library's folder stays for the cover it keeps.
+func TestPlanFoldersFollowTheRun(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []model.DeleteMode{model.DeleteTrash, model.DeletePermanent} {
+		t.Run(string(mode), func(t *testing.T) {
+			t.Parallel()
+			managed, inPlace := t.TempDir(), t.TempDir()
+			artist := filepath.Join(managed, "Artist")
+			album := filepath.Join(artist, "Album")
+			other := filepath.Join(inPlace, "Other")
+			for _, p := range []string{
+				filepath.Join(album, "01.mp3"), filepath.Join(album, "01.lrc"), filepath.Join(album, "02.mp3"), filepath.Join(album, "cover.jpg"),
+				filepath.Join(album, ".DS_Store"), filepath.Join(artist, "folder.jpg"),
+				filepath.Join(other, "03.mp3"), filepath.Join(other, "cover.jpg"),
+			} {
+				writeAt(t, p, filepath.Base(p))
+			}
+			libs := []*model.Library{
+				{Root: []byte(managed), DisplayRoot: managed, Mode: model.ModeManaged},
+				{Root: []byte(inPlace), DisplayRoot: inPlace, Mode: model.ModeInPlace},
+			}
+			var targets []FileTarget
+			for _, p := range []string{filepath.Join(album, "01.mp3"), filepath.Join(album, "02.mp3"), filepath.Join(other, "03.mp3")} {
+				targets = append(targets, FileTarget{ItemPID: "i", File: model.ItemFileRef{FilePID: model.PID(p), Path: []byte(p), DisplayPath: p}})
+			}
+			s := New(&stubStore{}, nil)
+			plan, err := s.PlanFiles(context.Background(), libs, targets, mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			folders := plan.Folders(plan.Sidecars())
+			want := []PrunedFolder{
+				{Dir: album, Junk: []string{filepath.Join(album, ".DS_Store")}, Companions: []string{filepath.Join(album, "cover.jpg")}},
+				{Dir: artist, Companions: []string{filepath.Join(artist, "folder.jpg")}},
+			}
+			if !reflect.DeepEqual(folders, want) {
+				t.Fatalf("plan folders = %+v, want %+v", folders, want)
+			}
+			rep, err := s.Execute(context.Background(), plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(rep.Pruned, folders) || rep.DirsPruned != 2 {
+				t.Fatalf("run pruned %+v (%d), want what the plan said", rep.Pruned, rep.DirsPruned)
+			}
+			if fileExists(artist) || !fileExists(filepath.Join(other, "cover.jpg")) {
+				t.Errorf("artist kept %v, in-place cover kept %v; want the artist gone and the cover kept", fileExists(artist), fileExists(filepath.Join(other, "cover.jpg")))
+			}
+		})
+	}
+}
+
+// TestAMoveThatLeavesACopyKeepsItsPendingRow: a move across filesystems whose source would
+// not go, and whose copy would not go either, leaves both files. The pending row stays, so
+// the next open settles the pair rather than the copy sitting in the trash unrecorded, and
+// the failure says the file is in place and where the copy is.
+func TestAMoveThatLeavesACopyKeepsItsPendingRow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "Album", "song.mp3")
+	writeAt(t, src, "audio")
+	st := &stubStore{}
+	s := New(st, nil)
+	s.move = func(from, to string) error {
+		writeAt(t, to, "audio")
+		return fmt.Errorf("remove %s: held open (%w)", from, fsx.ErrCopyLeft)
+	}
+	lib := &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged}
+	plan, err := s.PlanFiles(context.Background(), []*model.Library{lib},
+		[]FileTarget{{ItemPID: "i", File: model.ItemFileRef{FilePID: "f", Path: []byte(src), DisplayPath: src}}}, model.DeleteTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := s.Execute(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trashed := plan.Actions[0].TrashDst
+	if len(rep.Failures) != 1 || rep.Failures[0].Disk != DiskInPlace || rep.Failures[0].TrashPath != trashed {
+		t.Fatalf("failures = %+v, want the file in place and the copy named at %s", rep.Failures, trashed)
+	}
+	if len(st.planned) != 1 || len(st.aborted) != 0 || len(st.committed) != 0 {
+		t.Errorf("planned %d, aborted %v, committed %d; want the pending row kept", len(st.planned), st.aborted, len(st.committed))
+	}
+	if !fileExists(src) || !fileExists(trashed) {
+		t.Errorf("original kept %v, copy kept %v; want both, for the next open to settle", fileExists(src), fileExists(trashed))
 	}
 }

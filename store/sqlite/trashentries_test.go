@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 )
@@ -243,5 +244,43 @@ func TestTrashEntriesCutoffExcludesRestored(t *testing.T) {
 	all, err := st.TrashEntries(ctx, true, entry.TrashedAt+1, 0)
 	if err != nil || len(all) != 1 {
 		t.Fatalf("includeRestored with cutoff = %v (err %v), want the row", all, err)
+	}
+}
+
+// TestRecoverTrashTakesNoWriteWhenNothingSettles: a pending row waiting on a root that does
+// not answer settles nothing, so recovery takes no write transaction, as an open with
+// nothing to recover takes none; a write there would wait on the write connection at
+// every open and reopen.
+func TestRecoverTrashTakesNoWriteWhenNothingSettles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, _ := entityFixture(t)
+	away := filepath.Join(t.TempDir(), "unplugged")
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(away), DisplayRoot: away, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := putTrack(t, st, lib.ID, trackSpec{path: filepath.Join(away, "a.flac"), essence: "ea", content: "ca", title: "A", artist: "X", album: "A"})
+	trashed := filepath.Join(away, model.TrashDirName, "X", "a.flac")
+	if err := st.PlanTrash(ctx, model.TrashPending{PID: model.NewPID(), FilePID: r.FilePID, Reason: "dedup",
+		TrashPath: []byte(trashed), TrashDisplay: trashed}); err != nil {
+		t.Fatal(err)
+	}
+	st.wmu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.recoverTrash(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		st.wmu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		st.wmu.Unlock()
+		<-done
+		t.Fatal("recovery waited on the write connection with nothing to settle")
 	}
 }

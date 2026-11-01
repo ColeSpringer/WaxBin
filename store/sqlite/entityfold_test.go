@@ -2,22 +2,27 @@ package sqlite
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
 // foldKeys lists the keys an entity type's folds hold.
 func foldKeys(t *testing.T, st *Store, et model.MergeEntity) map[string]model.PID {
 	t.Helper()
-	folds, err := st.EntityFolds(context.Background(), et)
+	page, err := st.EntityFolds(context.Background(), et, "", 0)
 	if err != nil {
 		t.Fatalf("EntityFolds(%s): %v", et, err)
 	}
 	out := map[string]model.PID{}
-	for _, f := range folds {
+	for _, f := range page.Folds {
 		out[f.Key] = f.EntityPID
 	}
 	return out
@@ -424,5 +429,293 @@ func TestAFoldGoesWithItsEntity(t *testing.T) {
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_fold"); n != 0 {
 		t.Errorf("fold rows after the survivor was swept = %d, want none", n)
+	}
+}
+
+// TestAMergeRecordsTheLosersSpelling: a merge's fold keeps the spelling it retired, the
+// loser's name, and for an album the folder its members sat in, below its library's root.
+func TestAMergeRecordsTheLosersSpelling(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/One/1.mp3", essence: "e1", content: "c1", title: "One",
+		artist: "The Beatles", albumArt: "The Beatles", album: "Hits", genre: "Hip Hop", trackNo: 1})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/B/Two/2.mp3", essence: "e2", content: "c2", title: "Two",
+		artist: "Beatles", albumArt: "Beatles", album: "Greatest", genre: "Hip-Hop Rap", trackNo: 1})
+	for _, m := range []struct {
+		et               model.MergeEntity
+		table, col, s, l string
+	}{
+		{model.MergeArtist, "artist", "name", "The Beatles", "Beatles"},
+		{model.MergeAlbum, "album", "title", "Hits", "Greatest"},
+		{model.MergeReleaseGroup, "release_group", "title", "Hits", "Greatest"},
+		{model.MergeGenre, "genre", "name", "Hip Hop", "Hip-Hop Rap"},
+	} {
+		survivor, loser := entityPIDByName(t, st, m.table, m.col, m.s), entityPIDByName(t, st, m.table, m.col, m.l)
+		if _, err := st.MergeEntity(ctx, m.et, survivor, loser); err != nil {
+			t.Fatalf("merge %s: %v", m.et, err)
+		}
+		page, err := st.EntityFolds(ctx, m.et, "", 0)
+		if err != nil || len(page.Folds) != 1 {
+			t.Fatalf("%s folds = %+v (err %v), want one", m.et, page, err)
+		}
+		f := page.Folds[0]
+		if f.Name != m.l || f.EntityPID != survivor {
+			t.Errorf("%s fold = %+v, want %q kept on the survivor", m.et, f, m.l)
+		}
+		wantFolder, wantLib := "", model.PID("")
+		if m.et == model.MergeAlbum {
+			wantFolder, wantLib = filepath.Join("B", "Two"), lib.PID
+		}
+		if f.Folder != wantFolder || f.LibraryPID != wantLib {
+			t.Errorf("%s fold folder = %q in %q, want %q in %q", m.et, f.Folder, f.LibraryPID, wantFolder, wantLib)
+		}
+	}
+}
+
+// TestALockedRenameRecordsTheOldSpelling: a locked rename's fold keeps the name it left,
+// and an album's the folder its members sit in.
+func TestALockedRenameRecordsTheOldSpelling(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	user := model.Attribution{Source: model.SourceUser}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", albumArt: "Beatles",
+		album: "One", trackNo: 1, preserveLocks: true})
+	artist := entityPIDByName(t, st, "artist", "name", "Beatles")
+	if _, err := st.RenameEntity(ctx, model.MergeArtist, artist, map[string]string{"name": "The Beatles"}, user, model.LockOf(true), false); err != nil {
+		t.Fatal(err)
+	}
+	page, err := st.EntityFolds(ctx, model.MergeArtist, "", 0)
+	if err != nil || len(page.Folds) != 1 || page.Folds[0].Name != "Beatles" || page.Folds[0].EntityName != "The Beatles" {
+		t.Fatalf("artist folds = %+v (err %v), want the old spelling kept beside the new name", page, err)
+	}
+	album := entityPIDByName(t, st, "album", "title", "One")
+	if _, err := st.RenameEntity(ctx, model.MergeAlbum, album, map[string]string{"album": "Number One"}, user, model.LockOf(true), false); err != nil {
+		t.Fatal(err)
+	}
+	// The artist's rename re-keyed the album, folding the key it left, and the album's own
+	// rename folds the next: both keep the title they were read from and the folder.
+	page, err = st.EntityFolds(ctx, model.MergeAlbum, "", 0)
+	if err != nil || len(page.Folds) != 2 {
+		t.Fatalf("album folds = %+v (err %v), want the artist rename's and the title rename's", page, err)
+	}
+	for _, f := range page.Folds {
+		if f.Name != "One" || f.Folder != "a" || f.LibraryPID != lib.PID || f.EntityName != "Number One" {
+			t.Errorf("album fold = %+v, want the old title One in folder a of the library", f)
+		}
+	}
+}
+
+// TestEntityFoldsPageInKeyOrder: folds page by key, a cursor resuming after the last, and
+// the default page holds them all.
+func TestEntityFoldsPageInKeyOrder(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/s.flac", essence: "es", content: "cs", title: "S", artist: "Survivor", album: "S"})
+	for i, name := range []string{"Charlie", "Alpha", "Bravo"} {
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + name + ".flac", essence: "e" + name, content: "c" + name,
+			title: name, artist: name, album: name, trackNo: i + 1})
+		if _, err := st.MergeEntity(ctx, model.MergeArtist, entityPIDByName(t, st, "artist", "name", "Survivor"),
+			entityPIDByName(t, st, "artist", "name", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := st.EntityFolds(ctx, model.MergeArtist, "", 2)
+	if err != nil || len(page.Folds) != 2 || page.Folds[0].Key != "alpha" || page.Folds[1].Key != "bravo" || !page.HasMore || page.Next != "bravo" {
+		t.Fatalf("first page = %+v (err %v), want alpha and bravo and a cursor at bravo", page, err)
+	}
+	page, err = st.EntityFolds(ctx, model.MergeArtist, page.Next, 2)
+	if err != nil || len(page.Folds) != 1 || page.Folds[0].Key != "charlie" || page.HasMore || page.Next != "" {
+		t.Fatalf("second page = %+v (err %v), want charlie alone", page, err)
+	}
+	if page, err := st.EntityFolds(ctx, model.MergeArtist, "", 0); err != nil || len(page.Folds) != 3 {
+		t.Errorf("default page = %+v (err %v), want all three", page, err)
+	}
+}
+
+// TestUnfoldDropsTheMatchingAlias: the alias a merge kept for the loser's name goes with the
+// fold of that name, and the survivor's other aliases stay.
+func TestUnfoldDropsTheMatchingAlias(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "The Beatles", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "Beatles", album: "B"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "Fab Four", album: "C"})
+	survivor := entityPIDByName(t, st, "artist", "name", "The Beatles")
+	for _, name := range []string{"Beatles", "Fab Four"} {
+		if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, entityPIDByName(t, st, "artist", "name", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UnfoldEntity(ctx, model.MergeArtist, "beatles"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := st.EntityByPID(ctx, read.EntityArtist, survivor)
+	if err != nil || !reflect.DeepEqual(info.Aliases, []string{"Fab Four"}) {
+		t.Fatalf("aliases after the unfold = %+v (err %v), want Fab Four alone", info, err)
+	}
+}
+
+// TestItemsByEntityKeyedSpellingNamesWhatTheFoldKept: a genre's kept items are told by
+// their genre list, leaving the genre's own out, and an artist's are every item it is
+// credited on, its own included, since no stored text replays how a file spelled it.
+func TestItemsByEntityKeyedSpellingNamesWhatTheFoldKept(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	own := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "The Beatles", album: "A", genre: "Rock"})
+	kept := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "Beatles", album: "B", genre: "Rock & Roll"})
+	byAlbumArtist := putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "Guest",
+		albumArt: "Beatles", album: "B", genre: "Rock & Roll; Pop"})
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, entityPIDByName(t, st, "artist", "name", "The Beatles"),
+		entityPIDByName(t, st, "artist", "name", "Beatles")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MergeEntity(ctx, model.MergeGenre, entityPIDByName(t, st, "genre", "name", "Rock"),
+		entityPIDByName(t, st, "genre", "name", "Rock & Roll")); err != nil {
+		t.Fatal(err)
+	}
+	want := []model.PID{kept.ItemPID, byAlbumArtist.ItemPID}
+	slices.Sort(want)
+	every := []model.PID{own.ItemPID, kept.ItemPID, byAlbumArtist.ItemPID}
+	slices.Sort(every)
+	for _, tc := range []struct {
+		et   model.MergeEntity
+		key  string
+		want []model.PID
+	}{
+		{model.MergeArtist, "beatles", every},
+		{model.MergeGenre, "genre:rock roll", want},
+		{model.MergeArtist, "nobody", nil},
+	} {
+		got, err := st.ItemsByEntityKeyedSpelling(ctx, tc.et, tc.key)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("%s %q = %v (err %v), want %v", tc.et, tc.key, got, err, tc.want)
+		}
+	}
+}
+
+// TestAPutWithReResolveRelinksAnUnchangedBook: a book read again unchanged keeps the author
+// a fold gave it, and a read that re-resolves files it under the author it states.
+func TestAPutWithReResolveRelinksAnUnchangedBook(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b/1.m4b", essence: "be1", content: "bc1", title: "First", author: "Frank Herbert"})
+	spec := bookSpec{path: "/lib/b/2.m4b", essence: "be2", content: "bc2", title: "Second", author: "F. Herbert"}
+	putBook(t, st, lib.ID, spec)
+	survivor := entityPIDByName(t, st, "artist", "name", "Frank Herbert")
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, entityPIDByName(t, st, "artist", "name", "F. Herbert")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UnfoldEntity(ctx, model.MergeArtist, "f herbert"); err != nil {
+		t.Fatal(err)
+	}
+	author := func() string {
+		return scalarStr(t, st, `SELECT a.pid FROM book b JOIN artist a ON a.id = b.author_id
+			JOIN playable_item pi ON pi.id = b.item_id WHERE pi.title = 'Second'`)
+	}
+	putBook(t, st, lib.ID, spec)
+	if got := author(); got != string(survivor) {
+		t.Fatalf("an unchanged read moved the book to %s; the test's premise is gone", got)
+	}
+	in := bookSpecInput(lib.ID, spec)
+	in.ReResolve = true
+	if _, err := st.PutScannedBook(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := author(); got == string(survivor) {
+		t.Errorf("the re-resolving read left the book on the survivor %s, want the author it states", got)
+	}
+}
+
+// TestItemsByEntityKeyedSpellingNamesEveryCreditOfAnArtist: an artist a fold kept can sit
+// in a joint credit, its own name only part of the text, or in a credit the item's text puts
+// second, so an unfold reads every item the entity is credited on in any role.
+func TestItemsByEntityKeyedSpellingNamesEveryCreditOfAnArtist(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/s.flac", essence: "es", content: "cs", title: "S", artist: "Shawn Carter", album: "S"})
+	var want []model.PID
+	for i, credit := range []string{"Jay-Z", "Jay-Z feat. Rihanna", "Rihanna feat. Jay-Z"} {
+		r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + strconv.Itoa(i) + ".flac", essence: "e" + strconv.Itoa(i),
+			content: "c" + strconv.Itoa(i), title: "T" + strconv.Itoa(i), artist: credit, album: "A" + strconv.Itoa(i)})
+		want = append(want, r.ItemPID)
+	}
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, entityPIDByName(t, st, "artist", "name", "Shawn Carter"),
+		entityPIDByName(t, st, "artist", "name", "Jay-Z")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ItemsByEntityKeyedSpelling(ctx, model.MergeArtist, "jay z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range want {
+		if !slices.Contains(got, pid) {
+			t.Errorf("items = %v, want %v among them", got, pid)
+		}
+	}
+}
+
+// TestCheckFoldsNamesTheKeysNoFoldHolds: the check refuses as UnfoldEntity would, naming
+// each key no fold holds once, and forgets nothing.
+func TestCheckFoldsNamesTheKeysNoFoldHolds(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "The Beatles", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "Beatles", album: "B"})
+	survivor := entityPIDByName(t, st, "artist", "name", "The Beatles")
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, entityPIDByName(t, st, "artist", "name", "Beatles")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CheckFolds(ctx, model.MergeArtist, "beatles"); err != nil {
+		t.Errorf("check of a held key = %v, want nil", err)
+	}
+	err := st.CheckFolds(ctx, model.MergeArtist, "beatles", "nobody", "nobody")
+	if !waxerr.Is(err, waxerr.CodeNotFound) || strings.Count(err.Error(), "nobody") != 1 || strings.Contains(err.Error(), `"beatles"`) {
+		t.Errorf("check with an unknown key = %v, want CodeNotFound naming it alone, once", err)
+	}
+	if err := st.CheckFolds(ctx, model.MergeAlbum, "beatles"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("check of an artist key as an album = %v, want CodeNotFound", err)
+	}
+	for _, bad := range []error{st.CheckFolds(ctx, "planet", "beatles"), st.CheckFolds(ctx, model.MergeArtist)} {
+		if !waxerr.Is(bad, waxerr.CodeInvalid) {
+			t.Errorf("check with a bad type or no keys = %v, want CodeInvalid", bad)
+		}
+	}
+	if got := foldKeys(t, st, model.MergeArtist); len(got) != 1 || got["beatles"] != survivor {
+		t.Errorf("folds after the checks = %v, want beatles still held", got)
+	}
+}
+
+// TestPrimaryFilesNamesEachItemsPrimaryInOneRead: each item's primary file comes back with
+// its path and library, a book's representative part among them, and a pid naming no item
+// is left out.
+func TestPrimaryFilesNamesEachItemsPrimaryInOneRead(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	track := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "A"})
+	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/b/1.mp3", essence: "eb", content: "cb", title: "B", author: "Y", position: 1})
+	got, err := st.PrimaryFiles(ctx, []model.PID{track.ItemPID, book.ItemPID, track.ItemPID, "nothing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("primary files = %v, want the two items'", got)
+	}
+	for _, c := range []struct {
+		res  *model.ScanItemResult
+		path string
+	}{{track, "/lib/a.flac"}, {book, "/lib/b/1.mp3"}} {
+		f := got[c.res.ItemPID]
+		if f.FilePID != c.res.FilePID || string(f.Path) != c.path || f.LibraryPID != lib.PID || f.Role != "primary" {
+			t.Errorf("primary of %s = %+v, want %s at %s in %s", c.res.ItemPID, f, c.res.FilePID, c.path, lib.PID)
+		}
 	}
 }

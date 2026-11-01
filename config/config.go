@@ -4,6 +4,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -308,19 +309,32 @@ func (c *Config) Validate() error {
 
 // CheckFolder refuses a root a scan could never walk: a path that is not a folder, or one
 // that cannot be reached unless absent is allowed (a drive or volume mounted later, which
-// may answer a stat with an error of its own until it is).
-func CheckFolder(path string, absent bool) error {
+// may answer a stat with an error of its own until it is). The stat is bounded by ctx and
+// fsx.RootCheckTimeout, and one that does not answer in time passes only as an absent root.
+func CheckFolder(ctx context.Context, path string, absent bool) error {
+	return FolderVerdict(path, absent, fsx.RootUnreachableCtx(ctx, path, fsx.RootCheckTimeout))
+}
+
+// FolderVerdict is CheckFolder's ruling on what a root check of path answered (reach), for
+// a caller that ran the check itself.
+func FolderVerdict(path string, absent bool, reach error) error {
 	const op = "config.CheckFolder"
-	err := fsx.RootUnreachable(path)
 	switch {
-	case errors.Is(err, fsx.ErrNotDir):
+	case errors.Is(reach, fsx.ErrNotDir):
 		return waxerr.New(waxerr.CodeInvalid, op, "library root is not a directory: "+path)
-	case err == nil || absent:
+	case reach == nil:
 		return nil
-	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+	case errors.Is(reach, context.Canceled) || errors.Is(reach, context.DeadlineExceeded):
+		return waxerr.FromContext(op, reach, waxerr.CodeIO)
+	case absent:
+		return nil
+	case errors.Is(reach, fs.ErrNotExist) || errors.Is(reach, syscall.ENOTDIR):
 		return waxerr.New(waxerr.CodeInvalid, op, "library root does not exist: "+path+" (allow an absent root to register one mounted later)")
+	case errors.Is(reach, fsx.ErrUnverified):
+		return waxerr.New(waxerr.CodeIO, op, "library root check timed out: "+path+
+			" did not answer (allow an absent root to register one that is not mounted now)")
 	}
-	return waxerr.Wrap(waxerr.CodeIO, op, err)
+	return waxerr.Wrap(waxerr.CodeIO, op, reach)
 }
 
 // ParseRootSpec parses a CLI root spec "path[:mode[:media[:profile]]]" into a Root.

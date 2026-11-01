@@ -44,18 +44,23 @@ func TestOrganizeUndoAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("organize history: %v", err)
 	}
-	var history struct {
-		Data []struct {
-			JobPID    string `json:"jobPid"`
-			Kind      string `json:"kind"`
-			Committed int    `json:"committed"`
+	type historyJSON struct {
+		Data struct {
+			Batches []struct {
+				JobPID    string `json:"jobPid"`
+				Kind      string `json:"kind"`
+				Committed int    `json:"committed"`
+			} `json:"batches"`
+			NextCursor string `json:"nextCursor"`
+			HasMore    bool   `json:"hasMore"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(out), &history); err != nil || len(history.Data) != 1 ||
-		history.Data[0].Kind != "organize" || history.Data[0].Committed != 1 {
+	var history historyJSON
+	if err := json.Unmarshal([]byte(out), &history); err != nil || len(history.Data.Batches) != 1 || history.Data.HasMore ||
+		history.Data.Batches[0].Kind != "organize" || history.Data.Batches[0].Committed != 1 {
 		t.Fatalf("organize history printed %q (err %v), want the organize with one move", out, err)
 	}
-	job := history.Data[0].JobPID
+	job := history.Data.Batches[0].JobPID
 	text, err := runCLIText(t, db, root, "organize", "history")
 	if err != nil || !strings.Contains(text, job) {
 		t.Fatalf("organize history text = %q (err %v), want the job listed", text, err)
@@ -75,6 +80,24 @@ func TestOrganizeUndoAndHistory(t *testing.T) {
 	}
 	if _, err := os.Stat(src); err != nil {
 		t.Errorf("the file is not back: %v", err)
+	}
+
+	// The undo is a run too, and the history pages through both, the newest first.
+	out, err = runCLIJSON(t, db, root, "organize", "history", "--limit", "1")
+	var page historyJSON
+	if err != nil || json.Unmarshal([]byte(out), &page) != nil || len(page.Data.Batches) != 1 ||
+		page.Data.Batches[0].Kind != "organize-undo" || !page.Data.HasMore || page.Data.NextCursor == "" {
+		t.Fatalf("organize history --limit 1 printed %q (err %v), want the undo and a cursor", out, err)
+	}
+	cursor := page.Data.NextCursor
+	out, err = runCLIJSON(t, db, root, "organize", "history", "--limit", "1", "--cursor", cursor)
+	page = historyJSON{}
+	if err != nil || json.Unmarshal([]byte(out), &page) != nil || len(page.Data.Batches) != 1 ||
+		page.Data.Batches[0].JobPID != job || page.Data.HasMore {
+		t.Fatalf("the next page printed %q (err %v), want the organize alone", out, err)
+	}
+	if text, err := runCLIText(t, db, root, "organize", "history", "--limit", "1"); err != nil || !strings.Contains(text, "--cursor "+cursor) {
+		t.Errorf("organize history --limit 1 text = %q (err %v), want it to name the cursor to read on with", text, err)
 	}
 
 	// More days than a duration holds keeps everything, as any age past the journal's would.

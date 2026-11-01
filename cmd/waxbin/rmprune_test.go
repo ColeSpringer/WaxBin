@@ -58,11 +58,14 @@ func TestRmReportsThePrunedFolders(t *testing.T) {
 	}
 	var rep struct {
 		Data struct {
-			DirsPruned int `json:"dirsPruned"`
+			DirsPruned int                  `json:"dirsPruned"`
+			Pruned     []trash.PrunedFolder `json:"pruned"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(out), &rep); err != nil || rep.Data.DirsPruned != 1 {
-		t.Fatalf("rm printed %q (err %v), want one folder pruned", out, err)
+	one := filepath.Join(root, "One")
+	if err := json.Unmarshal([]byte(out), &rep); err != nil || rep.Data.DirsPruned != 1 || len(rep.Data.Pruned) != 1 ||
+		rep.Data.Pruned[0].Dir != one || len(rep.Data.Pruned[0].Companions) != 1 || rep.Data.Pruned[0].Companions[0] != filepath.Join(one, "cover.jpg") {
+		t.Fatalf("rm printed %q (err %v), want the folder One pruned with its cover", out, err)
 	}
 
 	cmd := newRootCmd(&globals{})
@@ -82,7 +85,7 @@ func TestRmReportsThePrunedFolders(t *testing.T) {
 }
 
 // TestRmDryRunListsWhatGoesWithAFile: the dry run names each file's own sidecars under it,
-// and says that a permanent delete also takes a managed folder's companions.
+// and the folders the run would empty and remove.
 func TestRmDryRunListsWhatGoesWithAFile(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -120,11 +123,15 @@ func TestRmDryRunListsWhatGoesWithAFile(t *testing.T) {
 			Actions []struct {
 				Sidecars []string `json:"sidecars"`
 			} `json:"actions"`
+			Folders []trash.PrunedFolder `json:"folders"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &plan); err != nil || len(plan.Data.Actions) != 1 ||
 		len(plan.Data.Actions[0].Sidecars) != 1 || plan.Data.Actions[0].Sidecars[0] != filepath.Join(album, "1.lrc") {
 		t.Fatalf("rm plan printed %q (err %v), want the lyrics under the file", out, err)
+	}
+	if len(plan.Data.Folders) != 1 || plan.Data.Folders[0].Dir != album {
+		t.Fatalf("rm plan folders = %+v, want the album folder the delete empties", plan.Data.Folders)
 	}
 
 	cmd := newRootCmd(&globals{})
@@ -135,8 +142,9 @@ func TestRmDryRunListsWhatGoesWithAFile(t *testing.T) {
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		t.Fatalf("rm --permanent: %v", err)
 	}
-	if text := stdout.String(); !strings.Contains(text, "with  "+filepath.Join(album, "1.lrc")) || !strings.Contains(text, "companions") {
-		t.Fatalf("rm --permanent dry run printed %q, want the lyrics listed and the folder companions noted", text)
+	if text := stdout.String(); !strings.Contains(text, "with  "+filepath.Join(album, "1.lrc")) ||
+		!strings.Contains(text, "folders this run would empty (if nothing changes meanwhile):\n  "+album+"\n") {
+		t.Fatalf("rm --permanent dry run printed %q, want the lyrics and the emptied folder listed", text)
 	}
 }
 

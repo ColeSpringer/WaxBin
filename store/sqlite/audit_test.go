@@ -90,9 +90,9 @@ func TestDuplicateAlbumsSurvivorHasMostTracks(t *testing.T) {
 	if len(sets) != 1 || len(sets[0].Members) != 2 {
 		t.Fatalf("want one duplicate-album set of 2, got %+v", sets)
 	}
-	// The pair shares a name too, and is reported once, by its MBID.
-	if sets[0].Reason != "shared MBID" {
-		t.Errorf("reason = %q, want shared MBID", sets[0].Reason)
+	// The pair shares a name too, and is reported once, by its MBID, which the set names.
+	if sets[0].Reason != model.ReasonSharedMBID || sets[0].MBID != "mb-hits" {
+		t.Errorf("reason = %q (%q), want shared MBID mb-hits", sets[0].Reason, sets[0].MBID)
 	}
 	// The survivor (first member) must be the album backing the most tracks, so a
 	// merge re-points the fewest tracks and keeps the larger album's PID.

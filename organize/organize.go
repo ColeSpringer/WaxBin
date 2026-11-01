@@ -67,6 +67,9 @@ const (
 	HoldVirtual      HoldCode = "virtual"       // a cue rip's shared file, carrying several tracks
 	HoldBookHeld     HoldCode = "book-held"     // another part of the book is held, and a book moves whole
 	HoldReadOnly     HoldCode = "read-only"     // the file's library is read-only
+	// HoldRootUnreachable is a file under a library root that does not answer as a folder
+	// (a drive not mounted, or a stat that timed out), held from one check of the root.
+	HoldRootUnreachable HoldCode = "root-unreachable"
 )
 
 // hold marks an action as not moving, for code.
@@ -107,6 +110,9 @@ type Plan struct {
 	// covers and companions an organize carries, so they come back exactly.
 	Undo       bool            `json:",omitempty"`
 	Companions []CompanionStep `json:",omitempty"`
+	// DiskChecked says Hold looked at the disk: a plan made with SkipDiskCheck says where
+	// each file belongs and what the catalog holds, not whether the move can be made.
+	DiskChecked bool
 }
 
 // CompanionStep is one step with a folder companion: moved or copied from Src to Dst, or,
@@ -205,6 +211,10 @@ type Organizer struct {
 	cat    model.Catalog
 	writer TagWriter
 	log    *slog.Logger
+	// roots checks a plan's library roots, bounded in time; its zero value is the plain
+	// bounded stat.
+	roots fsx.RootChecker
+	mover func(sp *fsx.Speller, src, dst string) error // moveFile; tests fail it
 }
 
 // New builds an organizer. writer may be nil when tag write-back is never used.
@@ -212,7 +222,7 @@ func New(cat model.Catalog, writer TagWriter, log *slog.Logger) *Organizer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Organizer{cat: cat, writer: writer, log: log}
+	return &Organizer{cat: cat, writer: writer, log: log, mover: moveFile}
 }
 
 // PlanOptions carries what the catalog knows beyond an item's own tags.
@@ -225,6 +235,11 @@ type PlanOptions struct {
 	// title, so tracks tagged with two spellings of one artist or album file under one
 	// folder rather than two.
 	Names map[model.PID]string
+	// SkipDiskCheck plans from the catalog alone: Hold leaves out its look at the disk (each
+	// source's stat, each destination folder's listing, each root's check) and keeps what
+	// the catalog and the batch answer. The plan's DiskChecked is false, and an apply holds
+	// it again with the disk pass (see Reopen).
+	SkipDiskCheck bool
 }
 
 // Plan computes the destination for each item under the profile. Items with no
@@ -265,7 +280,7 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 		}
 		plan.Actions = append(plan.Actions, acts...)
 	}
-	if err := o.Hold(ctx, plan); err != nil {
+	if err := o.hold(ctx, plan, !opts.SkipDiskCheck); err != nil {
 		return nil, err
 	}
 	return plan, nil
@@ -586,13 +601,30 @@ func orderBookMoves(acts []Action) []Action {
 // or beside it under a name apart only by case or Unicode form, holds it, as does a catalog
 // row for a file gone from that path; a destination another move of the plan vacates is
 // free, since Execute waits that move, and a file's own entry under another spelling is no
-// occupant. A held part holds the rest of its book. Plan runs it, and an apply runs it
-// again over a plan made earlier (see Reopen).
-func (o *Organizer) Hold(ctx context.Context, plan *Plan) error {
+// occupant. A held part holds the rest of its book. Each library root is checked once, with
+// a bounded stat, before any file under it: a root that does not answer holds every move
+// under it as root-unreachable. Plan runs it, and an apply runs it again over a plan made
+// earlier (see Reopen).
+func (o *Organizer) Hold(ctx context.Context, plan *Plan) error { return o.hold(ctx, plan, true) }
+
+// hold is Hold, without its look at the disk when disk is false (PlanOptions.SkipDiskCheck).
+func (o *Organizer) hold(ctx context.Context, plan *Plan, disk bool) error {
+	plan.DiskChecked = disk
+	if disk {
+		if err := o.holdUnreachableRoots(ctx, plan); err != nil {
+			return err
+		}
+	}
 	var dsts [][]byte
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.Skip && a.Code != HoldInPlace {
+			continue
+		}
+		if !disk {
+			if !a.Skip {
+				dsts = append(dsts, []byte(a.Dst))
+			}
 			continue
 		}
 		if _, err := os.Lstat(pathx.Long(a.Src)); errors.Is(err, fs.ErrNotExist) {
@@ -632,7 +664,7 @@ func (o *Organizer) Hold(ctx context.Context, plan *Plan) error {
 				continue
 			}
 			if found[i] == nil {
-				oc, err := o.occupant(ctx, ls, known, a)
+				oc, err := o.occupant(ctx, ls, known, a, disk)
 				if err != nil {
 					return err
 				}
@@ -655,14 +687,15 @@ func (o *Organizer) Hold(ctx context.Context, plan *Plan) error {
 }
 
 // Reopen clears the holds that follow from how disk and catalog stood when the plan was
-// made (a collision, an occupied destination, a missing file, a held book part, a read-only
-// library), so a Hold run later decides them again as things then stand. A file in place,
-// an untagged item, a cue rip and a book part outside its library stay as planned.
+// made (a collision, an occupied destination, a missing file, a root out of reach, a held
+// book part, a read-only library), so a Hold run later decides them again as things then
+// stand. A file in place, an untagged item, a cue rip and a book part outside its library
+// stay as planned.
 func (p *Plan) Reopen() {
 	for i := range p.Actions {
 		a := &p.Actions[i]
 		switch a.Code {
-		case HoldCollision, HoldOccupied, HoldOccupiedCase, HoldMissing, HoldBookHeld, HoldReadOnly:
+		case HoldCollision, HoldOccupied, HoldOccupiedCase, HoldMissing, HoldRootUnreachable, HoldBookHeld, HoldReadOnly:
 			if a.Dst == "" {
 				continue
 			}
@@ -672,6 +705,27 @@ func (p *Plan) Reopen() {
 			}
 		}
 	}
+}
+
+// holdUnreachableRoots checks each library root the plan's moves and in-place files sit
+// under, once, and holds every one under a root that does not answer as a folder.
+func (o *Organizer) holdUnreachableRoots(ctx context.Context, plan *Plan) error {
+	gate := fsx.RootGate{Checker: o.roots}
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		root := cmp.Or(a.Root, plan.Root)
+		if a.Skip && a.Code != HoldInPlace || root == "" {
+			continue
+		}
+		err := gate.Root(ctx, root)
+		if ctx.Err() != nil {
+			return waxerr.FromContext("organize.Hold", ctx.Err(), waxerr.CodeIO)
+		}
+		if err != nil {
+			a.hold(HoldRootUnreachable, "library root "+root+" cannot be reached: "+err.Error())
+		}
+	}
+	return nil
 }
 
 // vacated reports whether the file at path is the source of a move still in the plan,
@@ -697,8 +751,16 @@ type occupant struct {
 
 // occupant finds what holds an action's destination: an entry of its folder under its
 // name or one apart only by case, else the catalog's row for the path. known holds the
-// catalog's files at the plan's destinations, read at once.
-func (o *Organizer) occupant(ctx context.Context, ls *fsx.Lister, known map[string]model.PID, a *Action) (occupant, error) {
+// catalog's files at the plan's destinations, read at once. Without disk it asks the
+// catalog alone.
+func (o *Organizer) occupant(ctx context.Context, ls *fsx.Lister, known map[string]model.PID, a *Action, disk bool) (occupant, error) {
+	if !disk {
+		what, err := o.cataloged(ctx, a.ItemPID, known[a.Dst])
+		if what == "" || err != nil {
+			return occupant{}, err
+		}
+		return occupant{path: a.Dst, code: HoldOccupied, reason: "destination is held in the catalog by " + what + ": " + a.Dst}, nil
+	}
 	p, exact, err := ls.Occupant(a.Src, a.Dst)
 	if err != nil {
 		return occupant{path: a.Dst, code: HoldOccupied, reason: "destination cannot be looked at: " + err.Error()}, nil
@@ -947,9 +1009,9 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 // its folder.
 func (o *Organizer) prune(ctx context.Context, roots map[string]string, moved []SidecarMove, jobPID model.PID) int {
 	if moved == nil {
-		return fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
+		return len(fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
 			return PruneOptions(roots[dir], nil)
-		}, func(dir string, err error) { o.log.Warn("pruning an emptied folder", "dir", dir, "err", err) })
+		}, func(dir string, err error) { o.log.Warn("pruning an emptied folder", "dir", dir, "err", err) }))
 	}
 	d := FolderDisposal(moved, func(src string) string { return roots[filepath.Dir(src)] })
 	n := fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
@@ -958,7 +1020,7 @@ func (o *Organizer) prune(ctx context.Context, roots map[string]string, moved []
 		return opts
 	}, func(dir string, err error) { o.log.Warn("pruning an emptied folder", "dir", dir, "err", err) })
 	o.journalCompanions(ctx, jobPID, d.Carried())
-	return n
+	return len(n)
 }
 
 // journalCompanions records the companion steps a run took, so an undo can take them back;
@@ -1067,11 +1129,13 @@ func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID mode
 	if err != nil {
 		return err
 	}
-	if err := moveFile(sp, a.Src, tmp); err != nil {
-		_ = o.cat.AbortMove(ctx, jpid)
+	// Once the file moves, the catalog follows whatever the run's context does.
+	settle := context.WithoutCancel(ctx)
+	if err := o.mover(sp, a.Src, tmp); err != nil {
+		o.abortMove(settle, jpid, err)
 		return err
 	}
-	if err := o.cat.CommitMove(ctx, jpid, in); err != nil {
+	if err := o.cat.CommitMove(settle, jpid, in); err != nil {
 		return err
 	}
 	sib.Left(a.Src)
@@ -1079,6 +1143,16 @@ func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID mode
 	o.moveSidecars(sp, a.Src, tmp, sib)
 	a.Src, a.SrcBytes = tmp, []byte(tmp)
 	return nil
+}
+
+// abortMove marks a journaled move that failed with err as not made, unless it left a
+// copy at its destination beside the source: that row stays planned, so the next open
+// settles the pair (the copy removed) rather than the copy staying unrecorded.
+func (o *Organizer) abortMove(ctx context.Context, jpid model.PID, err error) {
+	if errors.Is(err, fsx.ErrCopyLeft) {
+		return
+	}
+	_ = o.cat.AbortMove(ctx, jpid)
 }
 
 // respelled follows a folder the Speller renamed to another spelling: the catalog's paths
@@ -1105,8 +1179,9 @@ func (o *Organizer) respelled(ctx context.Context, plan *Plan, from, to string) 
 // aborts the action cleanly with the file still in place), journals the move as
 // 'planned', performs it on disk, then commits the catalog update as 'committed'
 // plus a paired file-state update recording the re-tag's new hash/mtime. If the
-// move fails, it marks the journal row 'rolled_back' (and records the re-tag at the
-// un-moved source so the catalog reflects the bytes on disk).
+// move fails, it marks the journal row 'rolled_back' unless the move left a copy behind
+// (abortMove), and records the re-tag at the un-moved source so the catalog reflects
+// the bytes on disk.
 func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, rep *Report, sp *fsx.Speller) error {
 	in := model.RelocateInput{
 		FilePID:        a.FilePID,
@@ -1144,19 +1219,21 @@ func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID mod
 	if err != nil {
 		return err
 	}
-	if err := moveFile(sp, a.Src, a.Dst); err != nil {
-		_ = o.cat.AbortMove(ctx, jpid)
+	// Once the file moves, the catalog follows whatever the run's context does.
+	settle := context.WithoutCancel(ctx)
+	if err := o.mover(sp, a.Src, a.Dst); err != nil {
+		o.abortMove(settle, jpid, err)
 		// The retag succeeded but the move did not: record the new bytes at the
 		// un-moved source so the next scan does not re-hash it, then surface the move error.
-		o.recordRetag(ctx, a.FilePID, prevSize, prevMtime, retag)
+		o.recordRetag(settle, a.FilePID, prevSize, prevMtime, retag)
 		return err
 	}
-	if err := o.cat.CommitMove(ctx, jpid, in); err != nil {
+	if err := o.cat.CommitMove(settle, jpid, in); err != nil {
 		return err
 	}
 	// CommitMove updated only the path; record the re-tag's new size/mtime/hash and
 	// stamp organize provenance for the fields we wrote.
-	o.recordRetag(ctx, a.FilePID, prevSize, prevMtime, retag)
+	o.recordRetag(settle, a.FilePID, prevSize, prevMtime, retag)
 	// Collected before the Changed gate. A write whose only effect was a value the
 	// format could not store leaves the bytes unchanged, so it reports Changed=false
 	// while being the case most worth surfacing.

@@ -528,7 +528,8 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// Resolve normalized entities and refresh the item's FTS row when the scan
 		// actually changed catalog inputs. A byte-identical rescan skips this work
 		// and emits no entity-side deltas.
-		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked || res.MetadataChanged || rekinded
+		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked || res.MetadataChanged || rekinded ||
+			in.ReResolve
 		if entitiesResolved {
 			// The entities the item leaves (on a retag) lose the track, so collect
 			// them before relinking, and the entities it joins after.

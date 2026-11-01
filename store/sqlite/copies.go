@@ -178,18 +178,17 @@ const (
 	goneFromRoot
 )
 
-// reachOf classifies a file, statting each library root once per roots map: a promotion
-// looks at one item's alternates, which mostly share a root or two.
-func reachOf(path, root []byte, roots map[string]bool) reach {
-	if pathExists(path) {
+// reachOf classifies a file through gate, which checks each library root once (a promotion
+// looks at one item's alternates, which mostly share a root or two) before any file below
+// it: a file under a root that does not answer is not statted, since that stat would wait
+// on the same mount, holding the write connection. A check its context cut off says
+// nothing of the root, so the file reads as under an absent root rather than gone.
+func reachOf(ctx context.Context, path, root []byte, gate *fsx.RootGate) reach {
+	_, err := gate.Stat(ctx, string(root), string(path))
+	switch {
+	case err == nil:
 		return onDisk
-	}
-	up, seen := roots[string(root)]
-	if !seen {
-		up = fsx.RootUnreachable(string(root)) == nil
-		roots[string(root)] = up
-	}
-	if !up {
+	case errors.Is(err, fsx.ErrRootDown) || ctx.Err() != nil:
 		return rootAbsent
 	}
 	return goneFromRoot
@@ -729,7 +728,7 @@ func bestAlternateTx(ctx context.Context, tx *sql.Tx, itemID int64, keep func(al
 		return nil, err
 	}
 	var cands []altCandidate
-	roots := map[string]bool{}
+	var gate fsx.RootGate
 	for rows.Next() {
 		var c altCandidate
 		var root []byte
@@ -742,7 +741,7 @@ func bestAlternateTx(ctx context.Context, tx *sql.Tx, itemID int64, keep func(al
 		if keep != nil && !keep(c) {
 			continue
 		}
-		if c.reach = reachOf(c.path, root, roots); c.reach <= worst {
+		if c.reach = reachOf(ctx, c.path, root, &gate); c.reach <= worst {
 			cands = append(cands, c)
 		}
 	}

@@ -149,6 +149,11 @@ type Request struct {
 	// locked it, so a `scan --force --ignore-locks` deliberately discards curated
 	// edits. Off by default: a normal or forced scan preserves locked fields.
 	IgnoreLocks bool
+	// ReResolve reads every file as Force does and resolves each one's artists, album,
+	// genres and a book's author and series from its tags again, which a read of
+	// unchanged bytes otherwise skips, so files land under the names they state rather
+	// than where an earlier resolve or a fold since forgotten put them. Locked fields hold.
+	ReResolve bool
 }
 
 // Result tallies what a scan did. Every field but Missing counts files, not items: the
@@ -288,7 +293,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{LibraryPID: req.Library.PID, LibraryName: req.Library.DisplayRoot}
-	if err := fsx.RootUnreachable(root); err != nil {
+	if err := fsx.RootUnreachableCtx(ctx, root, fsx.RootCheckTimeout); err != nil {
+		if ctx.Err() != nil {
+			return nil, waxerr.FromContext(op, ctx.Err(), waxerr.CodeIO)
+		}
 		s.noteReach(root, err)
 		res.WalkErrors, res.RootUnreachable = 1, true
 		if hb != nil {
@@ -296,7 +304,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		}
 		return res, nil
 	}
-	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
+	sc := &scanCtx{cache: artCacheAt(root), force: req.Force || req.ReResolve, reResolve: req.ReResolve, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
 		folders: map[string]*folderState{}, adoption: req.Adoption, ids: &identities{}}
 	if sc.adopt && sc.adoption == nil {
 		sc.adoption = &Adoption{}
@@ -430,6 +438,7 @@ func subPathGone(sub string) bool {
 type scanCtx struct {
 	index         map[string]model.ScopedFile // path -> known file; entries deleted as visited
 	force         bool                        // bypass the fast-path (re-hash everything)
+	reResolve     bool                        // resolve every put's entities again (Request.ReResolve)
 	adopt         bool                        // pass WAXBIN_ITEM_PID hints to the store (rebuild)
 	adoption      *Adoption                   // the rebuild's run state, set when adopt is
 	preserveLocks bool                        // keep user-locked fields from being re-derived from tags
@@ -479,7 +488,7 @@ func (s *Scanner) reconcileMissing(ctx context.Context, root, walkRoot string, s
 	info, statErr := os.Stat(walkRoot)
 	unread := sc.unreadable
 	switch {
-	case errors.Is(statErr, fs.ErrNotExist) && walkRoot != root && (res.SubPathGone || fsx.RootUnreachable(root) == nil):
+	case errors.Is(statErr, fs.ErrNotExist) && walkRoot != root && (res.SubPathGone || fsx.RootUnreachableCtx(ctx, root, fsx.RootCheckTimeout) == nil):
 		// The sub-path is genuinely gone from a root that is there: reconcile what it held.
 		unread = nil
 	case errors.Is(statErr, fs.ErrNotExist):
@@ -622,6 +631,8 @@ type FileOptions struct {
 	Position *int
 	Pin      bool
 	Job      model.PID
+	// ReResolve resolves the file's entities from its tags again (Request.ReResolve).
+	ReResolve bool
 }
 
 // ScanFileWith is ScanFileAs with the options an import passes.
@@ -638,7 +649,7 @@ func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path str
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
 	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position,
-		pin: opts.Pin, job: opts.Job, ids: &identities{}}
+		pin: opts.Pin, job: opts.Job, reResolve: opts.ReResolve, ids: &identities{}}
 	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, opts.Kind); err != nil {
 		res.Errored++
 		return res, nil, err
@@ -966,14 +977,14 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.PreserveLocks = sc.preserveLocks
 		bin.Derived = derived
 		bin.LockKind, bin.KindForced = lockKind, forceKind != ""
-		bin.DeferRollups, bin.Job = sc.rollups != nil, sc.job
+		bin.DeferRollups, bin.ReResolve, bin.Job = sc.rollups != nil, sc.reResolve, sc.job
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		in := trackInput(lib.ID, file, tags, essenceHash)
 		in.Lyrics, in.CoverArt, in.AuxObservations = lyrics, cover, aux
 		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
 		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
-		in.DeferRollups, in.Job = sc.rollups != nil, sc.job
+		in.DeferRollups, in.ReResolve, in.Job = sc.rollups != nil, sc.reResolve, sc.job
 		out, err = s.cat.PutScannedTrack(ctx, in)
 	}
 	if err != nil {

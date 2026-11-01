@@ -2,13 +2,16 @@ package organize
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
@@ -649,5 +652,124 @@ func TestHoldReadsTheCatalogOnceForItsDestinations(t *testing.T) {
 	}
 	if cat.byPath != 0 || cat.byPaths != 1 {
 		t.Errorf("catalog reads by path = %d single, %d batched; want none single and one batched", cat.byPath, cat.byPaths)
+	}
+}
+
+// TestHoldWithoutDiskKeepsCatalogAndBatchAnswers: a plan made without the disk pass says
+// what the catalog and the batch say (a destination the catalog holds, a collision, a book
+// held whole) and nothing only the disk would: a source gone from disk and a stray file at
+// a destination hold nothing, and the plan says it was not checked. The same items planned
+// with the disk pass are held for both.
+func TestHoldWithoutDiskKeepsCatalogAndBatchAnswers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	o, st, lib := holdLib(t)
+	root := lib.RootPath()
+	gone := holdTrack(t, st, lib, filepath.Join("in", "One.mp3"), "e-1", "One", 1)
+	if err := os.Remove(filepath.Join(root, "in", "One.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	stray := holdTrack(t, st, lib, filepath.Join("in", "Two.mp3"), "e-2", "Two", 2)
+	mustMkdir(t, filepath.Join(root, "A", "Al"))
+	mustWrite(t, filepath.Join(root, "A", "Al", "02 - Two.mp3"))
+	occupied := holdTrack(t, st, lib, filepath.Join("in", "Three.mp3"), "e-3", "Three", 3)
+	holdTrack(t, st, lib, filepath.Join("A", "Al", "03 - Three.mp3"), "e-9", "Other", 9)
+	first := holdTrack(t, st, lib, filepath.Join("in", "Four.mp3"), "e-4", "Four", 4)
+	second := holdTrack(t, st, lib, filepath.Join("in", "Four again.mp3"), "e-5", "Four", 4)
+	book := holdBookPart(t, st, lib, filepath.Join("in", "dune1.mp3"), "e-6", 1)
+	holdBookPart(t, st, lib, filepath.Join("in", "dune2.mp3"), "e-7", 2)
+	holdTrack(t, st, lib, filepath.Join("Frank Herbert", "Dune", "Dune - 02.mp3"), "e-8", "Stray", 8)
+	bookView, err := st.ItemByPID(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []*model.ItemView{gone, stray, occupied, first, second, bookView}
+
+	plan, err := o.Plan(ctx, lib, nativeProfile, items, PlanOptions{SkipDiskCheck: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.DiskChecked {
+		t.Error("a plan made without the disk pass says it was checked")
+	}
+	for item, want := range map[model.PID]HoldCode{gone.PID: "", stray.PID: "", occupied.PID: HoldOccupied, first.PID: "", second.PID: HoldCollision} {
+		if a := actionOf(t, plan, item); a.Code != want || a.Skip != (want != "") {
+			t.Errorf("unchecked %s = %+v, want code %q", a.Src, a, want)
+		}
+	}
+	for _, a := range plan.Actions {
+		if a.ItemPID == book && (!a.Skip || (a.Code != HoldBookHeld && a.Code != HoldOccupied)) {
+			t.Errorf("book part %s = %+v, want the book held whole", a.Src, a)
+		}
+	}
+
+	checked := planFor(t, o, lib, nativeProfile, items...)
+	if !checked.DiskChecked {
+		t.Error("a plan made with the disk pass says it was not checked")
+	}
+	if a := actionOf(t, checked, gone.PID); a.Code != HoldMissing {
+		t.Errorf("checked gone source = %+v, want missing", a)
+	}
+	if a := actionOf(t, checked, stray.PID); a.Code != HoldOccupied {
+		t.Errorf("checked stray destination = %+v, want occupied", a)
+	}
+}
+
+// TestAnUnreachableRootHoldsItsMovesOnce: a checked plan whose library root cannot be
+// reached holds every move under it as root-unreachable from one check of the root, rather
+// than as a missing file each.
+func TestAnUnreachableRootHoldsItsMovesOnce(t *testing.T) {
+	t.Parallel()
+	o, st, lib := holdLib(t)
+	one := holdTrack(t, st, lib, filepath.Join("in", "One.mp3"), "e-1", "One", 1)
+	two := holdTrack(t, st, lib, filepath.Join("in", "Two.mp3"), "e-2", "Two", 2)
+	if err := os.RemoveAll(lib.RootPath()); err != nil {
+		t.Fatal(err)
+	}
+	var checks atomic.Int32
+	o.roots = fsx.RootChecker{Stat: func(p string) error { checks.Add(1); return fsx.RootUnreachable(p) }}
+	plan := planFor(t, o, lib, nativeProfile, one, two)
+	for _, a := range plan.Actions {
+		if !a.Skip || a.Code != HoldRootUnreachable {
+			t.Errorf("%s = %+v, want held as root-unreachable", a.Src, a)
+		}
+	}
+	if n := checks.Load(); n != 1 {
+		t.Errorf("checked the root %d times, want once", n)
+	}
+}
+
+// abortRecorder is a catalog that notes the moves a run aborts.
+type abortRecorder struct {
+	*sqlite.Store
+	aborted []model.PID
+}
+
+func (c *abortRecorder) AbortMove(ctx context.Context, pid model.PID) error {
+	c.aborted = append(c.aborted, pid)
+	return c.Store.AbortMove(ctx, pid)
+}
+
+// TestAMoveThatLeavesACopyKeepsItsJournalRow: a move across filesystems whose source would
+// not go, and whose copy would not go either, leaves both files, so its journal row stays
+// planned for the next open to settle the pair rather than the copy staying unrecorded.
+func TestAMoveThatLeavesACopyKeepsItsJournalRow(t *testing.T) {
+	t.Parallel()
+	o, st, lib := holdLib(t)
+	it := holdTrack(t, st, lib, filepath.Join("in", "song.mp3"), "e-1", "Song", 1)
+	cat := &abortRecorder{Store: st}
+	run := New(cat, nil, o.log)
+	run.mover = func(_ *fsx.Speller, src, dst string) error {
+		mustMkdir(t, filepath.Dir(dst))
+		mustWrite(t, dst)
+		return fmt.Errorf("remove %s: held open (%w)", src, fsx.ErrCopyLeft)
+	}
+	plan := planFor(t, run, lib, nativeProfile, it)
+	rep, err := run.Execute(context.Background(), plan, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Errored != 1 || len(cat.aborted) != 0 {
+		t.Fatalf("report = %+v, aborted %v; want the move errored and its row kept", rep, cat.aborted)
 	}
 }

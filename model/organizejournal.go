@@ -44,3 +44,12 @@ type OrganizeBatch struct {
 	RolledBack int
 	Planned    int
 }
+
+// OrganizeBatchPage is a page of organize runs, the newest started first. Next is the job
+// pid to pass as the cursor for the following page; it is empty exactly when HasMore is
+// false.
+type OrganizeBatchPage struct {
+	Batches []OrganizeBatch
+	Next    PID
+	HasMore bool
+}

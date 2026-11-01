@@ -60,14 +60,17 @@ func newOrganizeUndoCmd(g *globals) *cobra.Command {
 }
 
 func newOrganizeHistoryCmd(g *globals) *cobra.Command {
-	var limit int
+	var (
+		limit  int
+		cursor string
+	)
 	cmd := &cobra.Command{
 		Use:   "history",
 		Short: "List the organize jobs whose moves the journal holds",
 		Long: "Lists the organize and undo jobs the organize journal holds moves for, newest " +
-			"first, with how many of their moves committed, rolled back, or wait on a crash " +
-			"recovery. A job listed here can be undone with `organize undo`; `db vacuum " +
-			"--journal-days` prunes old ones.",
+			"first, a page at a time, with how many of their moves committed, rolled back, or " +
+			"wait on a crash recovery. A job listed here can be undone with `organize undo`; " +
+			"`db vacuum --journal-days` prunes old ones.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			lib, _, err := g.openRead(cmd)
@@ -75,7 +78,7 @@ func newOrganizeHistoryCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			batches, err := lib.OrganizeHistory(ctx(cmd), limit)
+			page, err := lib.OrganizeHistory(ctx(cmd), model.PID(cursor), limit)
 			if err != nil {
 				return err
 			}
@@ -89,25 +92,33 @@ func newOrganizeHistoryCmd(g *globals) *cobra.Command {
 					RolledBack int    `json:"rolledBack"`
 					Planned    int    `json:"planned"`
 				}
-				rows := make([]batchJSON, 0, len(batches))
-				for _, b := range batches {
+				rows := make([]batchJSON, 0, len(page.Batches))
+				for _, b := range page.Batches {
 					rows = append(rows, batchJSON{string(b.JobPID), b.Kind, string(b.State), b.StartedAt, b.Committed, b.RolledBack, b.Planned})
 				}
-				return printJSON(cmd, rows)
+				return printJSON(cmd, struct {
+					Batches    []batchJSON `json:"batches"`
+					NextCursor string      `json:"nextCursor,omitempty"`
+					HasMore    bool        `json:"hasMore"`
+				}{rows, string(page.Next), page.HasMore})
 			}
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "JOB\tKIND\tSTATE\tSTARTED\tMOVED\tROLLED BACK\tPENDING")
-			for _, b := range batches {
+			for _, b := range page.Batches {
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\n", b.JobPID, b.Kind, b.State,
 					time.Unix(0, b.StartedAt).Local().Format("2006-01-02 15:04:05"), b.Committed, b.RolledBack, b.Planned)
 			}
 			if err := tw.Flush(); err != nil {
 				return err
 			}
-			fmt.Fprintf(out(cmd), "(%s)\n", plural(len(batches), "organize job"))
+			fmt.Fprintf(out(cmd), "(%s)\n", plural(len(page.Batches), "organize job"))
+			if page.HasMore {
+				fmt.Fprintf(out(cmd), "(more: organize history --cursor %s)\n", page.Next)
+			}
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 0, "list at most this many jobs (0 = all)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "list at most this many jobs (0 = the default page of 100)")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "keyset cursor from a prior page's nextCursor")
 	return cmd
 }

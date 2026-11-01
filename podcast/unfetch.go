@@ -83,6 +83,6 @@ func (s *Service) pruneFolders(paths ...string) int {
 			dirs = append(dirs, filepath.Dir(p))
 		}
 	}
-	return fsx.PruneAll(dirs, func(string) fsx.PruneOptions { return fsx.PruneOptions{Root: s.cfg.Dir, Junk: fsx.IsJunk} },
-		func(dir string, err error) { s.log.Warn("pruning an emptied podcast folder", "dir", dir, "err", err) })
+	return len(fsx.PruneAll(dirs, func(string) fsx.PruneOptions { return fsx.PruneOptions{Root: s.cfg.Dir, Junk: fsx.IsJunk} },
+		func(dir string, err error) { s.log.Warn("pruning an emptied podcast folder", "dir", dir, "err", err) }))
 }

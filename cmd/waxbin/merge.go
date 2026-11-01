@@ -18,8 +18,10 @@ func newMergeCmd(g *globals) *cobra.Command {
 			"provenance ride along), unioning MBID/enrichment state, recomputing rollups, " +
 			"and deleting the losers. The survivor keeps its public id, and each loser's key " +
 			"folds into it, so a file still spelled the loser's way resolves to the survivor " +
-			"when it is read again (`entity folds` lists the keys, `entity unfold` forgets " +
-			"one); a `db reset` starts the catalog over from the files, folds and all, so tag " +
+			"when it is read again (`entity folds` lists the keys with the spelling each was " +
+			"read from, `entity unfold` forgets one, and `entity unfold --re-resolve` also " +
+			"reads again the files the fold kept, filing each under the name it states); a " +
+			"`db reset` starts the catalog over from the files, folds and all, so tag " +
 			"them alike to keep a merge through one. Use `audit` to find duplicate artists/albums/genres to merge. An " +
 			"album's key holds its folder, so merged albums stay merged while their files keep " +
 			"their folders and tags; a retag or a move to another folder can split them again.",

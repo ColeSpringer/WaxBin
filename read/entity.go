@@ -91,6 +91,10 @@ type EntityInfo struct {
 	// author). A fileless member, such as an undownloaded episode carrying the
 	// genre, contributes nothing.
 	LibraryPIDs []model.PID
+
+	// Aliases are an artist's other names, by name: a merged loser's, a name a locked
+	// rename left, those enrichment found. Empty for every other kind.
+	Aliases []string
 }
 
 // EntityPage is one keyset-paginated window of entity summaries in collation order

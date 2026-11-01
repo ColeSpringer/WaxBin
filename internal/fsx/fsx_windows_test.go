@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // TestSpellerRenamesByCase: on a case-insensitive filesystem a move onto the same path in
@@ -80,5 +82,14 @@ func TestSpelledAfterACaseOnlyRename(t *testing.T) {
 	}
 	if NewLister().Spelled(dir, src) || !NewLister().Spelled(dir, dst) {
 		t.Error("after the rename, want the destination spelled as listed and the source not")
+	}
+}
+
+// TestARenameAcrossVolumesIsCrossDevice: Windows refuses a rename onto another volume with
+// ERROR_NOT_SAME_DEVICE, never EXDEV, so Move copies on that answer.
+func TestARenameAcrossVolumesIsCrossDevice(t *testing.T) {
+	t.Parallel()
+	if !crossDevice(&os.LinkError{Op: "rename", Old: `C:\a`, New: `D:\a`, Err: windows.ERROR_NOT_SAME_DEVICE}) {
+		t.Error("ERROR_NOT_SAME_DEVICE is not read as a move across filesystems")
 	}
 }

@@ -58,10 +58,16 @@ type PruneOptions struct {
 	Undo func(path string) error
 }
 
-// PruneReport lists the folders a prune removed, deepest first, and the companions it
-// handed to Dispose.
+// PruneReport lists the folders a prune removed, deepest first.
 type PruneReport struct {
-	Removed, Disposed []string
+	Folders []PrunedDir
+}
+
+// PrunedDir is a folder a prune removed, with the junk it deleted from it and the
+// companions it handed to Dispose.
+type PrunedDir struct {
+	Dir              string
+	Junk, Companions []string
 }
 
 // PruneDirs removes start and then each folder above it that holds nothing but junk and,
@@ -76,22 +82,113 @@ func PruneDirs(start string, o PruneOptions) (PruneReport, error) {
 }
 
 // PruneAll prunes each of dirs once, in order, with the options opts gives for it, passes
-// an error to warn with the folder it stopped at, and returns how many folders went.
-func PruneAll(dirs []string, opts func(dir string) PruneOptions, warn func(dir string, err error)) int {
-	pruned := 0
+// an error to warn with the folder it stopped at, and returns the folders that went.
+func PruneAll(dirs []string, opts func(dir string) PruneOptions, warn func(dir string, err error)) []PrunedDir {
+	return pruneAll(osDirs{}, dirs, opts, warn)
+}
+
+func pruneAll(fsys dirFS, dirs []string, opts func(dir string) PruneOptions, warn func(dir string, err error)) []PrunedDir {
+	var pruned []PrunedDir
 	seen := map[string]bool{}
 	for _, dir := range dirs {
 		if seen[dir] {
 			continue
 		}
 		seen[dir] = true
-		rep, err := PruneDirs(dir, opts(dir))
+		rep, err := pruneDirs(fsys, dir, opts(dir))
 		if err != nil && warn != nil {
 			warn(dir, err)
 		}
-		pruned += len(rep.Removed)
+		pruned = append(pruned, rep.Folders...)
 	}
 	return pruned
+}
+
+// PreviewPrune is PruneAll run over the folders as they will be once the files in removed
+// are gone, touching nothing: it lists the folders the prune would remove, with the junk
+// it would delete and the companions it would hand to Dispose (each Dispose taken to
+// succeed), if nothing changes meanwhile. A removed path takes the entry it resolves to on
+// the disk, so a file whose folder lists it under another case or Unicode form than the
+// path goes where the disk folds names, as the removal itself would take it.
+func PreviewPrune(dirs []string, opts func(dir string) PruneOptions, removed map[string]bool) []PrunedDir {
+	fsys := previewDirs{gone: map[string]bool{}, folded: map[string][]string{}}
+	for p, gone := range removed {
+		p = filepath.Clean(p)
+		fsys.gone[p] = gone
+		if gone {
+			fsys.folded[pathx.CollisionKey(p)] = append(fsys.folded[pathx.CollisionKey(p)], p)
+		}
+	}
+	return pruneAll(fsys, dirs, func(dir string) PruneOptions {
+		o := opts(dir)
+		if o.Dispose != nil {
+			o.Dispose = func(string) error { return nil }
+		}
+		o.Undo = nil
+		return o
+	}, nil)
+}
+
+// previewDirs is the OS less what is gone: a removal is recorded rather than made. folded
+// keys the planned removals by their folded paths.
+type previewDirs struct {
+	osDirs
+	gone   map[string]bool
+	folded map[string][]string
+}
+
+func (p previewDirs) Lstat(path string) (fs.FileInfo, error) {
+	if p.gone[path] {
+		return nil, fs.ErrNotExist
+	}
+	return p.osDirs.Lstat(path)
+}
+
+func (p previewDirs) Stat(path string) (fs.FileInfo, error) {
+	if p.gone[path] {
+		return nil, fs.ErrNotExist
+	}
+	return p.osDirs.Stat(path)
+}
+
+func (p previewDirs) ReadDir(path string) ([]fs.DirEntry, error) {
+	entries, err := p.osDirs.ReadDir(path)
+	listed := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		listed[e.Name()] = true
+	}
+	return slices.DeleteFunc(entries, func(e fs.DirEntry) bool {
+		full := filepath.Join(path, e.Name())
+		return p.gone[full] || p.resolvesTo(full, listed)
+	}), err
+}
+
+// resolvesTo reports whether a planned removal names the file at full under another
+// spelling: a removed path in its folder, not listed there itself, that the disk resolves
+// to the same file (a filesystem folding case or form). A second name listed beside the
+// removed one (a hard link) is a file of its own.
+func (p previewDirs) resolvesTo(full string, listed map[string]bool) bool {
+	for _, r := range p.folded[pathx.CollisionKey(full)] {
+		if r == full || filepath.Dir(r) != filepath.Dir(full) || listed[filepath.Base(r)] {
+			continue
+		}
+		a, errA := os.Lstat(pathx.Long(r))
+		b, errB := os.Lstat(pathx.Long(full))
+		if errA == nil && errB == nil && os.SameFile(a, b) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p previewDirs) Remove(path string) error {
+	p.gone[path] = true
+	return nil
+}
+
+func (p previewDirs) RemoveAll(path string) error {
+	p.gone[path] = true
+	return nil
 }
 
 func pruneDirs(fsys dirFS, start string, o PruneOptions) (PruneReport, error) {
@@ -148,8 +245,7 @@ func pruneDirs(fsys dirFS, start string, o PruneOptions) (PruneReport, error) {
 		if err := fsys.Remove(dir); err != nil {
 			return rep, errors.Join(refused(err), undo(o, taken))
 		}
-		rep.Disposed = append(rep.Disposed, taken...)
-		rep.Removed = append(rep.Removed, dir)
+		rep.Folders = append(rep.Folders, PrunedDir{Dir: dir, Junk: junk, Companions: taken})
 	}
 	return rep, nil
 }

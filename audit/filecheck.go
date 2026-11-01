@@ -112,6 +112,7 @@ func (a *Auditor) checkInvalidFeeds(ctx context.Context, add func(model.AuditFin
 					Severity: model.SeverityWarn,
 					Message:  msg,
 					Entities: []model.PID{p.PID},
+					Reason:   string(model.FeedBadURL),
 				})
 				continue
 			}
@@ -122,6 +123,7 @@ func (a *Auditor) checkInvalidFeeds(ctx context.Context, add func(model.AuditFin
 				Severity: model.SeverityInfo,
 				Message:  "podcast \"" + p.Title + "\" has no episodes",
 				Entities: []model.PID{p.PID},
+				Reason:   string(model.FeedNoEpisodes),
 			})
 		}
 	}
@@ -307,6 +309,7 @@ func (a *Auditor) checkIntegrity(ctx context.Context, files []model.AuditFileInf
 				Path:     f.DisplayPath,
 				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
+				Reason:   string(model.IntegrityUnreadable),
 			})
 			continue
 		}
@@ -318,6 +321,7 @@ func (a *Auditor) checkIntegrity(ctx context.Context, files []model.AuditFileInf
 				Path:     f.DisplayPath,
 				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
+				Reason:   string(model.IntegrityHashChanged),
 			})
 		}
 	}
@@ -359,6 +363,7 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 				Path:     f.DisplayPath,
 				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
+				Reason:   string(model.CorruptUndecodable),
 			})
 		case len(damage) > 0:
 			more := ""
@@ -372,6 +377,7 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 				Path:     f.DisplayPath,
 				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
+				Reason:   string(model.CorruptDamaged),
 			})
 		}
 	}
@@ -421,6 +427,7 @@ func (c *capped) summary(noun string) {
 			Check:    c.check,
 			Severity: c.sev,
 			Message:  strconv.Itoa(c.total) + " " + noun + " (" + strconv.Itoa(c.shown) + " shown)",
+			More:     c.total - c.shown,
 		})
 	}
 }

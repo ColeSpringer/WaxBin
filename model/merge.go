@@ -63,11 +63,24 @@ type MergeReport struct {
 // EntityFold is one key a merge retired, still naming the entity it folded into: a scan
 // resolving that key reaches the entity instead of minting the loser the merge did away
 // with. Key is what the type's resolver looks up, the match key (a genre's with its facet
-// before it, "genre:hip hop").
+// before it, "genre:hip hop"). Name is the spelling the key was read from, for a person to
+// recognize, and for an album Folder is the folder its members sat in below the root of
+// the library LibraryPID names (both empty when none sat under one).
 type EntityFold struct {
 	EntityType MergeEntity
 	Key        string
 	EntityPID  PID
 	EntityName string
 	CreatedAt  int64 // unix nanoseconds
+	Name       string
+	Folder     string
+	LibraryPID PID
+}
+
+// EntityFoldPage is a page of an entity type's folds in key order. Next is the key to pass
+// as the cursor for the following page; it is empty exactly when HasMore is false.
+type EntityFoldPage struct {
+	Folds   []EntityFold
+	Next    string
+	HasMore bool
 }

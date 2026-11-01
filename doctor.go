@@ -2,10 +2,12 @@ package waxbin
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/internal/caps"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
@@ -18,13 +20,16 @@ type DoctorReport struct {
 	// migrated by a read-write command (doctor itself never migrates).
 	SchemaVersion      int
 	BuildSchemaVersion int
-	ReadOnly           bool
-	Owner              sqlite.OwnerInfo
-	LibraryCount       int // library roots, the internal podcast library left out
-	ItemCount          int
-	FingerprintCount   int
-	LoudnessCount      int // files with a stored ReplayGain measurement
-	PodcastCount       int // subscribed feeds
+	// BaselineStamp is the schema stamp this build writes into a catalog it creates
+	// (port.BaselineStamp, as eight hex digits), the one a backup must hold to restore.
+	BaselineStamp    string
+	ReadOnly         bool
+	Owner            sqlite.OwnerInfo
+	LibraryCount     int // library roots, the internal podcast library left out
+	ItemCount        int
+	FingerprintCount int
+	LoudnessCount    int // files with a stored ReplayGain measurement
+	PodcastCount     int // subscribed feeds
 
 	// Enrichment coverage: entities looked up, and how many a provider matched.
 	EnrichedEntities int
@@ -82,6 +87,11 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 		return nil, err
 	}
 	rep.SchemaVersion = version
+	stamp, err := port.BaselineStamp()
+	if err != nil {
+		return nil, err
+	}
+	rep.BaselineStamp = fmt.Sprintf("%08x", uint32(stamp))
 
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {

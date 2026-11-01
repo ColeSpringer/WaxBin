@@ -8,13 +8,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 
 	"github.com/colespringer/waxbin/internal/pathx"
 	"golang.org/x/text/unicode/norm"
@@ -66,8 +66,8 @@ func Move(src, dst string) error {
 		return err
 	}
 	if err := os.Rename(pathx.Long(src), pathx.Long(dst)); err != nil {
-		if errors.Is(err, syscall.EXDEV) {
-			return copyThenRemove(src, dst)
+		if crossDevice(err) {
+			return copyThenRemove(src, dst, func(p string) error { return os.Remove(pathx.Long(p)) })
 		}
 		return err
 	}
@@ -395,11 +395,25 @@ func (sp *Speller) MoveOrCopy(src, dst string, asCopy bool) error {
 	return MoveOrCopy(src, dst, asCopy)
 }
 
-func copyThenRemove(src, dst string) error {
+// ErrCopyLeft is part of the error of a copied move whose source stayed and whose copy
+// could not be removed either: both files are left.
+var ErrCopyLeft = errors.New("fsx: the copy is left at the destination")
+
+func copyThenRemove(src, dst string, remove func(string) error) error {
 	if err := copyContents(src, dst); err != nil {
 		return err
 	}
-	return os.Remove(pathx.Long(src))
+	// A source another process removed meanwhile is a move made, the copy the file now. A
+	// source that stays means the move did not happen, so the copy goes too, and when it
+	// will not the error says both are left.
+	err := remove(src)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if rmErr := remove(dst); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		return fmt.Errorf("%w (%w)", err, ErrCopyLeft)
+	}
+	return err
 }
 
 // copyContents copies src to dst with O_EXCL (so it never clobbers even if a racing

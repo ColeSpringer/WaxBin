@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/colespringer/waxbin"
@@ -97,7 +98,7 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 		mode += ", reason " + plan.Reason
 	}
 	fmt.Fprintf(w, "Delete plan (mode %s): %d action(s), %d would delete\n", mode, len(plan.Actions), plan.Pending())
-	managed, sidecars := false, plan.Sidecars()
+	sidecars := plan.Sidecars()
 	for i, a := range plan.Actions {
 		if a.Skip {
 			fmt.Fprintf(w, "  skip  %s (%s)\n", a.Src, a.Reason)
@@ -118,32 +119,46 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 			}
 			fmt.Fprintf(w, "    the cue rip's tracks: %s\n", strings.Join(pids, ", "))
 		}
-		managed = managed || !a.InPlace
 	}
-	if managed && plan.Mode.BypassesTrash() {
-		fmt.Fprintln(w, "(a managed folder this empties is removed, its covers and other companions with it)")
+	if folders := plan.Folders(sidecars); len(folders) > 0 {
+		fmt.Fprintln(w, "folders this run would empty (if nothing changes meanwhile):")
+		printFolders(w, folders)
 	}
 	fmt.Fprintln(w, "(dry run; pass --apply to execute)")
 	return nil
 }
 
+// printFolders lists emptied folders with the junk and companions going with each.
+func printFolders(w io.Writer, folders []trash.PrunedFolder) {
+	for _, f := range folders {
+		fmt.Fprintf(w, "  %s\n", f.Dir)
+		for _, c := range f.Companions {
+			fmt.Fprintf(w, "    with  %s\n", c)
+		}
+		for _, j := range f.Junk {
+			fmt.Fprintf(w, "    junk  %s\n", j)
+		}
+	}
+}
+
 func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *trash.Report) error {
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			Mode             string          `json:"mode"`
-			Trashed          int             `json:"trashed"`
-			Deleted          int             `json:"deleted"`
-			Skipped          int             `json:"skipped"`
-			Skips            []trash.Skip    `json:"skips"`
-			SkippedPodcast   int             `json:"skippedPodcast"`
-			SkippedReadOnly  int             `json:"skippedReadOnly"`
-			SkippedRipTracks int             `json:"skippedRipTracks"`
-			Errored          int             `json:"errored"`
-			ReclaimedBytes   int64           `json:"reclaimedBytes"`
-			DirsPruned       int             `json:"dirsPruned"`
-			Failures         []trash.Failure `json:"failures,omitempty"`
+			Mode             string               `json:"mode"`
+			Trashed          int                  `json:"trashed"`
+			Deleted          int                  `json:"deleted"`
+			Skipped          int                  `json:"skipped"`
+			Skips            []trash.Skip         `json:"skips"`
+			SkippedPodcast   int                  `json:"skippedPodcast"`
+			SkippedReadOnly  int                  `json:"skippedReadOnly"`
+			SkippedRipTracks int                  `json:"skippedRipTracks"`
+			Errored          int                  `json:"errored"`
+			ReclaimedBytes   int64                `json:"reclaimedBytes"`
+			DirsPruned       int                  `json:"dirsPruned"`
+			Pruned           []trash.PrunedFolder `json:"pruned"`
+			Failures         []trash.Failure      `json:"failures"`
 		}{string(plan.Mode), rep.Trashed, rep.Deleted, rep.Skipped, nonNil(rep.Skips), rep.SkippedPodcast, rep.SkippedReadOnly,
-			rep.SkippedRipTracks, rep.Errored, rep.ReclaimedBytes, rep.DirsPruned, rep.Failures})
+			rep.SkippedRipTracks, rep.Errored, rep.ReclaimedBytes, rep.DirsPruned, nonNil(rep.Pruned), nonNil(rep.Failures)})
 	}
 	w := out(cmd)
 	fmt.Fprintf(w, "Deleted (mode %s): trashed %d, removed %d, skipped %d, errored %d, reclaimed %d bytes, pruned %s\n",
@@ -152,7 +167,18 @@ func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *tra
 		fmt.Fprintf(w, "  skip %s [%s] (%s)\n", s.Src, s.Code, s.Reason)
 	}
 	for _, f := range rep.Failures {
-		fmt.Fprintf(w, "  FAIL %s: %s\n", f.Src, f.Err)
+		fmt.Fprintf(w, "  FAIL %s [%s]: %s\n", f.Src, f.Disk, f.Err)
+		switch {
+		case f.TrashPath == "":
+		case f.Disk == trash.DiskStranded:
+			fmt.Fprintf(w, "    now in the trash at %s\n", f.TrashPath)
+		default:
+			fmt.Fprintf(w, "    a copy is left in the trash at %s; the next open settles it\n", f.TrashPath)
+		}
+	}
+	if len(rep.Pruned) > 0 {
+		fmt.Fprintln(w, "removed folders:")
+		printFolders(w, rep.Pruned)
 	}
 	return nil
 }
@@ -176,9 +202,10 @@ func deletePlanJSON(plan *trash.Plan) any {
 		})
 	}
 	return struct {
-		Mode    string `json:"mode"`
-		Reason  string `json:"reason,omitempty"`
-		Pending int    `json:"pending"`
-		Actions any    `json:"actions"`
-	}{string(plan.Mode), plan.Reason, plan.Pending(), actions}
+		Mode    string               `json:"mode"`
+		Reason  string               `json:"reason,omitempty"`
+		Pending int                  `json:"pending"`
+		Actions any                  `json:"actions"`
+		Folders []trash.PrunedFolder `json:"folders"`
+	}{string(plan.Mode), plan.Reason, plan.Pending(), actions, nonNil(plan.Folders(sidecars))}
 }

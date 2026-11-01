@@ -6,14 +6,16 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
 func newOrganizeCmd(g *globals) *cobra.Command {
 	var (
-		profile string
-		apply   bool
-		limit   int
+		profile   string
+		apply     bool
+		limit     int
+		skipCheck bool
 	)
 	cmd := &cobra.Command{
 		Use:   "organize",
@@ -25,11 +27,15 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 			"after it; a folder the moves leave empty is removed. A move that cannot happen is " +
 			"held and the plan says why: a destination another file holds, a file not on disk, " +
 			"an item with no artist, album artist or album, or a cue rip's shared file. --apply " +
-			"plans and moves in one go, and its report lists what it held and why. `organize " +
-			"history` lists the organize jobs whose moves the journal holds, and `organize undo` " +
-			"moves one's files back.",
+			"plans and moves in one go, and its report lists what it held and why. " +
+			"--skip-disk-check plans from the catalog alone, saying where each file belongs " +
+			"without looking at the disk, for a dry run only. `organize history` lists the " +
+			"organize jobs whose moves the journal holds, and `organize undo` moves one's files back.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if skipCheck && apply {
+				return waxerr.New(waxerr.CodeInvalid, "organize", "--skip-disk-check makes a dry run's plan and does not go with --apply")
+			}
 			// Organize every item; the template engine picks the per-kind layout
 			// (music vs audiobook), so books are laid out by the audiobook template
 			// alongside tracks rather than being excluded.
@@ -47,7 +53,7 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 					return err
 				}
 				defer lib.Close()
-				plan, err := lib.PlanOrganize(ctx(cmd), q, waxbin.OrganizeOptions{ProfileName: profile})
+				plan, err := lib.PlanOrganize(ctx(cmd), q, waxbin.OrganizeOptions{ProfileName: profile, SkipDiskCheck: skipCheck})
 				if err != nil {
 					return err
 				}
@@ -96,6 +102,7 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&profile, "profile", "", "organization profile (default: the library's configured profile)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "execute the moves (default is a dry run)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "limit number of items (0 = all)")
+	cmd.Flags().BoolVar(&skipCheck, "skip-disk-check", false, "plan from the catalog alone, without looking at the disk (dry run only)")
 	cmd.AddCommand(newOrganizeUndoCmd(g), newOrganizeHistoryCmd(g))
 	return cmd
 }
@@ -104,13 +111,19 @@ func emitPlan(cmd *cobra.Command, g *globals, plan *organize.Plan) error {
 	if g.jsonOut {
 		return printJSON(cmd, planJSON(plan))
 	}
-	fmt.Fprintf(out(cmd), "Plan (profile %s): %d action(s), %d would move, %d held", plan.Profile, len(plan.Actions), plan.Pending(), plan.Held())
+	moving := "would move"
+	if !plan.DiskChecked {
+		moving = "belong elsewhere (the disk was not checked)"
+	}
+	fmt.Fprintf(out(cmd), "Plan (profile %s): %d action(s), %d %s, %d held", plan.Profile, len(plan.Actions), plan.Pending(), moving, plan.Held())
 	if plan.ReadOnlyLibraries > 0 {
 		fmt.Fprintf(out(cmd), " (%d read-only libraries left alone)", plan.ReadOnlyLibraries)
 	}
 	fmt.Fprintln(out(cmd))
 	for _, a := range plan.Actions {
 		switch {
+		case !a.Skip && !plan.DiskChecked:
+			fmt.Fprintf(out(cmd), "  file  %s\n        belongs at %s\n", a.Src, a.Dst)
 		case !a.Skip:
 			fmt.Fprintf(out(cmd), "  move  %s\n        -> %s\n", a.Src, a.Dst)
 		case a.Code == "" || a.Code == organize.HoldInPlace:
@@ -178,9 +191,10 @@ func planJSON(plan *organize.Plan) any {
 	}
 	return struct {
 		Profile           string           `json:"profile"`
+		DiskChecked       bool             `json:"diskChecked"`
 		Pending           int              `json:"pending"`
 		Held              int              `json:"held"`
 		ReadOnlyLibraries int              `json:"readOnlyLibraries,omitempty"`
 		Actions           []planActionJSON `json:"actions"`
-	}{plan.Profile, plan.Pending(), plan.Held(), plan.ReadOnlyLibraries, actions}
+	}{plan.Profile, plan.DiskChecked, plan.Pending(), plan.Held(), plan.ReadOnlyLibraries, actions}
 }

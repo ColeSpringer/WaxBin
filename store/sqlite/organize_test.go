@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
@@ -209,5 +210,132 @@ func TestRecoverOrganizeLeavesADestinationAnotherRowHolds(t *testing.T) {
 	}
 	if f, err := st2.FileByPath(ctx, []byte(dst)); err != nil || f.PID != stale.FilePID {
 		t.Errorf("destination row = %+v (err %v), want the row that held it untouched", f, err)
+	}
+}
+
+// TestRecoverOrganizeKeepsAMoveWhoseRootIsAway: with the root away neither path can be seen,
+// so the planned move is left for an open that finds the root, which then finishes it.
+func TestRecoverOrganizeKeepsAMoveWhoseRootIsAway(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db"))
+	st, lib := openRootedStore(t, dir, db, "owner-a")
+	src := filepath.Join(dir, "old.mp3")
+	dst := filepath.Join(dir, "Artist", "Album", "01 - Song.mp3")
+	if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := st.PutScannedTrack(ctx, input(lib.ID, src, "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PlanMove(ctx, model.RelocateInput{FilePID: r.FilePID, JobPID: "job", SrcPath: []byte(src),
+		NewPath: []byte(dst), NewDisplayPath: dst, NewRelPath: []byte(filepath.Join("Artist", "Album", "01 - Song.mp3"))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	away := dir + ".away"
+	if err := os.Rename(dir, away); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "owner-b"})
+	if err != nil {
+		t.Fatalf("open with the root away: %v", err)
+	}
+	if n := countRows(t, db, "SELECT COUNT(*) FROM organize_journal WHERE state = 'planned'"); n != 1 {
+		t.Errorf("%d planned moves with the root away, want the move left planned", n)
+	}
+	if err := st2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(away, dir); err != nil {
+		t.Fatal(err)
+	}
+	st3, _ := openRootedStore(t, dir, db, "owner-c")
+	if _, err := st3.FileByPath(ctx, []byte(dst)); err != nil {
+		t.Fatalf("with the root back the move is not finished: %v", err)
+	}
+}
+
+func countRows(t *testing.T, db, q string) int {
+	t.Helper()
+	var n int
+	if err := roConn(t, db).QueryRow(q).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestRecoverOrganizeDropsACopyAMoveLeft: a move across filesystems cut off before its
+// source went, or unable to remove it, leaves a copy at the destination beside the source.
+// Recovery rolls the move back and removes the copy, which holds nothing the source does
+// not, rather than leaving a duplicate the next scan would catalog; a file there that
+// differs is not the move's and stays.
+func TestRecoverOrganizeDropsACopyAMoveLeft(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, c := range []struct {
+		name, copied string
+		dropped      bool
+	}{{"whole", "audio", true}, {"cut short", "aud", true}, {"another file", "other", false}, {"a second name", "", false},
+		{"a cataloged file", "cataloged", false}} {
+		dir := t.TempDir()
+		db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db"))
+		st, lib := openRootedStore(t, dir, db, "owner-a")
+		src, dst := filepath.Join(dir, "keep.mp3"), filepath.Join(dir, "Artist", "01 - Keep.mp3")
+		if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r, err := st.PutScannedTrack(ctx, input(lib.ID, src, "sha256:E", "sha256:C", "Keep"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.PlanMove(ctx, model.RelocateInput{FilePID: r.FilePID, JobPID: "job", SrcPath: []byte(src),
+			NewPath: []byte(dst), NewDisplayPath: dst, NewRelPath: []byte(filepath.Join("Artist", "01 - Keep.mp3"))}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		switch c.copied {
+		case "":
+			if err := os.Link(src, dst); err != nil {
+				t.Logf("hard link: %v", err)
+				continue
+			}
+		case "cataloged":
+			if err := os.WriteFile(dst, []byte("audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.PutScannedTrack(ctx, input(lib.ID, dst, "sha256:E2", "sha256:C2", "Other")); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			if err := os.WriteFile(dst, []byte(c.copied), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		st2, _ := openRootedStore(t, dir, db, "owner-b")
+		if _, err := st2.FileByPath(ctx, []byte(src)); err != nil || !fileOnDisk(src) {
+			t.Errorf("%s: source on disk %v, catalog %v; want it kept", c.name, fileOnDisk(src), err)
+		}
+		if fileOnDisk(dst) == c.dropped {
+			t.Errorf("%s: destination on disk %v, want dropped %v", c.name, fileOnDisk(dst), c.dropped)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM organize_journal WHERE state = 'planned'"); n != 0 {
+			t.Errorf("%s: %d planned rows left, want the move rolled back", c.name, n)
+		}
 	}
 }

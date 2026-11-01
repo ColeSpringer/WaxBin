@@ -15,6 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -1048,7 +1049,7 @@ func TestLiveWatchUnwatchesOffItsLock(t *testing.T) {
 	src := &waitingSource{fakeSource: newFakeSource(), let: make(chan struct{}), removing: make(chan string, 8)}
 	defer close(src.let)
 	lw := &liveWatch{src: src, log: quietLog}
-	lw.armRoot(root)
+	lw.armRoot(context.Background(), root)
 	go lw.release(root)
 	<-src.removing
 	done := make(chan struct{})
@@ -1057,5 +1058,31 @@ func TestLiveWatchUnwatchesOffItsLock(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the folder set's lock was held while the source removed a watch")
+	}
+}
+
+// TestAStoppedWatchSaysNothingOfItsRoots: a root check cut off because the watch is
+// stopping is no verdict on the root, so shutting down while roots are armed neither says
+// a root is out of reach nor marks the live layer degraded.
+func TestAStoppedWatchSaysNothingOfItsRoots(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	held := make(chan struct{})
+	t.Cleanup(func() { close(held) })
+	check := fsx.RootChecker{Stat: func(string) error { <-held; return nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	lw := &liveWatch{src: newFakeSource(), log: quietLog, check: check}
+	if n, ex := lw.armRoot(ctx, root); n != 0 || ex || lw.outOfReach() {
+		t.Errorf("arm under a stopped watch = %d, %v, out of reach %v; want nothing armed and no verdict", n, ex, lw.outOfReach())
+	}
+
+	var logs lockedBuffer
+	w := New(&mockEngine{}, []Root{{LibraryPID: "L1", Path: root}}, Options{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	w.rootCheck = check
+	w.serveLive(ctx, newFakeSource(), make(chan rescanReq, 8), nil)
+	if logs.count("not reachable") != 0 || logs.count("could be armed") != 0 || w.Degraded() {
+		t.Errorf("a stopped watch spoke of its roots (degraded %v):\n%s", w.Degraded(), logs.buf.String())
 	}
 }

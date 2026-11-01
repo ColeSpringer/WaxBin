@@ -130,7 +130,7 @@ func (l *Library) scanLibraries(ctx context.Context, libs []*model.Library, req 
 		r, err := l.scanner.Scan(ctx, scan.Request{
 			Library: lib, SubPath: req.SubPath, Force: req.Force,
 			AdoptStampedPIDs: req.AdoptStampedPIDs, Adoption: adoption, ForceReconcile: req.ForceReconcile,
-			IgnoreLocks: req.IgnoreLocks,
+			IgnoreLocks: req.IgnoreLocks, ReResolve: req.ReResolve,
 		}, libraryBeat(i, len(libs), beat))
 		// A library a cancel or failure cut short still says what its scan did.
 		if r != nil {
@@ -310,7 +310,7 @@ func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PI
 // the job starts, so the job never sees the caller's later changes. The client tails
 // the job and reads the organize.Report summary from Result.
 func (l *Library) RunOrganize(ctx context.Context, q query.Query, opts OrganizeOptions) (model.PID, error) {
-	if err := checkOrganizeOptions("waxbin.RunOrganize", opts); err != nil {
+	if err := checkOrganizeRun("waxbin.RunOrganize", opts); err != nil {
 		return "", err
 	}
 	if opts.Profile != nil {
@@ -324,7 +324,7 @@ func (l *Library) RunOrganize(ctx context.Context, q query.Query, opts OrganizeO
 // the direct form of RunOrganize: the plan is made inside the job, so its moves need no
 // second look. It returns the report with the resolved profile, as the job records it.
 func (l *Library) Organize(ctx context.Context, q query.Query, opts OrganizeOptions) (*organize.RunResult, error) {
-	if err := checkOrganizeOptions("Library.Organize", opts); err != nil {
+	if err := checkOrganizeRun("Library.Organize", opts); err != nil {
 		return nil, err
 	}
 	var out *organize.RunResult
@@ -435,11 +435,18 @@ func (l *Library) organizeUndoWork(jobPID model.PID, out **organize.RunResult) j
 	}
 }
 
-// OrganizeHistory lists the jobs whose moves the organize journal holds, newest first, with
-// their moves counted by state, the job pids UndoOrganize takes. A non-positive limit lists
-// them all.
-func (l *Library) OrganizeHistory(ctx context.Context, limit int) ([]model.OrganizeBatch, error) {
-	return l.store.OrganizeHistory(ctx, limit)
+// OrganizeHistory pages the organize and undo runs whose journal holds a file move, the
+// newest started first, with their moves counted by state: the job pids UndoOrganize takes.
+// after is the previous page's Next, empty for the first page; a non-positive limit takes
+// the default page size.
+func (l *Library) OrganizeHistory(ctx context.Context, after model.PID, limit int) (model.OrganizeBatchPage, error) {
+	return l.store.OrganizeHistory(ctx, after, limit)
+}
+
+// OrganizeBatchByJob reads one organize or undo run by its job, as OrganizeHistory lists
+// it; CodeNotFound when the job moved no file (or its journal was pruned).
+func (l *Library) OrganizeBatchByJob(ctx context.Context, jobPID model.PID) (*model.OrganizeBatch, error) {
+	return l.store.OrganizeBatchByJob(ctx, jobPID)
 }
 
 // PruneOrganizeJournal deletes the organize journal's rows of every job whose moves have
@@ -450,6 +457,15 @@ func (l *Library) PruneOrganizeJournal(ctx context.Context, olderThan time.Durat
 		return 0, waxerr.New(waxerr.CodeInvalid, "waxbin.PruneOrganizeJournal", "the age to prune past is negative")
 	}
 	return l.store.PruneOrganizeJournal(ctx, olderThan.Nanoseconds())
+}
+
+// checkOrganizeRun is checkOrganizeOptions for a verb that moves what it plans at once,
+// which refuses a plan from the catalog alone.
+func checkOrganizeRun(op string, opts OrganizeOptions) error {
+	if opts.SkipDiskCheck {
+		return waxerr.New(waxerr.CodeInvalid, op, "a plan made without the disk check is for a dry run; apply it with ApplyOrganize, which checks the disk")
+	}
+	return checkOrganizeOptions(op, opts)
 }
 
 // organizeWork plans across the managed libraries and executes the plan inside a job,

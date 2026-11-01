@@ -100,6 +100,13 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err != nil {
 		return nil, err
 	}
+	// The spelling the loser's key folds with, read while its members are still its own.
+	var spelling foldSpelling
+	if fold {
+		if spelling, err = foldSpellingTx(ctx, tx, et, table, lid); err != nil {
+			return nil, err
+		}
+	}
 
 	// Collect the items whose entity association is about to change, before the
 	// re-point while the loser links still exist, so we can write a per-item
@@ -256,7 +263,7 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		if err != nil {
 			return nil, err
 		}
-		if err := writeFoldTx(ctx, tx, et, key, survivorPID); err != nil {
+		if err := writeFoldTx(ctx, tx, et, key, survivorPID, spelling); err != nil {
 			return nil, err
 		}
 		rep.Folds = append(rep.Folds, key)

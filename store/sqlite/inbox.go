@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/colespringer/waxbin/internal/fsx"
@@ -88,7 +89,7 @@ func (s *Store) fileOccupants(ctx context.Context, op, q string, arg any) ([]mod
 	defer rows.Close()
 	var out []model.FileOccupant
 	last := int64(0)
-	reachable := map[string]bool{}
+	var gate fsx.RootGate
 	for rows.Next() {
 		var id int64
 		var o model.FileOccupant
@@ -100,12 +101,11 @@ func (s *Store) fileOccupants(ctx context.Context, op, q string, arg any) ([]mod
 		if id == last {
 			continue
 		}
-		up, seen := reachable[string(root)]
-		if !seen {
-			up = fsx.RootUnreachable(string(root)) == nil
-			reachable[string(root)] = up
-		}
-		last, o.Kind, o.State, o.OnDisk, o.Reachable = id, model.Kind(kind), model.ItemState(state), pathExists(o.Path), up
+		// The root is checked first, bounded, and a file under one that does not answer is
+		// not statted, since that stat would wait on the same mount.
+		_, err := gate.Stat(ctx, string(root), string(o.Path))
+		up := !errors.Is(err, fsx.ErrRootDown) && ctx.Err() == nil
+		last, o.Kind, o.State, o.OnDisk, o.Reachable = id, model.Kind(kind), model.ItemState(state), up && err == nil, up
 		out = append(out, o)
 	}
 	if err := rows.Err(); err != nil {

@@ -27,7 +27,7 @@ func newInitCmd(g *globals) *cobra.Command {
 				return err
 			}
 			for _, r := range cfg.Roots {
-				if err := config.CheckFolder(r.Path, allowAbsent); err != nil {
+				if err := config.CheckFolder(ctx(cmd), r.Path, allowAbsent); err != nil {
 					return err
 				}
 			}

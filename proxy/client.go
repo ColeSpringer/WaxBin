@@ -881,6 +881,11 @@ func (c *Client) RunOrganizeUndo(ctx context.Context, jobPID model.PID) (model.P
 	return c.runJob(ctx, MethodRunOrganizeUndo, OrganizeUndoParams{JobPID: string(jobPID)})
 }
 
+// RunUnfold submits an unfold (Library.StartUnfold) and returns its job's PID.
+func (c *Client) RunUnfold(ctx context.Context, et model.MergeEntity, keys []string, reResolve bool) (model.PID, error) {
+	return c.runJob(ctx, MethodRunUnfold, UnfoldParams{EntityType: string(et), Keys: keys, ReResolve: reResolve})
+}
+
 // runJob is the shared submit path for the run_* methods: it returns the started
 // job's PID.
 func (c *Client) runJob(ctx context.Context, method string, params any) (model.PID, error) {

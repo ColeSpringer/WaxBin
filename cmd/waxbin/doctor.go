@@ -32,6 +32,7 @@ func newDoctorCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "                build supports v%d; run a read-write command (e.g. scan) to migrate\n",
 					rep.BuildSchemaVersion)
 			}
+			fmt.Fprintf(w, "baseline:       %s (the schema stamp this build writes)\n", rep.BaselineStamp)
 			fmt.Fprintf(w, "mode:           %s\n", readOnlyLabel(rep.ReadOnly))
 			if rep.Owner.Owner != "" {
 				fmt.Fprintf(w, "write owner:    %s (pid %d)\n", rep.Owner.Owner, rep.Owner.PID)

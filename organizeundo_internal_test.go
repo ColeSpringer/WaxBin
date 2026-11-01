@@ -49,9 +49,10 @@ func TestUndoFollowsAFolderRespell(t *testing.T) {
 	if rr, err := lib.Organize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{}); err != nil || rr.Report.Moved != 2 {
 		t.Fatalf("organize = %+v (err %v), want two moves", rr, err)
 	}
-	batches, err := lib.OrganizeHistory(ctx, 1)
+	page, err := lib.OrganizeHistory(ctx, "", 1)
+	batches := page.Batches
 	if err != nil || len(batches) != 1 {
-		t.Fatalf("history = %+v (err %v)", batches, err)
+		t.Fatalf("history = %+v (err %v)", page, err)
 	}
 	from, to := filepath.Join(root, "The Foobars"), filepath.Join(root, "the foobars")
 	if err := os.Rename(from, to); err != nil {

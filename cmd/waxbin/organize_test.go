@@ -141,3 +141,43 @@ func TestOrganizeReportSaysWhatItPruned(t *testing.T) {
 		t.Errorf("report json = %+v (err %v), want dirsPruned 2", env, err)
 	}
 }
+
+// TestAnUncheckedPlanSaysWhereFilesBelong: a plan made without the disk pass says where
+// each file belongs rather than that it would move, and says so in JSON; with --apply the
+// flag is refused before anything opens.
+func TestAnUncheckedPlanSaysWhereFilesBelong(t *testing.T) {
+	t.Parallel()
+	plan := &organize.Plan{Profile: "p", Actions: []organize.Action{{Src: "/lib/in/a.mp3", Dst: "/lib/A/Al/01 - A.mp3"}}}
+	render := func(json bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := emitPlan(cmd, &globals{jsonOut: json}, plan); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if text := render(false); !strings.Contains(text, "1 belong elsewhere") || !strings.Contains(text, "belongs at /lib/A/Al/01 - A.mp3") ||
+		strings.Contains(text, "would move") {
+		t.Errorf("unchecked plan text:\n%s", text)
+	}
+	var env struct {
+		Data struct {
+			DiskChecked *bool `json:"diskChecked"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || env.Data.DiskChecked == nil || *env.Data.DiskChecked {
+		t.Errorf("unchecked plan json = %+v (err %v), want diskChecked false", env, err)
+	}
+	plan.DiskChecked = true
+	if text := render(false); !strings.Contains(text, "1 would move") || !strings.Contains(text, "move  /lib/in/a.mp3") {
+		t.Errorf("checked plan text:\n%s", text)
+	}
+	cmd := newRootCmd(&globals{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--db", "/nonexistent/catalog.db", "organize", "--skip-disk-check", "--apply"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--skip-disk-check") {
+		t.Errorf("organize --skip-disk-check --apply = %v, want it refused", err)
+	}
+}

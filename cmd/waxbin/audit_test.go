@@ -80,6 +80,10 @@ func TestAuditDuplicateAlbumListsBothReasons(t *testing.T) {
 		Data struct {
 			Findings []struct {
 				Message string `json:"message"`
+				Reason  string `json:"reason"`
+				Members []struct {
+					Name string `json:"name"`
+				} `json:"members"`
 			} `json:"findings"`
 		} `json:"data"`
 	}
@@ -88,14 +92,17 @@ func TestAuditDuplicateAlbumListsBothReasons(t *testing.T) {
 	}
 	var byName, byID int
 	for _, f := range env.Data.Findings {
+		if len(f.Members) != 2 {
+			continue
+		}
 		switch {
-		case strings.Contains(f.Message, "(same title and album artist): Hits / Hits"):
+		case f.Reason == "same title and album artist" && f.Members[0].Name == "Hits":
 			byName++
-		case strings.Contains(f.Message, "(shared MBID): Live / Live"):
+		case f.Reason == "shared MBID" && f.Members[0].Name == "Live" && strings.Contains(f.Message, "dddddddd-0000-4000-8000-000000000001"):
 			byID++
 		}
 	}
 	if byName != 1 || byID != 1 || len(env.Data.Findings) != 2 {
-		t.Errorf("findings = %+v, want one by name for Hits and one by id for Live", env.Data.Findings)
+		t.Errorf("findings = %+v, want one by name for Hits and one by id for Live, naming the id", env.Data.Findings)
 	}
 }
