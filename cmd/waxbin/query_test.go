@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
@@ -141,15 +142,7 @@ func (f fakeLibraryLister) Libraries(context.Context) ([]*model.Library, error) 
 // has no volume there, so filepath.Abs resolves a ref against the current drive
 // and filepath.Rel refuses to relate the two spellings. Empty on POSIX, so the
 // forward-slash coverage is unchanged.
-var vol = func() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		// A silent "" would reinstate the volume-less roots this exists to prevent,
-		// failing five tests with no visible cause.
-		panic("query_test: getwd: " + err.Error())
-	}
-	return filepath.VolumeName(wd)
-}()
+var vol = testpath.Vol()
 
 func testLibs() fakeLibraryLister {
 	return fakeLibraryLister{libs: []*model.Library{

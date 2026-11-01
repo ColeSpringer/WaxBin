@@ -224,7 +224,7 @@ func TestReplayGainWriteBackAlbum(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteReplayGainTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -314,7 +314,7 @@ func TestReplayGainWriteBackCountsFailures(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteReplayGainTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -385,7 +385,7 @@ func TestReplayGainWriteBackUnwritableContainer(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteReplayGainTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -470,7 +470,7 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath:       db,
 		StampItemPID: true,
 		// Override the native profile to enable tag write-back.
@@ -550,7 +550,7 @@ func TestOrganizeWritesTheCompilationFolderAsTheAlbumArtist(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			root := t.TempDir()
-			lib, err := Open(ctx, Options{
+			lib, err := OpenSeeded(t, ctx, Options{
 				DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 				Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true, CompilationFolder: &folder}},
 				Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
@@ -592,7 +592,7 @@ func TestOrganizeTagWriteCarriesTheTotals(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 		Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true}},
 		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
@@ -641,7 +641,7 @@ func TestOrganizeClearsATotalTheNumberPassed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 		Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true}},
 		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
@@ -700,7 +700,7 @@ func TestOrganizeSettlesAnAlbumArtistOnlyWhenItWroteTheCatalogsValue(t *testing.
 	for _, compilation := range []bool{true, false} {
 		ctx := context.Background()
 		root := t.TempDir()
-		lib, err := Open(ctx, Options{
+		lib, err := OpenSeeded(t, ctx, Options{
 			DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 			Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true}},
 			Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
@@ -763,7 +763,7 @@ func TestRebuildAdoptsStampedPID(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 
-	lib1, err := Open(ctx, Options{
+	lib1, err := OpenSeeded(t, ctx, Options{
 		DBPath:       filepath.Join(t.TempDir(), "c1.db"),
 		StampItemPID: true,
 		Roots:        []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
@@ -787,7 +787,7 @@ func TestRebuildAdoptsStampedPID(t *testing.T) {
 	lib1.Close()
 
 	// Rebuild into a fresh catalog over the same (now organized + stamped) files.
-	lib2, err := Open(ctx, Options{
+	lib2, err := OpenSeeded(t, ctx, Options{
 		DBPath: filepath.Join(t.TempDir(), "c2.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -825,7 +825,7 @@ func TestPIDAdoptionConflictMintsFresh(t *testing.T) {
 		}
 	}
 
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: filepath.Join(t.TempDir(), "c.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -901,7 +901,7 @@ func TestReplayGainWriteBackLandsOnWavPack(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteReplayGainTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -965,7 +965,7 @@ func TestReplayGainWriteSetsTheOpusHeader(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteReplayGainTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1064,7 +1064,7 @@ func TestEnrichmentWriteBackPaysTheOwedRowsItLands(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1145,7 +1145,7 @@ func TestEnrichmentWriteBackUnwritableContainer(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteEnrichmentTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1200,7 +1200,7 @@ func TestEnrichmentWriteBackMarksAbandonedParts(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteEnrichmentTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1312,7 +1312,7 @@ func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteEnrichmentTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1434,7 +1434,7 @@ func TestEnrichmentWriteBackRefusesASharedFile(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteEnrichmentTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1540,7 +1540,7 @@ func TestEnrichmentFillSurvivesASilentRetag(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: db, WriteEnrichmentTags: true,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})

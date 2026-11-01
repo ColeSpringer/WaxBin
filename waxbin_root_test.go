@@ -100,7 +100,7 @@ func TestAddRootValidation(t *testing.T) {
 	writeFile(t, filepath.Join(inbox, ".keep"), nil)
 	db := filepath.Join(t.TempDir(), "catalog.db")
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   db,
 		Roots:    []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Inbox:    []string{inbox},
@@ -211,7 +211,7 @@ func TestRelocateRootValidatesOverlap(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots: []config.Root{
 			{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -355,7 +355,7 @@ func TestAddRootPodcastOverlapWhenDirUnset(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "catalog.db")
 
 	// First run: podcast dir configured, so the internal podcast row is created.
-	lib1, err := waxbin.Open(ctx, waxbin.Options{
+	lib1, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   db,
 		Roots:    []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Podcasts: config.PodcastConfig{Dir: podDir},
@@ -382,7 +382,7 @@ func TestAddRootPodcastOverlapWhenDirUnset(t *testing.T) {
 
 	// Second run: podcast dir NOT configured. The podcast-mode row persists, so
 	// the configured-dir branch of config.Validate never runs for it.
-	lib2, err := waxbin.Open(ctx, waxbin.Options{
+	lib2, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -591,7 +591,7 @@ func TestRemoveRootRefuses(t *testing.T) {
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Roots: []config.Root{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Roots: []config.Root{
 		{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
 		{Path: rootB, Mode: model.ModeInPlace, Profile: "waxbin-native"},
 	}})
@@ -651,7 +651,7 @@ func TestRelocateRootKeepsAReopenFromRegisteringTheOldPath(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB, rootC := t.TempDir(), t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
 		{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
 		{Path: rootB, Mode: model.ModeInPlace, Profile: "waxbin-native"},
 	}})
@@ -703,7 +703,7 @@ func TestRelocateRootKeepsTheFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(oldRoot, "cover.png"), cover.Bytes())
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestRelocateRootCarriesTheTrashJournal(t *testing.T) {
 	oldRoot, newRoot := filepath.Join(base, "old"), filepath.Join(base, "new")
 	writeFile(t, filepath.Join(oldRoot, "Artist", "keep.mp3"), testaudio.BuildMP3WithAudio("Keep", "Artist", "Album", 1, testaudio.AudioWithSeed(71)))
 	writeFile(t, filepath.Join(oldRoot, "Artist", "gone.mp3"), testaudio.BuildMP3WithAudio("Gone", "Artist", "Album", 2, testaudio.AudioWithSeed(72)))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -793,7 +793,7 @@ func TestPodcastLibraryExistsAfterOpen(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	library := func(dir string) *model.Library {
 		t.Helper()
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: dir}})
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: dir}})
 		if err != nil {
 			t.Fatalf("open with %s: %v", dir, err)
 		}
@@ -829,7 +829,7 @@ func TestPodcastLibraryExistsAfterOpen(t *testing.T) {
 func TestReopenEnsuresThePodcastLibrary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	bare, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "bare.db")})
+	bare, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "bare.db")})
 	if err != nil {
 		t.Fatalf("open bare: %v", err)
 	}
@@ -841,7 +841,7 @@ func TestReopenEnsuresThePodcastLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: t.TempDir()}})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: t.TempDir()}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -877,6 +877,7 @@ func TestOpenRefusesARootInsideThePodcastDir(t *testing.T) {
 		"the podcast dir in the inbox":  {Inbox: []string{base}, Podcasts: config.PodcastConfig{Dir: pods}},
 	} {
 		opts.DBPath = filepath.Join(t.TempDir(), "catalog.db")
+		// Not seeded: each open is refused before any catalog exists.
 		lib, err := waxbin.Open(ctx, opts)
 		if err == nil {
 			_ = lib.Close()
@@ -895,7 +896,7 @@ func TestPodcastLibraryAnswersReadOnly(t *testing.T) {
 	ctx := context.Background()
 	pods := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	rw, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: pods}})
+	rw, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: pods}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -929,7 +930,7 @@ func TestReopenWithAPodcastDirConflictStillHandsBack(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	pods := t.TempDir()
-	music, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "music.db"),
+	music, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "music.db"),
 		Roots: []config.Root{{Path: pods, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open the music catalog: %v", err)
@@ -943,7 +944,7 @@ func TestReopenWithAPodcastDirConflictStillHandsBack(t *testing.T) {
 	}
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	var reopens atomic.Int32
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: pods},
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: pods},
 		OnReopen: func(context.Context, waxbin.ReopenEvent) { reopens.Add(1) }})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -983,7 +984,7 @@ func TestAnOverlapWithAStoredRootOpensAndRefusesAtUse(t *testing.T) {
 	music := filepath.Join(base, "music")
 	writeFile(t, filepath.Join(music, ".keep"), nil)
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -997,7 +998,7 @@ func TestAnOverlapWithAStoredRootOpensAndRefusesAtUse(t *testing.T) {
 
 	inbox := filepath.Join(music, "inbox")
 	writeFile(t, filepath.Join(inbox, ".keep"), nil)
-	lib, err = waxbin.Open(ctx, waxbin.Options{DBPath: db, Inbox: []string{inbox},
+	lib, err = waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Inbox: []string{inbox},
 		Podcasts: config.PodcastConfig{Dir: filepath.Join(music, "pods")}})
 	if err != nil {
 		t.Fatalf("open over the overlaps: %v", err)
@@ -1031,7 +1032,7 @@ func TestAnOverlapWithAStoredRootOpensAndRefusesAtUse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lib, err = waxbin.Open(ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: filepath.Join(base, "pods")}})
+	lib, err = waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Podcasts: config.PodcastConfig{Dir: filepath.Join(base, "pods")}})
 	if err != nil {
 		t.Fatalf("open with a podcast dir apart from the root: %v", err)
 	}
@@ -1045,7 +1046,7 @@ func TestAnOverlapWithAStoredRootOpensAndRefusesAtUse(t *testing.T) {
 func TestABlankPodcastDirOpensAsNone(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Podcasts: config.PodcastConfig{Dir: "  "}})
 	if err != nil {
 		t.Fatalf("open with a blank podcast dir: %v", err)

@@ -19,7 +19,7 @@ func untaggedBook(t *testing.T, ctx context.Context) (*waxbin.Library, model.PID
 	t.Helper()
 	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
 	writeFile(t, filepath.Join(root, "Someone", "Tome", "01.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Audio: testaudio.AudioWithSeed(1)}))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})

@@ -19,9 +19,9 @@ import (
 // TestDoctorPrintsEnrichmentPhases: the phase line sits under the enrichment line, so an
 // operator reading doctor sees what this build's enrichment pass walks.
 func TestDoctorPrintsEnrichmentPhases(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
-	t.Setenv("WAXBIN_ENRICH_CONTACT", "t@e.com")
-	cmd := newRootCmd(&globals{})
+	cmd := newRootCmd(&globals{getenv: envOf("WAXBIN_ENRICH_CONTACT", "t@e.com")})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
@@ -44,7 +44,7 @@ func TestDoctorPrintsEnrichmentPhases(t *testing.T) {
 // TestDoctorPrintsLyricsCoverage: the lyrics line counts every track holding lyrics,
 // whatever supplied them, and the tracks a lookup found none for.
 func TestDoctorPrintsLyricsCoverage(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -77,7 +77,7 @@ func TestDoctorPrintsLyricsCoverage(t *testing.T) {
 	}))
 	t.Cleanup(lrc.Close)
 	off := false
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := openSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment: config.EnrichConfig{

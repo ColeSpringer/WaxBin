@@ -147,7 +147,7 @@ func TestTrashInPlaceKeepsTheFolderACompanionHolds(t *testing.T) {
 	writeFile(t, filepath.Join(album, "01 Song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
 	writeFile(t, filepath.Join(album, "01 Song.lrc"), []byte("[00:00.00]la"))
 	writeFile(t, filepath.Join(album, "Cover.jpg"), []byte("jpeg"))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -186,7 +186,7 @@ func TestPermanentDeleteTakesSidecarsAndCompanions(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(mAlbum, "01 Song.lrc"), []byte("[00:00.00]la"))
 	writeFile(t, filepath.Join(iAlbum, "02 Other.lrc"), []byte("[00:00.00]la"))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: managed, Mode: model.ModeManaged, Profile: "waxbin-native"},
 			{Path: inPlace, Mode: model.ModeInPlace},
@@ -310,7 +310,7 @@ func TestOrganizePrunesInEachManagedLibrary(t *testing.T) {
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
 	writeFile(t, filepath.Join(books, "Incoming", "b.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Artist: "Author", Album: "Book", TXXX: narrated, Audio: testaudio.AudioWithSeed(2)}))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic, Profile: "waxbin-native"},
 			{Path: books, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"},
@@ -433,7 +433,7 @@ func TestImportFromTheInboxLeavesItsOwnFiles(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root, inboxDir := t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Inbox:  []string{inboxDir},
@@ -727,7 +727,7 @@ func TestApplyFillsWhatAnOlderPlanLacks(t *testing.T) {
 	writeFile(t, filepath.Join(mRip, "cover.jpg"), []byte("jpeg"))
 	writeFile(t, filepath.Join(iAlbum, "b.mp3"), testaudio.BuildMP3WithAudio("Two", "Band", "Second", 1, testaudio.AudioWithSeed(2)))
 	writeFile(t, filepath.Join(iAlbum, "cover.jpg"), []byte("jpeg"))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: managed, Mode: model.ModeManaged, Profile: "waxbin-native"},
 			{Path: inPlace, Mode: model.ModeInPlace},

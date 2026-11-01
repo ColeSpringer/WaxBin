@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
@@ -28,7 +29,7 @@ func transcriptFixture(t *testing.T, transcriptURL string) (*podcast.Service, *s
 	t.Helper()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestPutTranscriptRejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

@@ -22,7 +22,7 @@ import (
 // on the trash row `trash list` prints, and a reason the planner refuses is an invalid
 // argument.
 func TestRmReasonReachesTheTrash(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

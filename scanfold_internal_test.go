@@ -45,7 +45,7 @@ func TestACanceledScanReportsItsFolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRaw(t, filepath.Join(root, "b-later", "later.mp3"), testaudio.BuildMP3WithAudio("Later", "Band", "Record", 1, testaudio.AudioWithSeed(5)))
-	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)

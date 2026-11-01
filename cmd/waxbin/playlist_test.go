@@ -21,7 +21,6 @@ import (
 // playlistCLIFixture scans three tracks into a catalog and returns their pids by title.
 func playlistCLIFixture(t *testing.T) (string, string, map[string]model.PID) {
 	t.Helper()
-	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -101,6 +100,7 @@ func showRows(t *testing.T, db, root, pl string) []string {
 // TestPlaylistShowPrintsIndexes: `playlist show` numbers each entry with the index the
 // by-index removal takes, a duplicate included.
 func TestPlaylistShowPrintsIndexes(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	pl := cliPlaylist(t, db, root, p["One"], p["Two"], p["One"])
 	if got := strings.Join(showRows(t, db, root, pl), ", "); got != "0 One, 1 Two, 2 One" {
@@ -112,6 +112,7 @@ func TestPlaylistShowPrintsIndexes(t *testing.T) {
 // old --position flag is gone, and an item pid beside --index is the entry the caller
 // expects there.
 func TestPlaylistRemoveByIndexes(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	pl := cliPlaylist(t, db, root, p["One"], p["Two"], p["Three"], p["One"], p["Two"])
 
@@ -149,6 +150,7 @@ func TestPlaylistRemoveByIndexes(t *testing.T) {
 // TestPlaylistSetOwner: `playlist set-owner` moves a playlist to another user, and the
 // JSON views name the owner's pid.
 func TestPlaylistSetOwner(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	pl := cliPlaylist(t, db, root, p["One"])
 	out, err := runCLIJSON(t, db, root, "user", "add", "bob")
@@ -194,6 +196,7 @@ func TestPlaylistSetOwner(t *testing.T) {
 // TestPlaylistImportDryRun: --dry-run prints what each entry would match and creates
 // nothing.
 func TestPlaylistImportDryRun(t *testing.T) {
+	t.Parallel()
 	db, root, _ := playlistCLIFixture(t)
 	doc := filepath.Join(t.TempDir(), "mix.m3u8")
 	if err := os.WriteFile(doc, []byte("#EXTM3U\n"+filepath.Join(root, "Two.mp3")+"\nmissing.mp3\n"), 0o644); err != nil {
@@ -231,6 +234,7 @@ func TestPlaylistImportDryRun(t *testing.T) {
 // `smartplaylist create --nsp` takes the document's comment unless --description says
 // otherwise.
 func TestPlaylistDescription(t *testing.T) {
+	t.Parallel()
 	db, root, _ := playlistCLIFixture(t)
 	described := func(pl, want string) {
 		t.Helper()
@@ -327,6 +331,7 @@ func TestPlaylistDescription(t *testing.T) {
 // write, so `playlist export` leaves it out, says so on stderr beside the document, and
 // names it in the JSON next to the count written.
 func TestPlaylistExportNamesTheEntriesLeftOut(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	ctx := context.Background()
 	lib := openCLILib(t, ctx, db, root, false)
@@ -375,6 +380,7 @@ func TestPlaylistExportNamesTheEntriesLeftOut(t *testing.T) {
 // TestPlaylistSetDescriptionEchoesTheStoredText: the JSON reply names the description as
 // the playlist stores it, trimmed and with its line breaks as line feeds, not as typed.
 func TestPlaylistSetDescriptionEchoesTheStoredText(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	pl := cliPlaylist(t, db, root, p["One"])
 	out, err := runCLIJSON(t, db, root, "playlist", "set-description", pl, "  For the drive\r\nSide one  ")
@@ -407,6 +413,7 @@ func runSmartCLI(t *testing.T, db, root string, args ...string) (string, string,
 // when a create would have taken it, and not when --description stands in its place or
 // on set-rule, which never reads it.
 func TestNSPCommentNoteOnlyWhereTheCommentIsTaken(t *testing.T) {
+	t.Parallel()
 	db, root, _ := playlistCLIFixture(t)
 	nsp := filepath.Join(t.TempDir(), "tabbed.nsp")
 	if err := os.WriteFile(nsp, []byte(`{"comment":"a\tb","all":[{"is":{"artist":"Artist"}}]}`), 0o644); err != nil {
@@ -448,6 +455,7 @@ func TestNSPCommentNoteOnlyWhereTheCommentIsTaken(t *testing.T) {
 // TestExportNSPCarriesTheDescription: `smartplaylist export-nsp` writes the playlist's
 // name and description into the document, so importing it again gives them back.
 func TestExportNSPCarriesTheDescription(t *testing.T) {
+	t.Parallel()
 	db, root, _ := playlistCLIFixture(t)
 	nsp := filepath.Join(t.TempDir(), "road.nsp")
 	if err := os.WriteFile(nsp, []byte(`{"comment":"Road trip","all":[{"is":{"artist":"Artist"}}]}`), 0o644); err != nil {
@@ -470,6 +478,7 @@ func TestExportNSPCarriesTheDescription(t *testing.T) {
 // TestPlaylistJSONListsAreArraysWhenEmpty: an export that skipped nothing and an import
 // that matched everything print their lists as empty arrays, as edit does, never null.
 func TestPlaylistJSONListsAreArraysWhenEmpty(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	pl := cliPlaylist(t, db, root, p["One"])
 	field := func(out, name string) string {

@@ -578,6 +578,7 @@ func TestWriteOwnershipConflict(t *testing.T) {
 	first := openManaged(t, ctx, db, root)
 	_ = first
 
+	// Not seeded: the catalog exists, and the first open's lock refuses this one.
 	_, err := waxbin.Open(ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged}},
@@ -646,7 +647,7 @@ func TestOrganizeLeavesInPlaceLibraryFiles(t *testing.T) {
 	writeFile(t, managedFile, testaudio.BuildMP3WithAudio("Managed Song", "M Artist", "M Album", 1, audioM))
 	writeFile(t, inplaceFile, testaudio.BuildMP3WithAudio("InPlace Song", "I Artist", "I Album", 2, audioI))
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots: []config.Root{
 			{Path: managedRoot, Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -921,6 +922,7 @@ func TestOpenRejectsOverlappingRoots(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
+	// Not seeded: Open refuses overlapping roots before any catalog exists.
 	_, err := waxbin.Open(ctx, waxbin.Options{
 		DBPath: db,
 		Roots: []config.Root{
@@ -1507,7 +1509,7 @@ func TestBackupRedactAndRestore(t *testing.T) {
 	if err := port.Restore(ctx, plain, restored, false); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	rlib, err := waxbin.Open(ctx, waxbin.Options{DBPath: restored})
+	rlib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: restored})
 	if err != nil {
 		t.Fatalf("open restored: %v", err)
 	}
@@ -1610,7 +1612,7 @@ func TestBackupHoldsNoThumbnails(t *testing.T) {
 	if err := port.Restore(ctx, lean, restored, false); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	rlib, err := waxbin.Open(ctx, waxbin.Options{DBPath: restored})
+	rlib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: restored})
 	if err != nil {
 		t.Fatalf("open restored: %v", err)
 	}
@@ -1723,7 +1725,7 @@ func TestManifestMatchesExport(t *testing.T) {
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   db,
 		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Podcasts: config.PodcastConfig{Dir: filepath.Join(t.TempDir(), "podcasts")},
@@ -2039,7 +2041,7 @@ func TestInboxSkipsWithinBatchDuplicate(t *testing.T) {
 
 func openManaged(t *testing.T, ctx context.Context, db, root string) *waxbin.Library {
 	t.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})

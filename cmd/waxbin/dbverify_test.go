@@ -17,6 +17,7 @@ import (
 // TestDBVerifyReportsAndFixesAlbumYearDrift: an album year that is not its members' is
 // reported by `db verify`, which fails, and `db verify --fix` puts it right.
 func TestDBVerifyReportsAndFixesAlbumYearDrift(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	raw, err := sql.Open("sqlite", "file:"+db)
 	if err != nil {
@@ -53,6 +54,7 @@ func TestDBVerifyReportsAndFixesAlbumYearDrift(t *testing.T) {
 // TestDBVerifyReportsAndFixesReleaseYearDrift: a release year newest orders by that is
 // not the item's year is reported by `db verify`, which fails, and --fix puts it right.
 func TestDBVerifyReportsAndFixesReleaseYearDrift(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	raw, err := sql.Open("sqlite", "file:"+db)
 	if err != nil {
@@ -94,6 +96,7 @@ func TestDBVerifyReportsAndFixesReleaseYearDrift(t *testing.T) {
 // listing indexes are reported by `db verify` without failing it (indexes resolve by
 // rank), and `db verify --fix` renumbers them in listing order.
 func TestDBVerifyReportsAndFixesPlaylistPositionDrift(t *testing.T) {
+	t.Parallel()
 	db, root, pid := creditCLIFixture(t)
 	if _, err := runCLIJSON(t, db, root, "playlist", "create", "Mix"); err != nil {
 		t.Fatalf("playlist create: %v", err)
@@ -134,6 +137,7 @@ func TestDBVerifyReportsAndFixesPlaylistPositionDrift(t *testing.T) {
 // verify` cannot see (it counts rows), so --fix rebuilds the index and says how many
 // rows it wrote.
 func TestDBVerifyFixRebuildsTheSearchIndex(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	raw, err := sql.Open("sqlite", "file:"+db)
 	if err != nil {
@@ -182,6 +186,7 @@ func TestDBVerifyFixRebuildsTheSearchIndex(t *testing.T) {
 // TestDBVerifyFixReportsWhatItRewrote: `db verify --fix` says how many rows each repair
 // rewrote, in its text and under "refreshed" in its JSON, which a plain verify leaves out.
 func TestDBVerifyFixReportsWhatItRewrote(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	raw, err := sql.Open("sqlite", "file:"+db)
 	if err != nil {
@@ -282,6 +287,7 @@ func verifyData(t *testing.T, db, root string, args ...string) map[string]any {
 // as a damaged cache, not a failed check: `db verify` says so in both forms, counts no
 // orphans it could not read, passes, and points at --fix.
 func TestDBVerifyOverADamagedThumbFile(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	damageThumbsCLI(t, db)
 	data := verifyData(t, db, root)
@@ -302,6 +308,7 @@ func TestDBVerifyOverADamagedThumbFile(t *testing.T) {
 // TestDBVerifyFixReplacesADamagedThumbFile: --fix leaves a sound thumbnail file in place
 // of a damaged one, the damaged one set aside, and says it did.
 func TestDBVerifyFixReplacesADamagedThumbFile(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	damageThumbsCLI(t, db)
 	data := verifyData(t, db, root, "--fix")
@@ -320,6 +327,7 @@ func TestDBVerifyFixReplacesADamagedThumbFile(t *testing.T) {
 // its sortKeysRewritten count come from the sort keys it moved, so a sort spelling it
 // repairs under a key that stays put leaves both quiet.
 func TestDBVerifyFixSaysCursorsMoveOnlyWhenAKeyDid(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, seed string
 		moved      int

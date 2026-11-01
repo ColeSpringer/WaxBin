@@ -50,14 +50,14 @@ func TestParseAge(t *testing.T) {
 // TestTrashEmptySaysWhatItLeft: entries kept because their library is read-only are
 // counted in the summary, or emptying the trash would look like it missed them.
 func TestTrashEmptySaysWhatItLeft(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	if err := os.WriteFile(filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Song", "Band", "Album", 1), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: db,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatal(err)

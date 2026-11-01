@@ -6,38 +6,19 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"hash/crc32"
-	"image"
-	"image/png"
 	"testing"
 
 	"github.com/colespringer/waxbin/art"
+	"github.com/colespringer/waxbin/internal/testimage"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// widePNG is an opaque picture of the given size with a photograph's texture, a gradient
-// under faint noise, so a scaled copy of it is smaller as a JPEG.
+// widePNG is an opaque picture of the given size whose scaled copy is smaller as a JPEG
+// (testimage.TexturedPNG); keep its short side small.
 func widePNG(t *testing.T, w, h int) []byte {
 	t.Helper()
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	seed := uint32(88172645)
-	for y := range h {
-		for x := range w {
-			seed ^= seed << 13
-			seed ^= seed >> 17
-			seed ^= seed << 5
-			i := img.PixOffset(x, y)
-			img.Pix[i] = uint8(x*255/w) + uint8(seed&7)
-			img.Pix[i+1] = uint8(y*255/h) + uint8((seed>>8)&7)
-			img.Pix[i+2] = 96 + uint8((seed>>16)&7)
-			img.Pix[i+3] = 255
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("encode png: %v", err)
-	}
-	return buf.Bytes()
+	return testimage.TexturedPNG(t, w, h, 0)
 }
 
 // claimedPNG is a PNG whose header declares w x h and whose image data is junk, so it
@@ -97,7 +78,7 @@ func TestStoredArtIsBounded(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
-	raw := widePNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/2)
+	raw := widePNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/20)
 	spec := trackSpec{path: "/lib/Al/1.flac", essence: "e1", content: "c1",
 		title: "One", artist: "X", albumArt: "X", album: "Al"}
 	pid := putCovered(t, st, lib.ID, spec, taggedCover(t, raw))
@@ -108,9 +89,9 @@ func TestStoredArtIsBounded(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 	format, w, h, err := art.Probe(blob.Bytes)
-	if err != nil || format != "jpeg" || w != art.MaxSourceDim || h != art.MaxSourceDim/2 {
+	if err != nil || format != "jpeg" || w != art.MaxSourceDim || h != art.MaxSourceDim/20 {
 		t.Fatalf("stored source probes as %s %dx%d (err %v), want jpeg %dx%d",
-			format, w, h, err, art.MaxSourceDim, art.MaxSourceDim/2)
+			format, w, h, err, art.MaxSourceDim, art.MaxSourceDim/20)
 	}
 	if blob.SourceHash != art.Hash(blob.Bytes) {
 		t.Errorf("source hash %s is not the hash of its bytes %s", blob.SourceHash, art.Hash(blob.Bytes))
@@ -180,7 +161,7 @@ func TestUserArtIsBounded(t *testing.T) {
 	ctx := context.Background()
 	pid := putTrack(t, st, lib.ID, trackSpec{path: "/lib/Al/1.flac", essence: "e1", content: "c1",
 		title: "One", artist: "X", albumArt: "X", album: "Al"}).ItemPID
-	raw := widePNG(t, 600, art.MaxSourceDim+400)
+	raw := widePNG(t, 60, art.MaxSourceDim+400)
 	set := func() {
 		t.Helper()
 		if _, err := st.SetItemArt(ctx, pid, model.ArtRoleFront, raw, "",
@@ -264,7 +245,7 @@ func TestTheWriteTrustsAnExaminedPicture(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
-	raw := widePNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/2)
+	raw := widePNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/20)
 	examined, err := st.examineArt(ctx, taggedCover(t, raw))
 	if err != nil || examined.from != art.Hash(raw) || examined.img.Width != art.MaxSourceDim ||
 		examined.img.Hash != art.Hash(examined.img.Data) {
@@ -296,7 +277,7 @@ func TestTheWriteTrustsAnExaminedPicture(t *testing.T) {
 func TestExamineArtMeasuresThePictureItself(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
-	raw := widePNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/2)
+	raw := widePNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/20)
 	lying := &model.ArtImage{Data: raw, Hash: art.Hash(raw), Format: "png", Width: 100, Height: 50,
 		Attribution: model.Attribution{Source: model.SourceTag}}
 	examined, err := st.examineArt(context.Background(), lying)

@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
@@ -334,15 +335,18 @@ const (
 	// nothing, since what was not read could hold an item the caller would admit.
 	maxPathFetch = 1000
 	// maxPathCandidates bounds the admitted items a relative path may name: past it the
-	// entry names nothing, since a suffix that common says too little to pick from.
+	// entry names nothing, since a suffix that common says too little to pick from. An
+	// anchored path (pathx.LineAnchored) names exactly one path and takes no cap.
 	maxPathCandidates = 100
 )
 
 // ResolveM3U8 matches every path line of an M3U8 document against the catalog in
 // document order and writes nothing, so it answers on a read-only library and shows
 // what an import would build. A path names the items behind its file through any of
-// their files (an exact path, or a relative-path suffix); when it names several, as a
-// cue rip's file names each of its tracks, the entry's #EXTINF label picks one. Each
+// their files: an absolute path exactly, a path rooted below no drive (\Music\a.flac,
+// as Windows writes one) as that path below a drive's root, and a relative one as a
+// suffix. When it names several, as a cue rip's file names each of its tracks or one
+// rooted path names a file on two drives, the entry's #EXTINF label picks one. Each
 // distinct path is looked up once, however many lines name it. A line past 1 MiB is
 // CodeInvalid.
 func (s *Service) ResolveM3U8(ctx context.Context, r io.Reader) ([]M3UMatch, error) {
@@ -387,7 +391,7 @@ type named struct {
 }
 
 // namedByPath looks each distinct path of the entries up once, the first line spelling
-// it standing for the rest, keyed by the cleaned path. An absolute path names whatever
+// it standing for the rest, keyed by the cleaned path. An anchored path names whatever
 // its file holds (an exported rip names every window), while a relative one naming more
 // than maxPathCandidates admitted items names nothing, so unscoped it is read no further
 // than that; a path the lookup could not read whole names nothing either.
@@ -401,7 +405,7 @@ func (s *Service) namedByPath(ctx context.Context, entries []m3uEntry, opts Reso
 		}
 		spelling[c] = e.path
 		limit := maxPathFetch
-		if !filepath.IsAbs(c) && opts.Accept == nil {
+		if !pathx.LineAnchored(e.path) && opts.Accept == nil {
 			limit = maxPathCandidates
 		}
 		byLimit[limit] = append(byLimit[limit], e.path)
@@ -418,7 +422,7 @@ func (s *Service) namedByPath(ctx context.Context, entries []m3uEntry, opts Reso
 	for c, p := range spelling {
 		got := found[p]
 		items := opts.Accept.Admit(got.Items)
-		if got.Overflow || !filepath.IsAbs(c) && len(items) > maxPathCandidates {
+		if got.Overflow || !pathx.LineAnchored(p) && len(items) > maxPathCandidates {
 			continue
 		}
 		out[c] = named{items: items, several: len(got.Items) > 1}

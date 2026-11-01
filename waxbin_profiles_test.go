@@ -33,7 +33,7 @@ func openWithProfile(t *testing.T, music string) (*waxbin.Library, string) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "in", "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "mine"}},
 		Profiles: []config.ProfileDef{{Name: "mine", Music: music}},
@@ -187,6 +187,7 @@ func TestRootsMustNameAKnownProfile(t *testing.T) {
 		t.Fatalf("add a root under an unknown profile = %v, want CodeInvalid naming the root", err)
 	}
 	configured := t.TempDir()
+	// Not seeded: Open refuses the unknown profile before any catalog exists.
 	_, err = waxbin.Open(ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "other.db"),
 		Roots:  []config.Root{{Path: configured, Mode: model.ModeManaged, Profile: "nope"}},
@@ -203,7 +204,7 @@ func TestRootsMustNameAKnownProfile(t *testing.T) {
 func TestInPlaceRootsKeepAnyProfileName(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:    []config.Root{{Path: t.TempDir(), Mode: model.ModeInPlace, Profile: "gone"}},
 		Profiles: []config.ProfileDef{{Name: "mine"}},
@@ -227,7 +228,7 @@ func TestAddRootAndSetProfilesSerialize(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	for i := 0; i < 8; i++ {
-		lib, err := waxbin.Open(ctx, waxbin.Options{
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 			DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 			Roots:    []config.Root{{Path: t.TempDir(), Mode: model.ModeManaged}},
 			Profiles: []config.ProfileDef{{Name: "mine"}},
@@ -284,7 +285,7 @@ func TestAStoredRootWithAMissingProfile(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	music, books := t.TempDir(), t.TempDir()
-	first, err := waxbin.Open(ctx, waxbin.Options{
+	first, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots: []config.Root{
 			{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic},
@@ -308,7 +309,7 @@ func TestAStoredRootWithAMissingProfile(t *testing.T) {
 	_ = first.Close()
 
 	logs := &messages{}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic}},
 		Logger: slog.New(logs),
@@ -342,7 +343,7 @@ func TestReopenWarnsOfAStoredRootsMissingProfile(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	logs := &messages{}
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Logger: slog.New(logs)})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Logger: slog.New(logs)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +351,7 @@ func TestReopenWarnsOfAStoredRootsMissingProfile(t *testing.T) {
 	if err := lib.BeginMaintenance(ctx); err != nil {
 		t.Fatalf("begin maintenance: %v", err)
 	}
-	other, err := waxbin.Open(ctx, waxbin.Options{
+	other, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   db,
 		Roots:    []config.Root{{Path: t.TempDir(), Mode: model.ModeManaged, Profile: "mine"}},
 		Profiles: []config.ProfileDef{{Name: "mine"}},

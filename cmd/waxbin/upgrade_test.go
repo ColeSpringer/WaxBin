@@ -19,7 +19,7 @@ import (
 // TestUpgradeShowsAnItemsEncodings: an item holding another encoding is listed as one
 // item with each file under it by pid, the form rm --file takes.
 func TestUpgradeShowsAnItemsEncodings(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

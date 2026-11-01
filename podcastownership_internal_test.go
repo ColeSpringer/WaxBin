@@ -28,7 +28,7 @@ func ownershipFixture(t *testing.T) (lib *Library, podDir string, trackPID, epis
 	acq := t.TempDir()
 
 	var err error
-	lib, err = Open(ctx, Options{
+	lib, err = OpenSeeded(t, ctx, Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: musicRoot, Mode: model.ModeManaged, Media: model.MediaMusic, Profile: "waxbin-native"},

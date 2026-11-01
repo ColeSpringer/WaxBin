@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/diskfree"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/source"
@@ -21,7 +22,7 @@ import (
 func TestDownloadSurvivesAPruneOfItsShowFolder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), Owner: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

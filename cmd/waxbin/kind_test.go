@@ -21,7 +21,6 @@ import (
 // and returns the catalog, the root and the chapters' pids.
 func kindCLIFixture(t *testing.T) (string, string, []model.PID) {
 	t.Helper()
-	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -71,6 +70,7 @@ func runKindText(t *testing.T, db, root string, args ...string) (string, error) 
 // name once --yes confirms more than one item, as edit asks, and says which item it kept
 // and which it absorbed, in text and in JSON.
 func TestKindCommandMergesIntoABook(t *testing.T) {
+	t.Parallel()
 	db, root, pids := kindCLIFixture(t)
 	out, err := runKindText(t, db, root, string(pids[0]), string(pids[1]), "--to", "book")
 	if err != nil || !strings.Contains(out, "--yes") {
@@ -104,6 +104,7 @@ func TestKindCommandMergesIntoABook(t *testing.T) {
 // TestKindCommandSelects: `kind` takes edit's selection flags, previews a selection and
 // changes it only with --yes.
 func TestKindCommandSelects(t *testing.T) {
+	t.Parallel()
 	db, root, pids := kindCLIFixture(t)
 	out, err := runKindText(t, db, root, "--album", "Persuasion", "--to", "book", "--dry-run")
 	if err != nil {
@@ -129,6 +130,7 @@ func TestKindCommandSelects(t *testing.T) {
 // TestKindCommandRunsInTheServer: with a server holding the catalog, `kind` submits the
 // change as a job there and prints the report the job recorded.
 func TestKindCommandRunsInTheServer(t *testing.T) {
+	t.Parallel()
 	db, root, pids := kindCLIFixture(t)
 	ctx := context.Background()
 	lib := serveKindCatalog(t, db, root)
@@ -151,6 +153,7 @@ func TestKindCommandRunsInTheServer(t *testing.T) {
 // TestKindCommandReportsAPartialChange: a file that fails partway still leaves the change
 // it made on screen before the error, run directly or through a server.
 func TestKindCommandReportsAPartialChange(t *testing.T) {
+	t.Parallel()
 	for _, served := range []bool{false, true} {
 		db, root, pids := kindCLIFixture(t)
 		two := filepath.Join(root, "Persuasion", "02.mp3")

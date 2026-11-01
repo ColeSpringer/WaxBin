@@ -10,6 +10,7 @@ import (
 // timeline, and its JSON gives each part's start and the length it advances the book by,
 // which sum to the total.
 func TestBookShowsWhereEachPartStarts(t *testing.T) {
+	t.Parallel()
 	db, root, pids := kindCLIFixture(t)
 	if _, err := runKindText(t, db, root, string(pids[0]), string(pids[1]), "--to", "book", "--yes"); err != nil {
 		t.Fatalf("kind: %v", err)

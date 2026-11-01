@@ -82,7 +82,7 @@ func kindChapters(t *testing.T, n int, media model.MediaType) (*Library, string,
 			Title: fmt.Sprintf("Chapter %02d", i), Artist: "Jane Austen", AlbumArtist: "Jane Austen", Album: "Persuasion",
 			Genre: "Speech", Track: i, Audio: testaudio.AudioWithSeed(byte(i * 13))}))
 	}
-	lib, err := Open(ctx, Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -102,7 +102,7 @@ func kindChapters(t *testing.T, n int, media model.MediaType) (*Library, string,
 		if err := lib.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if lib, err = Open(ctx, Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Media: media,
+		if lib, err = OpenSeeded(t, ctx, Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Media: media,
 			Profile: "waxbin-native"}}}); err != nil {
 			t.Fatalf("reopen: %v", err)
 		}
@@ -148,8 +148,15 @@ func snapshotAt(t *testing.T, db string) string {
 	return snapshot
 }
 
+// openCrashed opens the copy snapshotAt made. It is never seeded: a copy that failed
+// would otherwise come back as an empty catalog with the crashed one's WAL replayed onto
+// it, so a missing file stops the test here.
 func openCrashed(t *testing.T, snapshot, root string, media model.MediaType) *Library {
 	t.Helper()
+	if _, err := os.Stat(snapshot); err != nil {
+		t.Fatalf("the crash snapshot is missing: %v", err)
+	}
+	// Not seeded: the snapshot is the crashed catalog itself.
 	lib, err := Open(context.Background(), Options{DBPath: snapshot,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Media: media, Profile: "waxbin-native"}}})
 	if err != nil {
@@ -337,11 +344,7 @@ func TestASplitCutOffMidBookNamesEveryPart(t *testing.T) {
 	if _, err := lib.SetItemKind(ctx, []model.PID{book}, model.KindTrack, KindOptions{}); err != nil {
 		t.Fatalf("set kind: %v", err)
 	}
-	crashed, err := Open(ctx, Options{DBPath: snapshot, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = crashed.Close() })
+	crashed := openCrashed(t, snapshot, root, "")
 	_, rep := lastJob(t, crashed)
 	if len(rep.Created) != 3 || rep.Reads != 0 {
 		t.Errorf("reclaimed report = %+v, want the three tracks made before the crash, no target finished", rep)

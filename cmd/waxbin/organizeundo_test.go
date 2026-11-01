@@ -18,7 +18,7 @@ import (
 // undo` moves its files back and reports it as an organize report, and `db vacuum
 // --journal-days 0` prunes the settled journal, after which there is nothing to undo.
 func TestOrganizeUndoAndHistory(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

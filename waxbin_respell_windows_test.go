@@ -88,7 +88,7 @@ func TestOrganizeRespellsInEachManagedLibrary(t *testing.T) {
 			Artist: "Tolkien", Album: title, TXXX: narrated, Audio: testaudio.AudioWithSeed(byte(i + 1))}))
 	}
 	writeFile(t, filepath.Join(music, "Artist", "Album", "01 - Song.mp3"), testaudio.BuildMP3WithAudio("Song", "Artist", "Album", 1, testaudio.AudioWithSeed(3)))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic, Profile: "waxbin-native"},
 			{Path: books, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"},

@@ -36,7 +36,7 @@ func TestRebuildKeepsTheStampedPIDOverACopyReadFirst(t *testing.T) {
 		if split {
 			roots = append(roots, config.Root{Path: rootB, Mode: model.ModeInPlace})
 		}
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: roots})
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: roots})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,7 +75,7 @@ func TestRebuildAdoptionKeepsAFolderBookWhole(t *testing.T) {
 		writeFile(t, filepath.Join(root, "Book", "0"+string(rune('1'+n))+".mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 			Title: "Part", Artist: "Author", Album: album, Track: n + 1, Audio: testaudio.AudioWithSeed(byte(70 + n)), TXXX: tx}))
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Media: model.MediaAudiobook}}})
 	if err != nil {
 		t.Fatal(err)

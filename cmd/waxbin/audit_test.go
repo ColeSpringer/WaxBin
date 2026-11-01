@@ -38,7 +38,7 @@ func TestAuditRejectsUnknownCheck(t *testing.T) {
 // TestAuditDuplicateAlbumListsBothReasons: `audit --check duplicate_album` reports an album
 // split across folders by its name and a pair enrichment gave one release id by the id.
 func TestAuditDuplicateAlbumListsBothReasons(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

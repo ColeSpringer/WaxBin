@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
@@ -924,7 +925,9 @@ func (h *entryHolders) settleTx(ctx context.Context, tx *sql.Tx) error {
 // display-path bytes are the stored path. A relative path, common in playlists other tools
 // write, names the files whose display path ends with it at a separator, so "b/x.mp3" does
 // not match "prefix/ab/x.mp3"; it is compared as LIKE compares (ASCII letters in either
-// case), seeking the file-name index first. Each path is cleaned before it is matched
+// case), seeking the file-name index first. A path rooted below no volume, as Windows reads
+// \Music\a.flac, names that path below a drive's root and nowhere deeper, as such a line
+// names the one path elsewhere. Each path is cleaned before it is matched
 // ("./a/x.mp3" and "a/./x.mp3" name a/x.mp3) and answered under the key it was given;
 // where backslashes are no separator, a path naming nothing is read again with them as
 // separators, as a playlist written on Windows means them. A
@@ -940,14 +943,15 @@ func (s *Store) ItemsByPlaylistPaths(ctx context.Context, paths []string, limit 
 		if _, done := out[p]; done {
 			continue
 		}
-		items, err := s.itemsBehindPath(ctx, op, p, limit+1)
-		if err == nil && len(items) == 0 && filepath.Separator == '/' && strings.Contains(p, `\`) {
-			// A line written on Windows splits its folders with backslashes, which a
-			// name here may hold, so it is read that way only once it names nothing.
-			items, err = s.itemsBehindPath(ctx, op, strings.ReplaceAll(p, `\`, "/"), limit+1)
-		}
-		if err != nil {
-			return nil, err
+		var items []*model.ItemView
+		for _, clean := range pathx.LineReadings(p) {
+			got, err := s.itemsBehindPath(ctx, op, clean, limit+1)
+			if err != nil {
+				return nil, err
+			}
+			if items = got; len(items) > 0 {
+				break
+			}
 		}
 		if len(items) > limit {
 			out[p] = model.PathCandidates{Overflow: true}
@@ -958,15 +962,14 @@ func (s *Store) ItemsByPlaylistPaths(ctx context.Context, paths []string, limit 
 	return out, nil
 }
 
-// itemsBehindPath reads at most fetch of the items one playlist path names.
-func (s *Store) itemsBehindPath(ctx context.Context, op, p string, fetch int) ([]*model.ItemView, error) {
-	clean := filepath.Clean(filepath.FromSlash(p))
+// itemsBehindPath reads at most fetch of the items one cleaned playlist path names.
+func (s *Store) itemsBehindPath(ctx context.Context, op, clean string, fetch int) ([]*model.ItemView, error) {
 	var args []any
 	if filepath.IsAbs(clean) {
 		args = []any{[]byte(clean)}
 	} else {
 		// A pattern past SQLite's LIKE limit names no path a file can have.
-		pattern := "%" + query.LikeEscape(string(filepath.Separator)+clean)
+		pattern := pathPattern(clean)
 		if len(pattern) > query.MaxLikePatternBytes {
 			return nil, nil
 		}
@@ -977,6 +980,16 @@ func (s *Store) itemsBehindPath(ctx context.Context, op, p string, fetch int) ([
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return collectItems(rows, op)
+}
+
+// pathPattern is the LIKE pattern a playlist path that is not absolute names its files
+// by: the end of a display path, starting at a folder, or for a path rooted below no
+// volume, which only Windows has, that path below any drive.
+func pathPattern(clean string) string {
+	if pathx.Rooted(clean) {
+		return "_:" + query.LikeEscape(clean)
+	}
+	return "%" + query.LikeEscape(string(filepath.Separator)+clean)
 }
 
 // playlistPathQ is the lookup of the items one playlist path names: an absolute path by

@@ -3,13 +3,13 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
@@ -647,10 +647,7 @@ func TestItemsByPlaylistPathsMatching(t *testing.T) {
 	// playlist entries below stay forward-slash, which is what M3U8 carries on
 	// every platform and what the matcher normalizes; a bare "/lib" is not even
 	// absolute on Windows without a volume.
-	vol := ""
-	if wd, err := os.Getwd(); err == nil {
-		vol = filepath.VolumeName(wd)
-	}
+	vol := testpath.Vol()
 	nat := func(p string) string { return filepath.FromSlash(vol + p) }
 	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/al/1.flac"), essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
 	one := func(p string) string {
@@ -769,7 +766,11 @@ func (s *Store) ItemsByPlaylistPathLike(ctx context.Context, p string) ([]*model
 	if err != nil || len(items) > 0 || filepath.IsAbs(clean) {
 		return items, err
 	}
+	// Written out apart from pathPattern, so the property test compares two readings.
 	pattern := "%" + query.LikeEscape(string(filepath.Separator)+clean)
+	if strings.HasPrefix(clean, string(filepath.Separator)) {
+		pattern = "_:" + query.LikeEscape(clean) // rooted below no volume: below a drive's root
+	}
 	if len(pattern) > query.MaxLikePatternBytes {
 		return nil, nil
 	}

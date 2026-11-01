@@ -7,10 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 )
+
+// vol makes a fixture path absolute on Windows too, where "/music/a.flac" is relative.
+var vol = testpath.Vol()
 
 // fakeStore is an in-memory Store for exercising the service's M3U8 orchestration
 // without a database.
@@ -767,9 +771,10 @@ func TestResolveM3U8ScopedLabelStillHasToMatch(t *testing.T) {
 func TestResolveM3U8AnAbsolutePathTakesNoCap(t *testing.T) {
 	t.Parallel()
 	fs := newFakeStore()
-	fs.shared["/music/big.flac"] = ripOf(120)
+	abs := vol + "/music/big.flac"
+	fs.shared[abs] = ripOf(120)
 	fs.shared["big.flac"] = ripOf(120)
-	doc := "#EXTINF:200,Artist - Track 1\n/music/big.flac\n#EXTINF:200,Artist - Track 120\n/music/big.flac\n" +
+	doc := "#EXTINF:200,Artist - Track 1\n" + abs + "\n#EXTINF:200,Artist - Track 120\n" + abs + "\n" +
 		"#EXTINF:200,Artist - Track 1\nbig.flac\n"
 	matches, err := New(fs).ResolveM3U8(context.Background(), strings.NewReader(doc))
 	if err != nil {
@@ -782,8 +787,8 @@ func TestResolveM3U8AnAbsolutePathTakesNoCap(t *testing.T) {
 }
 
 // TestResolveM3U8FetchesNoMoreThanItCanUse: unscoped, a relative path is read only as far
-// as the cap, since more names nothing; a scoped document and an absolute path read to the
-// fetch bound.
+// as the cap, since more names nothing; a scoped document and an anchored path, absolute
+// or written on Windows from a drive's root, read to the fetch bound on every platform.
 func TestResolveM3U8FetchesNoMoreThanItCanUse(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -794,9 +799,10 @@ func TestResolveM3U8FetchesNoMoreThanItCanUse(t *testing.T) {
 		want string
 	}{
 		{"relative", "a.flac\nb.flac\n", ResolveOptions{}, "[100]"},
-		{"absolute", "/m/a.flac\n", ResolveOptions{}, "[1000]"},
-		{"both", "a.flac\n/m/a.flac\n", ResolveOptions{}, "[1000 100]"},
-		{"scoped", "a.flac\n/m/a.flac\n", ResolveOptions{Accept: func(*model.ItemView) bool { return true }}, "[1000]"},
+		{"absolute", vol + "/m/a.flac\n", ResolveOptions{}, "[1000]"},
+		{"rooted with backslashes", `\m\a.flac` + "\n", ResolveOptions{}, "[1000]"},
+		{"both", "a.flac\n" + vol + "/m/a.flac\n", ResolveOptions{}, "[1000 100]"},
+		{"scoped", "a.flac\n" + vol + "/m/a.flac\n", ResolveOptions{Accept: func(*model.ItemView) bool { return true }}, "[1000]"},
 	} {
 		fs := newFakeStore()
 		if _, err := New(fs).ResolveM3U8With(ctx, strings.NewReader(c.doc), c.opts); err != nil {

@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin/art"
+	"github.com/colespringer/waxbin/internal/testcatalog"
+	"github.com/colespringer/waxbin/internal/testimage"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
@@ -59,7 +61,7 @@ func newCoverFixture(t *testing.T) *coverFixture {
 	t.Helper()
 	ctx := context.Background()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
-		Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test",
+		Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), Owner: "test",
 	})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -420,12 +422,12 @@ func TestSyncBoundsAnOversizedChannelImage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
-	f.setImage(testPNGBytes(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/2), "image/png")
+	f.setImage(testimage.TexturedPNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/20, 1), "image/png")
 
 	pid := f.subscribe(t)
 	roles, err := f.store.ArtRoles(ctx, model.EntityRef{Type: model.ArtPodcast, PID: pid})
-	if err != nil || len(roles) != 1 || roles[0].Width != art.MaxSourceDim || roles[0].Height != art.MaxSourceDim/2 {
-		t.Fatalf("art roles = %+v (err %v), want one front %dx%d", roles, err, art.MaxSourceDim, art.MaxSourceDim/2)
+	if err != nil || len(roles) != 1 || roles[0].Width != art.MaxSourceDim || roles[0].Height != art.MaxSourceDim/20 {
+		t.Fatalf("art roles = %+v (err %v), want one front %dx%d", roles, err, art.MaxSourceDim, art.MaxSourceDim/20)
 	}
 	if _, err := f.svc.Sync(ctx, pid); err != nil {
 		t.Fatalf("sync: %v", err)

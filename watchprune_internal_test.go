@@ -48,7 +48,7 @@ func TestWatchRescanOfARemovedFolderIsQuiet(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	logged := &warnings{}
-	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Logger: slog.New(logged),
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Logger: slog.New(logged),
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)

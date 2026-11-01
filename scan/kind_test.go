@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
@@ -23,7 +24,7 @@ func kindFixture(t *testing.T, media model.MediaType) (*sqlite.Store, *model.Lib
 	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -432,7 +433,7 @@ func TestNewBookDoesNotRereadItsSiblings(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -608,7 +609,7 @@ func TestFolderSettleSkipsPartsAlreadyIn(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
@@ -42,7 +43,7 @@ func fastPathFixtureAt(t *testing.T, root string) (*sqlite.Store, *model.Library
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

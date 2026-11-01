@@ -10,6 +10,7 @@ import (
 // TestManifestCountsWithoutTheBody drives `manifest` through a catalog with a logged
 // session and checks the header it prints carries the export's counts and version.
 func TestManifestCountsWithoutTheBody(t *testing.T) {
+	t.Parallel()
 	db, root, pid := creditCLIFixture(t)
 	if _, err := runStateCLI(t, db, root, "set", string(pid), "--played", "--session", "240000", "--as-of", "2020-01-02T03:04:05Z"); err != nil {
 		t.Fatalf("state set: %v", err)

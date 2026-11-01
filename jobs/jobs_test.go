@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
@@ -20,7 +21,7 @@ import (
 func newManager(t *testing.T) (*jobs.Manager, *sqlite.Store) {
 	t.Helper()
 	st, err := sqlite.Open(context.Background(), sqlite.OpenOptions{
-		Path:   filepath.Join(t.TempDir(), "jobs.db"),
+		Path:   testcatalog.Seed(t, filepath.Join(t.TempDir(), "jobs.db")),
 		Owner:  "test",
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

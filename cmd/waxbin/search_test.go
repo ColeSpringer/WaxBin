@@ -13,6 +13,7 @@ import (
 // TestSearchJSONMarksExactNames: the JSON view carries a hit's exact mark, so a client
 // can tell the artist the query names from the ones its items brought in.
 func TestSearchJSONMarksExactNames(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	out, err := runCLIJSON(t, db, root, "search", "artist")
 	if err != nil {
@@ -37,7 +38,7 @@ func TestSearchJSONMarksExactNames(t *testing.T) {
 // TestSearchPodcastFlagScopesEpisodes: --podcast keeps the episodes of the named shows
 // and leaves the rest out.
 func TestSearchPodcastFlagScopesEpisodes(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

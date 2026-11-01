@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -113,7 +114,7 @@ func TestEnsureNoCatalogOwnerRefusesALiveOwner(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "holder"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "holder"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -137,6 +138,7 @@ func TestEnsureNoCatalogOwnerRefusesALiveOwner(t *testing.T) {
 // TestDBResetKeepsTheThumbFile: a reset moves the catalog aside but leaves the thumbnail
 // file beside it, which serves the rebuilt catalog's covers, and says what it kept.
 func TestDBResetKeepsTheThumbFile(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	thumbs := sqlite.ThumbFile(db)
 	raw, err := sql.Open("sqlite", "file:"+thumbs)

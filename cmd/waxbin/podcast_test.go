@@ -11,6 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/internal/testcatalog"
+	"github.com/colespringer/waxbin/model"
 )
 
 const oneEpisodeFeed = `<?xml version="1.0"?><rss version="2.0"><channel><title>Show</title>
@@ -30,7 +35,7 @@ func TestPodcastSyncAllCountsTheFailedFeeds(t *testing.T) {
 		return srv
 	}
 	live, dead := serve(), serve()
-	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
+	db, root := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), t.TempDir()
 	var deadPID string
 	for _, srv := range []*httptest.Server{live, dead} {
 		out, err := runCLIJSON(t, db, root, "podcast", "add", srv.URL)
@@ -89,7 +94,7 @@ func TestPodcastAddSaysItKeptTheStoredAddress(t *testing.T) {
 		return srv
 	}
 	srv, other := serve(), serve()
-	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
+	db, root := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), t.TempDir()
 	add := func(args ...string) string {
 		t.Helper()
 		out, err := runCLIText(t, db, root, append([]string{"podcast", "add"}, args...)...)
@@ -157,7 +162,7 @@ func TestPodcastChaptersFetchesAndLists(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	base = srv.URL
-	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
+	db, root := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), t.TempDir()
 	run := func(v any, args ...string) {
 		t.Helper()
 		out, err := runCLIJSON(t, db, root, args...)
@@ -210,12 +215,13 @@ func TestPodcastChaptersFetchesAndLists(t *testing.T) {
 // TestRootListingsHintWhenOnlyThePodcastLibraryExists: a catalog whose one library is the
 // internal podcast library, made by the open, still says no library root is registered.
 func TestRootListingsHintWhenOnlyThePodcastLibraryExists(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
-	t.Setenv("WAXBIN_PODCAST_DIR", t.TempDir())
-	db := filepath.Join(t.TempDir(), "catalog.db")
+	t.Parallel()
+	pods := t.TempDir()
+	env := envOf("WAXBIN_PODCAST_DIR", pods)
+	db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db"))
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := newRootCmd(&globals{})
+		cmd := newRootCmd(&globals{getenv: env})
 		var stdout bytes.Buffer
 		cmd.SetOut(&stdout)
 		cmd.SetErr(&bytes.Buffer{})
@@ -234,4 +240,28 @@ func TestRootListingsHintWhenOnlyThePodcastLibraryExists(t *testing.T) {
 	if out := run("doctor"); !strings.Contains(out, "libraries:      0\n") {
 		t.Errorf("doctor printed %q, want no library roots counted", out)
 	}
+	if got := podcastRoot(t, db); !pathx.SamePath(got, pods) {
+		t.Errorf("the podcast library is at %q, want the WAXBIN_PODCAST_DIR folder %s", got, pods)
+	}
+}
+
+// podcastRoot is the folder of the catalog's podcast library, empty when it has none.
+func podcastRoot(t *testing.T, db string) string {
+	t.Helper()
+	ctx := context.Background()
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open %s: %v", db, err)
+	}
+	defer func() { _ = lib.Close() }()
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		t.Fatalf("libraries: %v", err)
+	}
+	for _, l := range libs {
+		if l.Mode == model.ModePodcast {
+			return l.DisplayRoot
+		}
+	}
+	return ""
 }

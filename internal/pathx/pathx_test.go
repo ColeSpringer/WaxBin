@@ -1,9 +1,10 @@
 package pathx
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/colespringer/waxbin/internal/testpath"
 )
 
 // TestCollisionKey: paths that differ only by case or Unicode form share a key, on every
@@ -48,11 +49,7 @@ func TestCollisionKeyFoldsAsEqualFoldDoes(t *testing.T) {
 // one outside it by its base name, never as a path climbing out of the root.
 func TestRelUnderFallsBackOutsideTheRoot(t *testing.T) {
 	t.Parallel()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	vol := filepath.VolumeName(wd)
+	vol := testpath.Vol()
 	p := func(s string) string { return vol + filepath.FromSlash(s) }
 	if got := RelUnder(p("/r"), p("/r/in/a.mp3")); got != filepath.Join("in", "a.mp3") {
 		t.Errorf("RelUnder inside the root = %q, want in/a.mp3", got)

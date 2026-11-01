@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
@@ -104,7 +105,7 @@ func openStore(t *testing.T) (*sqlite.Store, string, *model.Library) {
 	t.Helper()
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: dbPath, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, dbPath), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

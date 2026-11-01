@@ -12,11 +12,81 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 )
+
+// TestMain clears every variable a command reads before any test runs, so nothing set in
+// the shell running the tests reaches a command. A test that needs one hands it to its
+// command through globals.getenv (envOf), never the process, which lets tests run side
+// by side; TestCommandsReadTheProcessEnvironment is the one that sets the process's.
+func TestMain(m *testing.M) {
+	for _, key := range cliEnvKeys() {
+		_ = os.Unsetenv(key)
+	}
+	os.Exit(m.Run())
+}
+
+// cliEnvKeys is every variable a command reads, collected by running the CLI's own reads
+// against a recording environment, so the list cannot fall behind config.Load and leaves
+// any other WAXBIN_ variable, a test's re-exec marker say, alone.
+func cliEnvKeys() []string {
+	var keys []string
+	g := &globals{getenv: func(key string) string {
+		keys = append(keys, key)
+		return ""
+	}}
+	g.resolveConfigPath()
+	_, _ = config.Load(config.Overrides{}, g.env)
+	return keys
+}
+
+// TestCommandsReadTheProcessEnvironment: a command handed no environment reads the
+// process's, as the shipped binary does: a setting itself (WAXBIN_DB) and the config
+// file another names (WAXBIN_CONFIG). Sequential, since it sets the process's.
+func TestCommandsReadTheProcessEnvironment(t *testing.T) {
+	initOut := func() string {
+		t.Helper()
+		cmd := newRootCmd(&globals{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"init"})
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("init: %v", err)
+		}
+		return stdout.String()
+	}
+	viaEnv := testcatalog.Seed(t, filepath.Join(t.TempDir(), "env.db"))
+	t.Setenv("WAXBIN_DB", viaEnv)
+	if out := initOut(); !strings.Contains(out, viaEnv) {
+		t.Errorf("init under WAXBIN_DB printed %q, want the catalog at %s", out, viaEnv)
+	}
+
+	viaFile := testcatalog.Seed(t, filepath.Join(t.TempDir(), "file.db"))
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, fmt.Appendf(nil, `{"db": %q}`, viaFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAXBIN_DB", "")
+	t.Setenv("WAXBIN_CONFIG", cfg)
+	if out := initOut(); !strings.Contains(out, viaFile) {
+		t.Errorf("init under WAXBIN_CONFIG printed %q, want the catalog at %s", out, viaFile)
+	}
+}
+
+// envOf is an environment holding only the given key and value pairs.
+func envOf(kv ...string) func(string) string {
+	vars := make(map[string]string, len(kv)/2)
+	for i := 0; i+1 < len(kv); i += 2 {
+		vars[kv[i]] = kv[i+1]
+	}
+	return func(key string) string { return vars[key] }
+}
 
 // advertiseSocket writes the owner record a running server leaves beside the
 // lockfile, pointing at sock, and returns the catalog path that advertises it.
@@ -93,8 +163,7 @@ func TestDialServerDeadSocketStillFallsBack(t *testing.T) {
 // version the server is alive, so reporting the original flock conflict would point
 // the operator at the lock instead of at the rebuild.
 func TestOpenLibVersionMismatchSurfacesOverTheLockConflict(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
-	t.Setenv("WAXBIN_DB", "")
+	t.Parallel()
 	sock := testsock.Path(t)
 	refusal := fmt.Sprintf("%s %d (this server speaks 14)", proxy.VersionMismatchPrefix, proxy.ProtocolVersion)
 	serveOneRefusal(t, sock, refusal)
@@ -102,7 +171,7 @@ func TestOpenLibVersionMismatchSurfacesOverTheLockConflict(t *testing.T) {
 	// A real store holds the flock and advertises the socket, the way a serving
 	// waxbin does; the maintenance-begin frame then meets the refusing fake.
 	dbPath := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(context.Background(), sqlite.OpenOptions{Path: dbPath, Owner: "srv", IPCSocket: sock})
+	st, err := sqlite.Open(context.Background(), sqlite.OpenOptions{Path: testcatalog.Seed(t, dbPath), Owner: "srv", IPCSocket: sock})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

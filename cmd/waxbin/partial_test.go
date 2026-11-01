@@ -83,6 +83,7 @@ func TestPartialRunsSayWhatFailed(t *testing.T) {
 // TestTrashPurgeReportsWhatItPurgedBeforeAFailure: purging two entries where the second
 // fails prints what went before, with the failure, and exits non-zero.
 func TestTrashPurgeReportsWhatItPurgedBeforeAFailure(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	if _, err := runCLIJSON(t, db, root, "rm", string(p["One"]), "--apply"); err != nil {
 		t.Fatalf("rm: %v", err)
@@ -113,6 +114,7 @@ func TestTrashPurgeReportsWhatItPurgedBeforeAFailure(t *testing.T) {
 // under db verify, an error finding under audit, an .nsp export with no counterpart)
 // carries that failure as its error member.
 func TestFailingVerdictsNameTheFailure(t *testing.T) {
+	t.Parallel()
 	db, root, p := playlistCLIFixture(t)
 	raw, err := sql.Open("sqlite", "file:"+db)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -923,7 +924,7 @@ func TestOpenOwnsItsLibrary(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	// WaxBin creates the catalog; a read-only open cannot, so author it first.
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db})
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: testcatalog.Seed(t, db)})
 	if err != nil {
 		t.Fatalf("authoring the catalog: %v", err)
 	}

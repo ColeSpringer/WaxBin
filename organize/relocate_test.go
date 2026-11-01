@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/fsx"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
@@ -173,7 +174,7 @@ func TestExecuteCarriesCoversWhenCancelled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
-		Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test",
+		Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test",
 	})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -262,7 +263,7 @@ func mustWrite(t *testing.T, p string) {
 func TestExecuteTakesSharedLyricsWithTheLastFile(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -313,7 +314,7 @@ func TestExecuteTakesSharedLyricsWithTheLastFile(t *testing.T) {
 func TestParkRecordsItsPathBelowTheActionsRoot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

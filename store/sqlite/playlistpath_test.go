@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -139,6 +140,42 @@ func TestM3U8RoundTripsCueTracks(t *testing.T) {
 	}
 }
 
+// TestM3U8ReadsAWindowsRootedLineAlikeEverywhere: a line written on Windows from a
+// drive's root, backslashes and no drive, names a 120-track rip past the relative cap on
+// every platform, and each label picks its track: Windows reads the line below a drive's
+// root, and elsewhere its backslashes are read as separators, which makes it absolute.
+func TestM3U8ReadsAWindowsRootedLineAlikeEverywhere(t *testing.T) {
+	t.Parallel()
+	st, lib, root := openCopyStore(t)
+	ctx := context.Background()
+	rip := filepath.Join(root, "Rip", "rip.flac")
+	touch(t, rip)
+	windows := make([][2]int64, 120)
+	for i := range windows {
+		windows[i] = [2]int64{int64(i) * 300, int64(i+1) * 300}
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, rip, "sha256:WR", "sha256:WC", 360000, windows)); err != nil {
+		t.Fatalf("put rip: %v", err)
+	}
+	line := strings.ReplaceAll(filepath.ToSlash(strings.TrimPrefix(rip, filepath.VolumeName(rip))), "/", `\`)
+	doc := "#EXTINF:-1,Rip Artist - Track 1\n" + line + "\n#EXTINF:-1,Rip Artist - Track 120\n" + line + "\n"
+	matches, err := playlist.New(st).ResolveM3U8(ctx, strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	var got []string
+	for _, m := range matches {
+		title := "<none>"
+		if m.Item != nil {
+			title = m.Item.Title
+		}
+		got = append(got, title)
+	}
+	if want := []string{"Track 1", "Track 120"}; !slices.Equal(got, want) {
+		t.Errorf("%q resolved to %v, want %v", line, got, want)
+	}
+}
+
 // TestM3U8ImportListsABookOnce: another player lists a book by its part files, each of
 // which names the book, and the import adds the book once.
 func TestM3U8ImportListsABookOnce(t *testing.T) {
@@ -189,6 +226,7 @@ func TestItemsByPlaylistPathsMatchesWhatTheLikeDid(t *testing.T) {
 		rip, "Rip/rip.flac", "rip.flac", parts[1], "Book/p2.m4b", "p2.m4b", "ook/p2.m4b",
 		"dup.flac", "x/dup.flac", "X/DUP.FLAC", "deep/x/dup.flac", "Café/é.flac", "café/é.flac", "CAFÉ/é.flac",
 		filepath.Join(root, "nothing.flac"), "nothing.flac", "", ".", "..", "../dup.flac",
+		filepath.ToSlash(strings.TrimPrefix(copied, filepath.VolumeName(copied))),
 	}
 	got, err := st.ItemsByPlaylistPaths(ctx, lines, 1000)
 	if err != nil {
@@ -254,5 +292,24 @@ func TestItemsByPlaylistPathsReadsAWindowsLine(t *testing.T) {
 	}
 	if got := pathTitles(t, st, `Other\01.flac`); got != nil {
 		t.Errorf("a line naming another folder = %v, want nothing", got)
+	}
+}
+
+// TestItemsByPlaylistPathsReadsALineWithNoVolume: a line naming a file from the root of
+// its volume, but not the volume, names that file and not a deeper one ending the same
+// way, on every platform: on POSIX the line is the absolute path, and Windows reads it as
+// that path below a drive's root.
+func TestItemsByPlaylistPathsReadsALineWithNoVolume(t *testing.T) {
+	t.Parallel()
+	st, lib, root := openCopyStore(t)
+	p := filepath.Join(root, "Artist", "Album", "01.flac")
+	line := filepath.ToSlash(strings.TrimPrefix(p, filepath.VolumeName(p)))
+	deeper := filepath.Join(root, "Nested", filepath.FromSlash(line))
+	for i, put := range []struct{ path, title string }{{p, "No Volume"}, {deeper, "Deeper"}} {
+		touch(t, put.path)
+		mustPut(t, st, input(lib.ID, put.path, fmt.Sprintf("sha256:EV%d", i), fmt.Sprintf("sha256:CV%d", i), put.title))
+	}
+	if got := pathTitles(t, st, line); !slices.Equal(got, []string{"No Volume"}) {
+		t.Errorf("%q = %v, want No Volume alone", line, got)
 	}
 }

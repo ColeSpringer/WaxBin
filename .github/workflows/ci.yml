@@ -95,6 +95,12 @@ jobs:
             GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./cmd/waxbin
           done
 
+      - name: Vet the memory audit harness
+        # store/sqlite/memaudit_test.go builds only under libc.memgrind, which nothing
+        # else here compiles, so a libc bump that renames the calls it makes would
+        # otherwise surface only when the manual audit runs.
+        run: go vet -tags=libc.memgrind ./store/sqlite/
+
       - name: No-CGO invariant
         # No package outside the standard library may carry cgo files. The race
         # tests need cgo on, so such a package would be tested on a path the
@@ -146,10 +152,13 @@ jobs:
       - name: Test (race)
         # The race detector needs cgo; scope it to the test toolchain only so the
         # shipped binaries stay pure no-CGO. -count=1 because the restored build
-        # cache would otherwise hand back earlier test results.
+        # cache would otherwise hand back earlier test results. -race also turns on
+        # checkptr, which stays on for WaxBin's own code; modernc's transpiled SQLite
+        # keeps its memory outside the Go heap, where checkptr checks nothing and
+        # still costs about a quarter of each store-heavy package's CPU.
         env:
           CGO_ENABLED: "1"
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -gcflags='modernc.org/...=-d=checkptr=0' ./...
 
   govulncheck:
     runs-on: ubuntu-latest

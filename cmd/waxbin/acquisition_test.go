@@ -22,7 +22,6 @@ import (
 // the seeding library closed so the CLI can take the write lock.
 func acquisitionCLIFixture(t *testing.T) (string, string, model.PID) {
 	t.Helper()
-	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -80,6 +79,7 @@ func runAcquisitionCLI(t *testing.T, db, root string, args ...string) (string, s
 // tag-derived origin is replaced, the emptied fields are gone, and the field is locked
 // so a later scan leaves it alone.
 func TestAcquisitionSetCorrectsAndLocks(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 
 	stdout, _, err := runAcquisitionCLI(t, db, root, "set", string(pid),
@@ -116,6 +116,7 @@ func TestAcquisitionSetCorrectsAndLocks(t *testing.T) {
 // TestAcquisitionSetFlagWiring covers the flags that carry no behaviour of their own:
 // the required type, the RFC3339 stamp, and the two lock flags cobra keeps apart.
 func TestAcquisitionSetFlagWiring(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 
 	if _, _, err := runAcquisitionCLI(t, db, root, "set", string(pid)); err == nil {
@@ -154,6 +155,7 @@ func TestAcquisitionSetFlagWiring(t *testing.T) {
 // wording no longer claims the item reads local, which would be wrong for an episode of
 // a feed show, and a repeated clear is not refused by its own predecessor's lock.
 func TestAcquisitionClearLocksByDefault(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 
 	stdout, stderr, err := runAcquisitionCLI(t, db, root, "clear", string(pid))
@@ -186,6 +188,7 @@ func TestAcquisitionClearLocksByDefault(t *testing.T) {
 // source it actually reads, rather than assuming local. The read command stays on the
 // read-only open.
 func TestAcquisitionReadReportsTheFallback(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 	if _, _, err := runAcquisitionCLI(t, db, root, "clear", string(pid)); err != nil {
 		t.Fatalf("acquisition clear: %v", err)
@@ -205,6 +208,7 @@ func TestAcquisitionReadReportsTheFallback(t *testing.T) {
 // TestAcquisitionWriteBackStripsTheTags: the file loses the evidence, so the clear
 // holds across a rescan with the lock released.
 func TestAcquisitionWriteBackStripsTheTags(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 
 	if _, _, err := runAcquisitionCLI(t, db, root, "clear", string(pid), "--write-back", "--no-lock"); err != nil {
@@ -233,6 +237,7 @@ func TestAcquisitionWriteBackStripsTheTags(t *testing.T) {
 // and only the item read tells them apart. Without it a typo reads as a locally scanned
 // track and exits 0.
 func TestAcquisitionReadSeparatesUnknownPidFromNoRow(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 	if _, _, err := runAcquisitionCLI(t, db, root, "clear", string(pid)); err != nil {
 		t.Fatalf("acquisition clear: %v", err)
@@ -249,6 +254,7 @@ func TestAcquisitionReadSeparatesUnknownPidFromNoRow(t *testing.T) {
 // off a row of its own carries the discriminator, or a feed episode with no row would be
 // indistinguishable from one carrying a curated rss row.
 func TestAcquisitionJSONMarksAnInheritedSource(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 
 	stdout, _, err := runAcquisitionCLI(t, db, root, string(pid), "--json")
@@ -276,6 +282,7 @@ func TestAcquisitionJSONMarksAnInheritedSource(t *testing.T) {
 // UnixNano, the epoch collides with the store's "keep the stamp" sentinel, and nothing
 // downstream parses the options blob.
 func TestAcquisitionSetRefusesBadInput(t *testing.T) {
+	t.Parallel()
 	db, root, pid := acquisitionCLIFixture(t)
 	for _, tc := range []struct{ what, flag, value string }{
 		{"out of range", "--acquired-at", "3000-01-01T00:00:00Z"},

@@ -13,6 +13,7 @@ import (
 // TestBackupLeavesTheThumbnailsOut: a backup holds the original images and none of the
 // generated thumbnails, which stay in their own file beside the catalog.
 func TestBackupLeavesTheThumbnailsOut(t *testing.T) {
+	t.Parallel()
 	db, root, _ := creditCLIFixture(t)
 	for file, q := range map[string]string{
 		db: `INSERT INTO art_source(hash, format, width, height, size, data, created_at)

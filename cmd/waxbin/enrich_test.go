@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -173,9 +174,9 @@ func TestEnrichSummaryReportsStalled(t *testing.T) {
 // TestEnrichPhaseReachesTheRun: the phase list is handed to the run, which refuses one
 // this install does not build before anything is asked.
 func TestEnrichPhaseReachesTheRun(t *testing.T) {
-	t.Setenv("WAXBIN_ENRICH_CONTACT", "test@example.com")
-	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
-	_, err := runCLIJSON(t, db, root, "enrich", "--phase", "track-fields")
+	t.Parallel()
+	db, root := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), t.TempDir()
+	_, err := runCLIJSONEnv(t, envOf("WAXBIN_ENRICH_CONTACT", "test@example.com"), db, root, "enrich", "--phase", "track-fields")
 	if !waxerr.Is(err, waxerr.CodeUnsupported) || !strings.Contains(err.Error(), "track-fields") {
 		t.Fatalf("enrich --phase track-fields = %v, want the unbuilt phase refused", err)
 	}

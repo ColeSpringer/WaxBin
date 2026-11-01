@@ -3,11 +3,10 @@ package sqlite_test
 import (
 	"bytes"
 	"context"
-	"image"
-	"image/png"
 	"testing"
 
 	"github.com/colespringer/waxbin/art"
+	"github.com/colespringer/waxbin/internal/testimage"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -134,30 +133,6 @@ func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
 	}
 }
 
-// texturedStripPNG is a strip with a photograph's texture, which a scaled copy shrinks.
-func texturedStripPNG(t *testing.T, w, h int) []byte {
-	t.Helper()
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	seed := uint32(1234567)
-	for y := range h {
-		for x := range w {
-			seed ^= seed << 13
-			seed ^= seed >> 17
-			seed ^= seed << 5
-			i := img.PixOffset(x, y)
-			img.Pix[i] = uint8(x*255/w) + uint8(seed&7)
-			img.Pix[i+1] = 80 + uint8((seed>>8)&7)
-			img.Pix[i+2] = 160 + uint8((seed>>16)&7)
-			img.Pix[i+3] = 255
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("encode png: %v", err)
-	}
-	return buf.Bytes()
-}
-
 // TestResolveAtTheTopRungServesABoundedSourceWhole: a source the bound scaled sits within
 // art.MaxSourceDim, under the top rung, so the top rung and anything above it serve it
 // whole and generate nothing.
@@ -172,7 +147,7 @@ func TestResolveAtTheTopRungServesABoundedSourceWhole(t *testing.T) {
 		t.Fatalf("the top rung %d is within the source bound %d, so this test's premise is gone", top, art.MaxSourceDim)
 	}
 	pid := putCoveredTrack(t, st, lib.ID, "/lib/t.flac", "ess-t", "Textured", "T",
-		stamped(t, texturedStripPNG(t, top+352, 60), model.SourceTag, "", ""))
+		stamped(t, testimage.TexturedPNG(t, top+352, 60, 0), model.SourceTag, "", ""))
 	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
 
 	for _, box := range []int{top, top * 2} {

@@ -62,7 +62,7 @@ func serveLib(t *testing.T, ctx context.Context, lib *waxbin.Library, sock strin
 // (without scanning) and starts Serve. The caller drives the catalog.
 func openServedRW(t *testing.T, ctx context.Context, db, root, sock string) *waxbin.Library {
 	t.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:    db,
 		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		IPCSocket: sock,
@@ -79,7 +79,7 @@ func openServedRW(t *testing.T, ctx context.Context, db, root, sock string) *wax
 // socket path; the server is stopped and the library closed at cleanup.
 func openServed(t *testing.T, ctx context.Context, db, root, sock string) *waxbin.Library {
 	t.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:    db,
 		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		IPCSocket: sock,
@@ -1216,7 +1216,7 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 	)
 	reopens := make(chan reopened, 4)
 	entered, release := make(chan struct{}, 1), make(chan struct{})
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:    db,
 		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		IPCSocket: sock,
@@ -1278,7 +1278,7 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 	}
 
 	// A direct read-write open now succeeds, proving the lock was released.
-	lib2, err := waxbin.Open(ctx, waxbin.Options{
+	lib2, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1516,7 +1516,7 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 	if err := c.MaintenanceBegin(ctx); err != nil {
 		t.Fatalf("maintenance begin: %v", err)
 	}
-	lib2, err := waxbin.Open(ctx, waxbin.Options{
+	lib2, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
@@ -1607,7 +1607,7 @@ func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
 	}
 
 	// Backup B: two user libraries, then the podcast library, whose row is 3.
-	libB, err := waxbin.Open(ctx, waxbin.Options{
+	libB, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "b.db"),
 		Roots: []config.Root{
 			{Path: t.TempDir(), Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -1646,7 +1646,7 @@ func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
 	var reopens atomic.Int32
 	var reopenSeq atomic.Int64
 	var replaced atomic.Bool
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:    db,
 		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		IPCSocket: sock,
@@ -1760,7 +1760,7 @@ func TestServeProxiedPodcastUnfetchAndRemove(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	sock := testsock.Path(t)
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:    db,
 		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Podcasts:  config.PodcastConfig{Dir: podDir},
@@ -2136,7 +2136,7 @@ func TestSuspendHookJobRefusesTheHandoff(t *testing.T) {
 		jobPID  model.PID
 		reopens atomic.Int32
 	)
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{blocking},
@@ -2172,7 +2172,7 @@ func TestCanceledRefusalStillResumesTheHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var seqs []int64
-	lib, err := waxbin.Open(context.Background(), waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, context.Background(), waxbin.Options{
 		DBPath:    filepath.Join(t.TempDir(), "catalog.db"),
 		OnSuspend: func(context.Context) { cancel() },
 		OnReopen:  func(_ context.Context, ev waxbin.ReopenEvent) { seqs = append(seqs, ev.Seq) },
@@ -2204,7 +2204,7 @@ func TestUnannouncedReopenIsFinishedLater(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	var hooks []string
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:    db,
 		OnSuspend: func(context.Context) { hooks = append(hooks, "suspend") },
 		OnReopen: func(_ context.Context, ev waxbin.ReopenEvent) {
@@ -2276,7 +2276,7 @@ func TestReopenOfAnOpenLibraryAnnouncesNothing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	var reopens atomic.Int32
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 		OnReopen: func(context.Context, waxbin.ReopenEvent) { reopens.Add(1) },
 	})
@@ -2305,7 +2305,7 @@ func TestDroppedHandoffStillAnnouncesTheReopen(t *testing.T) {
 	sock := testsock.Path(t)
 	var reopens atomic.Int32
 	var replaced atomic.Bool
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"), IPCSocket: sock,
 		OnReopen: func(_ context.Context, ev waxbin.ReopenEvent) {
 			replaced.Store(ev.Replaced)

@@ -20,7 +20,7 @@ import (
 // TestRmReportsThePrunedFolders: rm says how many folders the delete emptied and removed,
 // in JSON and in text.
 func TestRmReportsThePrunedFolders(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -84,7 +84,7 @@ func TestRmReportsThePrunedFolders(t *testing.T) {
 // TestRmDryRunListsWhatGoesWithAFile: the dry run names each file's own sidecars under it,
 // and says that a permanent delete also takes a managed folder's companions.
 func TestRmDryRunListsWhatGoesWithAFile(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

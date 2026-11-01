@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -35,7 +36,7 @@ func runLibraryCmd(t *testing.T, db string, jsonOut bool, args ...string) (strin
 // TestLibrarySetFlagsThroughAServer: `library set` reaches a running server's catalog
 // through the proxy, and `library list` shows the flag in both outputs.
 func TestLibrarySetFlagsThroughAServer(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -95,7 +96,7 @@ func TestLibrarySetFlagsThroughAServer(t *testing.T) {
 // folder fallback on and off through a running server, one setting per call, and both
 // list outputs show it.
 func TestLibrarySetFolderFallbackThroughAServer(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -152,8 +153,7 @@ func TestLibrarySetFolderFallbackThroughAServer(t *testing.T) {
 // working directory and registers an existing folder, refuses a missing one, and
 // registers it with --allow-absent; `init` refuses a missing configured root the same way.
 func TestLibraryAddChecksTheFolder(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
-	db := filepath.Join(t.TempDir(), "catalog.db")
+	db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db"))
 	if _, err := runLibraryCmd(t, db, false, "init"); err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestLibraryAddChecksTheFolder(t *testing.T) {
 		t.Fatalf("library add --allow-absent: %v", err)
 	}
 
-	fresh := filepath.Join(t.TempDir(), "fresh.db")
+	fresh := testcatalog.Seed(t, filepath.Join(t.TempDir(), "fresh.db"))
 	missing := filepath.Join(t.TempDir(), "unmounted")
 	if _, err := runLibraryCmd(t, fresh, false, "--root", missing, "init"); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("init with a missing root = %v, want CodeInvalid", err)
@@ -193,12 +193,12 @@ func TestLibraryAddChecksTheFolder(t *testing.T) {
 // it detached, in both outputs; a root the command line configures is refused without
 // --force, and forced it goes with a warning that the configuration brings it back.
 func TestLibraryRemove(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB, rootC := t.TempDir(), t.TempDir(), t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	writeAsset(t, filepath.Join(rootB, "b.mp3"), testaudio.BuildMP3WithAudio("In B", "Artist", "Album", 1, testaudio.AudioWithSeed(61)))
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: db,
 		Roots: []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +275,7 @@ func TestLibraryRemove(t *testing.T) {
 // TestLibraryRemoveThroughAServer: with a server running, `library remove` runs as the
 // server's job, which the command follows to its report.
 func TestLibraryRemoveThroughAServer(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

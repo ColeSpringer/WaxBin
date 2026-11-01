@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,7 +17,10 @@ import (
 // whole test binary. Applying the schema costs several times what copying the
 // file it produces costs, and almost every test here wants a catalog of its own,
 // so the suite used to spend most of its wall clock re-running the same DDL
-// through a race-instrumented SQLite.
+// through a race-instrumented SQLite. The default user and its change row a first
+// open leaves are taken out, so each catalog's own first open makes them and no two
+// share a user pid. internal/testcatalog builds the same seed for other packages;
+// this copy exists because those tests cannot be imported from here.
 var catalogSeed = sync.OnceValues(func() ([]byte, error) {
 	dir, err := os.MkdirTemp("", "waxbin-seed")
 	if err != nil {
@@ -30,6 +35,15 @@ var catalogSeed = sync.OnceValues(func() ([]byte, error) {
 	}
 	// Close checkpoints the WAL, so the one file carries the whole catalog.
 	if err := st.Close(); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec("DELETE FROM user; DELETE FROM change_log; DELETE FROM sqlite_sequence")
+	// The last connection to close checkpoints the deletes into the file.
+	if err = errors.Join(err, db.Close()); err != nil {
 		return nil, err
 	}
 	return os.ReadFile(path)
@@ -48,10 +62,6 @@ func seedCatalog(tb testing.TB, path string) string {
 	}
 	return path
 }
-
-// SeedCatalog is seedCatalog for the sqlite_test half of this binary, which
-// shares the test build but not the package.
-func SeedCatalog(tb testing.TB, path string) string { return seedCatalog(tb, path) }
 
 // catalogShape describes everything a test could tell apart between two empty
 // catalogs: the schema itself, the version and baseline it was stamped with, and
@@ -122,8 +132,15 @@ func TestSeededCatalogMatchesAFreshOne(t *testing.T) {
 	}
 
 	fresh := catalogShape(t, open(filepath.Join(t.TempDir(), "fresh.db")))
-	seeded := catalogShape(t, open(seedCatalog(t, filepath.Join(t.TempDir(), "seeded.db"))))
-	if fresh != seeded {
-		t.Errorf("a seeded catalog differs from a fresh one:\nfresh:\n%s\nseeded:\n%s", fresh, seeded)
+	seeded := open(seedCatalog(t, filepath.Join(t.TempDir(), "seeded.db")))
+	if shape := catalogShape(t, seeded); fresh != shape {
+		t.Errorf("a seeded catalog differs from a fresh one:\nfresh:\n%s\nseeded:\n%s", fresh, shape)
+	}
+	// The counts cannot tell a shared default user from two, so the pids are compared.
+	other := open(seedCatalog(t, filepath.Join(t.TempDir(), "other.db")))
+	if a, b := scalarStr(t, seeded, defaultUserQ), scalarStr(t, other, defaultUserQ); a == b {
+		t.Errorf("two seeded catalogs share the default user %s", a)
 	}
 }
+
+const defaultUserQ = "SELECT pid FROM user WHERE is_default = 1"

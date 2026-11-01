@@ -164,7 +164,7 @@ func TestEnrichWriteTagsLeavesAReadOnlyLibraryOwed(t *testing.T) {
 			}
 			return nil, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -222,7 +222,7 @@ func twoLibraries(t *testing.T) (lib *waxbin.Library, srcs [2]string, items, lib
 		cfg = append(cfg, config.Root{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"})
 	}
 	cfg[1].Media = model.MediaMusic
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: cfg})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: cfg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func openMusicAndMixed(t *testing.T) (*waxbin.Library, [2]model.PID) {
 	t.Helper()
 	ctx := context.Background()
 	music, mixed := t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic},
@@ -545,7 +545,7 @@ func TestEpisodeFileStaysInAReadOnlyLibrary(t *testing.T) {
 	root := t.TempDir()
 	src := filepath.Join(root, "ep.mp3")
 	writeFile(t, src, testaudio.BuildMP3("Ep", "Host", "Show", 1))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Podcasts: config.PodcastConfig{Dir: filepath.Join(t.TempDir(), "podcasts")},
@@ -581,7 +581,7 @@ func TestRoutedImportNamesTheReadOnlyLibrary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	music, books, staging := t.TempDir(), t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic},

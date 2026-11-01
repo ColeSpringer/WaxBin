@@ -20,7 +20,7 @@ import (
 // album key quoted, since it holds separators), and `entity unfold` forgets it, taking
 // the key as `entity folds` printed it.
 func TestMergeFoldsAndUnfold(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

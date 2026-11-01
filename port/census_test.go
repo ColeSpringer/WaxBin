@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/store/sqlite"
@@ -20,7 +21,7 @@ func TestCensusExcludesThePodcastLibrary(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(dir, "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestCensusExcludesThePodcastLibrary(t *testing.T) {
 // track per name, returning the store and each track's put result.
 func openWithTracks(t *testing.T, ctx context.Context, db string, names ...string) (*sqlite.Store, []*model.ScanItemResult) {
 	t.Helper()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

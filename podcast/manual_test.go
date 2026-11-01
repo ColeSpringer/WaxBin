@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
@@ -73,7 +74,7 @@ func TestImportEpisodeFileRestoresMovedFileOnCatalogFailure(t *testing.T) {
 func newTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 	st, err := sqlite.Open(context.Background(),
-		sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test"})
+		sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

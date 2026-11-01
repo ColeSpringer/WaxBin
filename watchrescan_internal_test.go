@@ -23,7 +23,7 @@ func TestWatchRescanCountsAPromotionAsAChange(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -69,7 +69,7 @@ func TestWatchRescanCountsARevivalAsAChange(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)

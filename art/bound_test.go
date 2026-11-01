@@ -10,6 +10,8 @@ import (
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxbin/internal/testimage"
 )
 
 // transparentPNG is a textured picture with a see-through corner, which a JPEG cannot
@@ -101,25 +103,7 @@ func TestBoundLeavesBytesItCannotDecode(t *testing.T) {
 // faint noise on it, which deflate cannot squeeze and a JPEG quantizes away.
 func texturedPNG(t *testing.T, w, h int) []byte {
 	t.Helper()
-	return encodePNG(t, texture(w, h))
-}
-
-func texture(w, h int) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	seed := uint32(2463534242)
-	for y := range h {
-		for x := range w {
-			seed ^= seed << 13
-			seed ^= seed >> 17
-			seed ^= seed << 5
-			i := img.PixOffset(x, y)
-			img.Pix[i] = uint8(x*255/w) + uint8(seed&7)
-			img.Pix[i+1] = uint8(y*255/h) + uint8((seed>>8)&7)
-			img.Pix[i+2] = 128 + uint8((seed>>16)&7)
-			img.Pix[i+3] = 255
-		}
-	}
-	return img
+	return encodePNG(t, testimage.Textured(w, h, 0))
 }
 
 func encodePNG(t *testing.T, img image.Image) []byte {
@@ -187,7 +171,7 @@ func TestBoundPicksTheSmallerEncoding(t *testing.T) {
 func TestBoundKeepsAnArrivalItCannotShrink(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, texture(MaxSourceDim+100, MaxSourceDim+100), &jpeg.Options{Quality: 60}); err != nil {
+	if err := jpeg.Encode(&buf, testimage.Textured(MaxSourceDim+100, MaxSourceDim+100, 0), &jpeg.Options{Quality: 60}); err != nil {
 		t.Fatal(err)
 	}
 	src := buf.Bytes()
@@ -304,7 +288,7 @@ func TestFitTurnsAJPEGUpright(t *testing.T) {
 func texturedJPEG(t *testing.T, w, h int) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, texture(w, h), &jpeg.Options{Quality: 90}); err != nil {
+	if err := jpeg.Encode(&buf, testimage.Textured(w, h, 0), &jpeg.Options{Quality: 90}); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()

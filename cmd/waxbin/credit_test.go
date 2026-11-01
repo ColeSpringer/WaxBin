@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/spf13/cobra"
@@ -78,7 +79,6 @@ func TestLoadBatchCredits(t *testing.T) {
 // track's pid, with the seeding library closed so the CLI can take the write lock.
 func creditCLIFixture(t *testing.T) (string, string, model.PID) {
 	t.Helper()
-	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -101,9 +101,20 @@ func creditCLIFixture(t *testing.T) (string, string, model.PID) {
 	return db, root, pid
 }
 
+// openSeeded is waxbin.Open on a seeded catalog where a read-write open would create one,
+// so a test does not pay for building the schema. A read-only open, or one a test expects
+// to be refused, calls waxbin.Open itself.
+func openSeeded(tb testing.TB, ctx context.Context, opts waxbin.Options) (*waxbin.Library, error) {
+	tb.Helper()
+	if !opts.ReadOnly {
+		testcatalog.Seed(tb, opts.DBPath)
+	}
+	return waxbin.Open(ctx, opts)
+}
+
 func openCLILib(t *testing.T, ctx context.Context, db, root string, readOnly bool) *waxbin.Library {
 	t.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := openSeeded(t, ctx, waxbin.Options{
 		DBPath:   db,
 		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		ReadOnly: readOnly,
@@ -130,6 +141,7 @@ func runCreditCLI(t *testing.T, db, root string, args ...string) (string, string
 // TestCreditSingleDryRunMutatesNothing: --dry-run on the single-item path previews the
 // edit and returns before a mutator opens, so the store keeps what it held.
 func TestCreditSingleDryRunMutatesNothing(t *testing.T) {
+	t.Parallel()
 	db, root, pid := creditCLIFixture(t)
 
 	stdout, _, err := runCreditCLI(t, db, root, string(pid), "--role", "composer", "--name", "Comp One", "--dry-run")
@@ -158,6 +170,7 @@ func TestCreditSingleDryRunMutatesNothing(t *testing.T) {
 // TestCreditSingleSkipLocked: a locked credit role under --skip-locked is reported as
 // a skip on stdout with a zero exit, and the curated credit stays.
 func TestCreditSingleSkipLocked(t *testing.T) {
+	t.Parallel()
 	db, root, pid := creditCLIFixture(t)
 	ctx := context.Background()
 	seed := openCLILib(t, ctx, db, root, false)

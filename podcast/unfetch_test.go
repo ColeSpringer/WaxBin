@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/playback"
@@ -24,7 +25,7 @@ func unfetchFixture(t *testing.T) (*podcast.Service, *sqlite.Store, []*model.Epi
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
-		Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test"})
+		Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

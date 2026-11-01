@@ -24,6 +24,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	binconfig "github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/pidpath"
 	"github.com/colespringer/waxbin/port"
@@ -122,7 +123,7 @@ func buildCatalog(t *testing.T, files map[string][]byte) (lib *waxbin.Library, r
 		}
 	}
 	lib, err := waxbin.Open(ctx, waxbin.Options{
-		DBPath: db,
+		DBPath: testcatalog.Seed(t, db),
 		Roots:  []binconfig.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})
 	if err != nil {

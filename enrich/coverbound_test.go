@@ -1,12 +1,8 @@
 package enrich_test
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,29 +10,15 @@ import (
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/internal/testimage"
 )
 
 // bigPNG is an opaque, textured picture over art.MaxSourceDim on its long side. It is a
-// strip rather than a square so that bounding it, which the provider does inside its
-// 15 second budget, stays quick under the race detector.
+// short strip so that bounding it, which the provider does inside its 15 second budget,
+// stays quick under the race detector.
 func bigPNG(t *testing.T) []byte {
 	t.Helper()
-	w, h := art.MaxSourceDim+200, 300
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	seed := uint32(521288629)
-	for y := range h {
-		for x := range w {
-			seed ^= seed << 13
-			seed ^= seed >> 17
-			seed ^= seed << 5
-			img.Set(x, y, color.RGBA{uint8(x*255/w) + uint8(seed&7), uint8(y*255/h) + uint8((seed>>8)&7), 40, 255})
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("encode png: %v", err)
-	}
-	return buf.Bytes()
+	return testimage.TexturedPNG(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/20, 521288629)
 }
 
 // caaServing serves picture at the given paths, 404s everything else, and counts every

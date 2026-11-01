@@ -14,7 +14,7 @@ import (
 // any catalog exists and while a root names a profile nobody defined, which is when
 // someone needs the list.
 func TestProfilesListsTheTemplates(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
 	cmd := newRootCmd(&globals{})
 	var stdout bytes.Buffer

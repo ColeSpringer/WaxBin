@@ -26,7 +26,7 @@ func TestABookReadAgainAsACueRipKeepsItsState(t *testing.T) {
 	writeCueRip(t, root, 7, "First", "Second") // track 2 opens at ten seconds
 	open := func(media model.MediaType) *waxbin.Library {
 		t.Helper()
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db,
 			Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Media: media}}})
 		if err != nil {
 			t.Fatal(err)
@@ -107,7 +107,7 @@ func TestAFinishedBookCarvedIntoARipFinishesEveryTrack(t *testing.T) {
 	writeCueRip(t, root, 19, "First", "Second")
 	open := func(media model.MediaType) *waxbin.Library {
 		t.Helper()
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db,
 			Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Media: media}}})
 		if err != nil {
 			t.Fatal(err)
@@ -166,7 +166,7 @@ func TestARipReadBackAsOneFileKeepsItsState(t *testing.T) {
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	writeCueRip(t, root, 9, "First", "Second") // track 2 opens at ten seconds
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeInPlace}}})
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestARipReadBackAsOneFileUpdatesTheOpeningTrack(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeCueRip(t, root, 15, "First", "Second")
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +271,7 @@ func TestARipTrackFinishedLeavesTheWholeFileUnfinished(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeCueRip(t, root, 13, "First", "Second") // track 2 opens at ten seconds
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestARipsLastTrackFinishedLeavesThePlaceAtTheFilesEnd(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeCueRip(t, root, 17, "First", "Second") // track 2 opens at ten seconds and runs to the end
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatal(err)
@@ -347,7 +347,7 @@ func TestARipReadAgainAsABookKeepsItsState(t *testing.T) {
 	writeCueRip(t, root, 11, "First", "Second")
 	open := func(media model.MediaType) *waxbin.Library {
 		t.Helper()
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db,
 			Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Media: media}}})
 		if err != nil {
 			t.Fatal(err)

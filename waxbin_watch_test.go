@@ -313,7 +313,7 @@ func TestWatchOfARemovedLibraryStops(t *testing.T) {
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	var logs lockedLog
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
@@ -353,7 +353,7 @@ func TestWatchIdlesWhenItsLastRootIsRemoved(t *testing.T) {
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	var logs lockedLog
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {

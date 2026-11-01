@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/playback"
@@ -87,7 +88,7 @@ func TestPodcastEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -258,7 +259,7 @@ func TestUnsubscribeRemovesEpisodesAndFiles(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -418,7 +419,7 @@ func TestASealedSecretWithoutACipherFailsTheDownloadAsTheCatalogs(t *testing.T) 
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	sealing, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test", SecretCipher: boundCipher{}})
+	sealing, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test", SecretCipher: boundCipher{}})
 	if err != nil {
 		t.Fatalf("open with a cipher: %v", err)
 	}
@@ -431,6 +432,7 @@ func TestASealedSecretWithoutACipherFailsTheDownloadAsTheCatalogs(t *testing.T) 
 		t.Fatalf("close: %v", err)
 	}
 
+	// Not seeded: this reopens, without the cipher, the catalog the sealing open made.
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
 	if err != nil {
 		t.Fatalf("open without a cipher: %v", err)
@@ -554,7 +556,7 @@ func TestImportWithoutAnImageReadsNoLogin(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sealing, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test", SecretCipher: boundCipher{}})
+	sealing, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, db), Owner: "test", SecretCipher: boundCipher{}})
 	if err != nil {
 		t.Fatalf("open with a cipher: %v", err)
 	}
@@ -573,6 +575,7 @@ func TestImportWithoutAnImageReadsNoLogin(t *testing.T) {
 	if err := sealing.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Not seeded: this reopens, without the cipher, the catalog the sealing open made.
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
 	if err != nil {
 		t.Fatalf("open without a cipher: %v", err)

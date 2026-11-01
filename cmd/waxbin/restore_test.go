@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/model"
@@ -41,7 +42,7 @@ func runRestore(t *testing.T, db, backup string) error {
 func backupWithUser(t *testing.T, name string) string {
 	t.Helper()
 	ctx := context.Background()
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "b.db")})
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "b.db")})
 	if err != nil {
 		t.Fatalf("open backup source: %v", err)
 	}
@@ -62,7 +63,7 @@ func serveCatalog(t *testing.T, opts waxbin.Options) *waxbin.Library {
 	t.Helper()
 	ctx := context.Background()
 	opts.IPCSocket = testsock.Path(t)
-	lib, err := waxbin.Open(ctx, opts)
+	lib, err := openSeeded(t, ctx, opts)
 	if err != nil {
 		t.Fatalf("open served catalog: %v", err)
 	}
@@ -104,7 +105,7 @@ func hasUser(users []*model.User, name string) bool {
 // suspends it through the hand-off, swaps the file, and the server reopens on the
 // restored catalog when the command ends.
 func TestRestoreUnderAServerTakesTheHandoff(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	lib := serveCatalog(t, waxbin.Options{DBPath: db,
@@ -128,9 +129,9 @@ func TestRestoreUnderAServerTakesTheHandoff(t *testing.T) {
 // TestRestoreRefusesALiveOwner: a foreground process holding the catalog is not a
 // server that can hand it off, so restore refuses rather than replace the file under it.
 func TestRestoreRefusesALiveOwner(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	owner, err := waxbin.Open(context.Background(), waxbin.Options{DBPath: db})
+	owner, err := openSeeded(t, context.Background(), waxbin.Options{DBPath: db})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestRestoreRefusesALiveOwner(t *testing.T) {
 // TestRestoreWaitsOutAServerJob: a server mid-job refuses the hand-off, and restore
 // passes that refusal on unchanged, leaving the catalog alone.
 func TestRestoreWaitsOutAServerJob(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -199,7 +200,7 @@ func TestRestoreWaitsOutAServerJob(t *testing.T) {
 // --force over an existing catalog, a backup that is not there) is refused before the
 // hand-off, so the server keeps running and its consumers see no reopen.
 func TestRefusedRestoreLeavesTheServerAlone(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	var reopens atomic.Int32
@@ -237,7 +238,7 @@ func TestRefusedRestoreLeavesTheServerAlone(t *testing.T) {
 // server then fails to reopen leaves it closed, and the restore says so instead of
 // reporting success.
 func TestRestoreReportsAServerThatCannotReopen(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	serveCatalog(t, waxbin.Options{DBPath: db})
 	backup := backupWithUser(t, "FromBackup")
@@ -260,10 +261,9 @@ func TestRestoreReportsAServerThatCannotReopen(t *testing.T) {
 // command runs, and refuses a folder that is not there unless --allow-absent says it is
 // mounted later.
 func TestRestoreRelocatesOnlyToAFolder(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
 	source := t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "src.db"),
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "src.db"),
 		Roots: []config.Root{{Path: source, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatal(err)
@@ -326,10 +326,9 @@ func TestRestoreRelocatesOnlyToAFolder(t *testing.T) {
 // --root` still relocates the restored catalog's one root, the podcast library its open
 // makes not counting as a second one.
 func TestRestoreRelocatesBesideThePodcastLibrary(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
-	t.Setenv("WAXBIN_PODCAST_DIR", t.TempDir())
+	t.Parallel()
 	ctx := context.Background()
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "src.db"),
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "src.db"),
 		Roots: []config.Root{{Path: t.TempDir(), Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatal(err)
@@ -341,8 +340,8 @@ func TestRestoreRelocatesBesideThePodcastLibrary(t *testing.T) {
 	if err := lib.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, target := filepath.Join(t.TempDir(), "a.db"), t.TempDir()
-	cmd := newRootCmd(&globals{})
+	db, target, pods := filepath.Join(t.TempDir(), "a.db"), t.TempDir(), t.TempDir()
+	cmd := newRootCmd(&globals{getenv: envOf("WAXBIN_PODCAST_DIR", pods)})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"--db", db, "restore", backup, "--root", target})
@@ -366,5 +365,8 @@ func TestRestoreRelocatesBesideThePodcastLibrary(t *testing.T) {
 	}
 	if len(roots) != 1 || roots[0] != target {
 		t.Fatalf("roots after the restore = %v, want the one relocated to %s", roots, target)
+	}
+	if got := podcastRoot(t, db); !pathx.SamePath(got, pods) {
+		t.Errorf("the podcast library is at %q, want the WAXBIN_PODCAST_DIR folder %s", got, pods)
 	}
 }

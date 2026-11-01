@@ -46,7 +46,7 @@ func TestDedupLosers(t *testing.T) {
 // the spellings it merged, which a rebuild (or, for albums, a retag or a move) can split
 // off again; with --json it prints its document alone.
 func TestMergeSaysWhatCanUndoIt(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -54,7 +54,7 @@ func TestMergeSaysWhatCanUndoIt(t *testing.T) {
 		writeAsset(t, filepath.Join(root, artist+".mp3"),
 			testaudio.BuildMP3WithAudio("Song "+artist, artist, "Album "+artist, 1, testaudio.AudioWithSeed(byte(81+i))))
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: db,
 		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatal(err)

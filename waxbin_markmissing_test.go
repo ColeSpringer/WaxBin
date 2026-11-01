@@ -432,7 +432,7 @@ func TestAudioOnAnUnpluggedDriveIsNoRestore(t *testing.T) {
 	ext, managed := filepath.Join(t.TempDir(), "external"), t.TempDir()
 	data := testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(91))
 	writeFile(t, filepath.Join(ext, "Band", "Record", "01.mp3"), data)
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
 		{Path: ext, Mode: model.ModeInPlace}, {Path: managed, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatal(err)

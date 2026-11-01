@@ -275,7 +275,7 @@ func titleSortCopies(t *testing.T, readOnlyPrimary bool) (*waxbin.Library, model
 			t.Fatalf("stage TITLESORT: %v", err)
 		}
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -385,7 +385,7 @@ func TestMultiRootScanJobReportsTheWhole(t *testing.T) {
 		writeFile(t, filepath.Join(rootA, fmt.Sprintf("%d.mp3", i)),
 			testaudio.BuildMP3WithAudio(fmt.Sprintf("T%d", i), "Artist", "Album", i+1, testaudio.AudioWithSeed(byte(40+i))))
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -469,7 +469,7 @@ func TestLibraryScopedFileOperationsKeepToTheirLibrary(t *testing.T) {
 	rootA, rootB := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(rootA, "loose", "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
 	writeFile(t, filepath.Join(rootB, "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{
 			{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
@@ -605,7 +605,7 @@ func TestAScanThatFailsStillReportsItsFolds(t *testing.T) {
 	ctx := context.Background()
 	root, other := t.TempDir(), t.TempDir()
 	writeCueRip(t, filepath.Join(root, "rip"), 9, "One", "Two")
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
 		{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}, {Path: other, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)

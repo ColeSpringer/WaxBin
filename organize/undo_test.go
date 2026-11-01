@@ -1,10 +1,10 @@
 package organize
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -14,11 +14,7 @@ import (
 // stands, a journal row naming no file is held, and a file already back is in place.
 func TestUndoPlanWalksTheJournalBack(t *testing.T) {
 	t.Parallel()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	vol := filepath.VolumeName(wd)
+	vol := testpath.Vol()
 	p := func(s string) string { return vol + filepath.FromSlash(s) }
 	b := func(s string) []byte { return []byte(p(s)) }
 	moves := []model.OrganizeMove{
@@ -59,11 +55,7 @@ func TestUndoPlanWalksTheJournalBack(t *testing.T) {
 // it found it, not one per journal row.
 func TestUndoPlanHoldsAnUncatalogedChainOnce(t *testing.T) {
 	t.Parallel()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	vol := filepath.VolumeName(wd)
+	vol := testpath.Vol()
 	p := func(s string) string { return vol + filepath.FromSlash(s) }
 	b := func(s string) []byte { return []byte(p(s)) }
 	plan := UndoPlan([]model.OrganizeMove{
@@ -86,11 +78,7 @@ func TestUndoPlanHoldsAnUncatalogedChainOnce(t *testing.T) {
 // of the job to go back to; nor does a file the catalog dropped claim where it was left.
 func TestUndoPlanHoldsAMovedFileWhereItIs(t *testing.T) {
 	t.Parallel()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	vol := filepath.VolumeName(wd)
+	vol := testpath.Vol()
 	p := func(s string) string { return vol + filepath.FromSlash(s) }
 	b := func(s string) []byte { return []byte(p(s)) }
 	// The job moved Y from B to C, then X from A to B; X has since moved on to D. It also
@@ -126,11 +114,7 @@ func TestUndoPlanHoldsAMovedFileWhereItIs(t *testing.T) {
 // respelled since is where the job left it, going back from where it stands.
 func TestUndoPlanFindsAFileAlreadyBack(t *testing.T) {
 	t.Parallel()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	vol := filepath.VolumeName(wd)
+	vol := testpath.Vol()
 	p := func(s string) string { return vol + filepath.FromSlash(s) }
 	b := func(s string) []byte { return []byte(p(s)) }
 	plan := UndoPlan([]model.OrganizeMove{

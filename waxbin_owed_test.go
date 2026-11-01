@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testimage"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 )
@@ -500,28 +501,11 @@ func TestWriteBackPaysBothSpellingsOfAColumn(t *testing.T) {
 	})
 }
 
-// bigCoverPNG is a textured picture over art.MaxSourceDim, distinct per seed.
+// bigCoverPNG is a textured picture wider than art.MaxSourceDim and 100 pixels tall,
+// distinct per seed.
 func bigCoverPNG(t *testing.T, seed uint32) []byte {
 	t.Helper()
-	w, h := art.MaxSourceDim+200, (art.MaxSourceDim+200)/2
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := range h {
-		for x := range w {
-			seed ^= seed << 13
-			seed ^= seed >> 17
-			seed ^= seed << 5
-			i := img.PixOffset(x, y)
-			img.Pix[i] = uint8(x*255/w) + uint8(seed&7)
-			img.Pix[i+1] = uint8(y*255/h) + uint8((seed>>8)&7)
-			img.Pix[i+2] = 64 + uint8((seed>>16)&7)
-			img.Pix[i+3] = 255
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("png: %v", err)
-	}
-	return buf.Bytes()
+	return testimage.TexturedPNG(t, art.MaxSourceDim+200, 100, seed)
 }
 
 // TestArtWriteBackEmbedsTheBoundedCover: the write-back embeds the cover the catalog

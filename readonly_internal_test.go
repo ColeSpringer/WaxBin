@@ -23,7 +23,7 @@ func openTwoTracks(t *testing.T) (*Library, string, []*model.ItemView) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: db, Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestWatchInboxQuietWhileEveryLibraryIsReadOnly(t *testing.T) {
 	root, inbox := t.TempDir(), t.TempDir()
 	writeRaw(t, filepath.Join(inbox, "a.mp3"), testaudio.BuildMP3("A", "Band", "One", 1))
 	logs := &warnCounter{}
-	lib, err := Open(ctx, Options{
+	lib, err := OpenSeeded(t, ctx, Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Inbox:  []string{inbox},
@@ -188,7 +188,7 @@ func TestApplyImportReportsWhenTheLeaseIsHeld(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
-	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/scan"
@@ -22,9 +23,9 @@ import (
 // files as books, each pinned with a kind lock as `import --as` pins one, and --as refuses
 // a kind an import cannot force.
 func TestInboxImportForcesAKind(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	root, staging := t.TempDir(), t.TempDir()
-	db := filepath.Join(t.TempDir(), "catalog.db")
+	db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db"))
 	src := filepath.Join(staging, "Persuasion", "01.mp3")
 	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
 		t.Fatal(err)

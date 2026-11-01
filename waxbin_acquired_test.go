@@ -25,7 +25,7 @@ import (
 // plus a podcast download dir.
 func openMediaTyped(t *testing.T, ctx context.Context, db, musicRoot, bookRoot, podDir string) *waxbin.Library {
 	t.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots: []config.Root{
 			{Path: musicRoot, Mode: model.ModeManaged, Media: model.MediaMusic, Profile: "waxbin-native"},
@@ -137,7 +137,7 @@ func TestImportAmbiguousRouteQuarantines(t *testing.T) {
 	music2 := t.TempDir()
 	inboxDir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: db,
 		Roots: []config.Root{
 			{Path: music1, Mode: model.ModeManaged, Media: model.MediaMusic, Profile: "waxbin-native"},
@@ -739,7 +739,7 @@ func TestImportClassifiesASpokenWordGenreAsABook(t *testing.T) {
 	}
 
 	only := t.TempDir()
-	books, err := waxbin.Open(ctx, waxbin.Options{
+	books, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "books.db"),
 		Roots:  []config.Root{{Path: only, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -1018,7 +1018,7 @@ func TestFolderImportClassifiesAgainstItsLibrary(t *testing.T) {
 	}
 
 	books, staging := t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "books.db"),
 		Roots:  []config.Root{{Path: books, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -1170,7 +1170,7 @@ func TestAcquiredUnitHoldsAnAlbumWhoseTrackIsRefusedWhilePlanning(t *testing.T) 
 	ctx := context.Background()
 	for _, refusal := range []inbox.HoldCode{inbox.HoldReadOnlySource, inbox.HoldUnreadable} {
 		root, acq, held := t.TempDir(), t.TempDir(), t.TempDir()
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
 			{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}, {Path: held, Mode: model.ModeInPlace}}})
 		if err != nil {
 			t.Fatal(err)

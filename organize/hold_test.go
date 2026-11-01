@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
@@ -17,7 +18,7 @@ import (
 func holdLib(t *testing.T) (*Organizer, *sqlite.Store, *model.Library) {
 	t.Helper()
 	ctx := context.Background()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

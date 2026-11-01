@@ -16,7 +16,7 @@ import (
 // TestRmFileDeletesOneCopy: rm --file takes one backing file by pid, so deleting a copy
 // trashes only it and leaves its item on the original.
 func TestRmFileDeletesOneCopy(t *testing.T) {
-	t.Setenv("WAXBIN_CONFIG", "")
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

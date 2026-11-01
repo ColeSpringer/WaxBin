@@ -371,7 +371,7 @@ func TestSetItemKindLocksTheKindTheRuleGives(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", "01.mp3"), 1)
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -576,7 +576,7 @@ func TestSetItemKindSplitsABookIntoTracks(t *testing.T) {
 	for n := 1; n <= 3; n++ {
 		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -656,7 +656,7 @@ func TestScanSplitMovesTheBookPosition(t *testing.T) {
 		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
 	}
 	open := func(media model.MediaType) *waxbin.Library {
-		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db,
 			Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Media: media, Profile: "waxbin-native"}}})
 		if err != nil {
 			t.Fatalf("open: %v", err)
@@ -745,7 +745,7 @@ func TestSetItemKindChecksTheSheetOnDisk(t *testing.T) {
 	root := t.TempDir()
 	audio := filepath.Join(root, "Austen", "Emma", "emma.mp3")
 	writeFile(t, audio, testaudio.BuildMP3WithAudio("Emma", "Jane Austen", "Emma", 1, testaudio.AudioWithSeed(80)))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -846,7 +846,7 @@ func TestSetItemKindSplitPlacesFollowThePart(t *testing.T) {
 			t.Fatalf("tag %s: %v", f.rel, err)
 		}
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -1011,7 +1011,7 @@ func TestSetItemKindKeepsThePidWhenThePrimarysEncodingSharesItsRecording(t *test
 			t.Fatalf("tag %s: %v", f.rel, err)
 		}
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -1074,7 +1074,7 @@ func TestSetItemKindSplitsBesideAOneTrackSheet(t *testing.T) {
 	writeFile(t, filepath.Join(root, "Austen", "Emma", "emma.mp3"), testaudio.BuildMP3WithAudio("Emma", "Jane Austen", "Emma", 1, testaudio.AudioWithSeed(85)))
 	writeFile(t, filepath.Join(root, "Austen", "Emma", "emma.cue"), []byte("FILE \"emma.mp3\" MP3\n"+
 		"  TRACK 01 AUDIO\n    TITLE \"Emma\"\n    INDEX 01 00:00:00\n"))
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -1095,7 +1095,7 @@ func TestSetItemKindSplitsBesideAOneTrackSheet(t *testing.T) {
 // reopenAs opens the catalog at db over one managed root declared media.
 func reopenAs(t *testing.T, ctx context.Context, db, root string, media model.MediaType) *waxbin.Library {
 	t.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: db,
 		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Media: media, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -1239,7 +1239,7 @@ func TestCreatedMapsEachPartToItsSource(t *testing.T) {
 	for n := 1; n <= 3; n++ {
 		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})

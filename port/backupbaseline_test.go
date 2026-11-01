@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
@@ -20,7 +21,7 @@ func backupOfFreshCatalog(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(dir, "catalog.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(dir, "catalog.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

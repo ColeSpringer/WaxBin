@@ -35,6 +35,10 @@ type globals struct {
 
 	allowStale bool
 
+	// getenv is the environment the command reads its WAXBIN_ settings from; nil is the
+	// process's. A test hands each command its own, so tests can run side by side.
+	getenv func(string) string
+
 	// maintConn holds the proxy connection of an in-progress maintenance-mode
 	// hand-off, kept open for the command's lifetime; closing it (in cleanup, or on
 	// process exit) tells the server to reopen. See openViaMaintenance.
@@ -291,7 +295,7 @@ func (g *globals) loadConfig(cmd *cobra.Command) (*config.Config, error) {
 		ov.Roots = roots
 	}
 
-	cfg, err := config.Load(ov, os.Getenv)
+	cfg, err := config.Load(ov, g.env)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +309,15 @@ func (g *globals) resolveConfigPath() string {
 	if g.cfgPath != "" {
 		return g.cfgPath
 	}
-	return os.Getenv("WAXBIN_CONFIG")
+	return g.env("WAXBIN_CONFIG")
+}
+
+// env reads one environment variable through getenv, the process's when none was given.
+func (g *globals) env(key string) string {
+	if g.getenv == nil {
+		return os.Getenv(key)
+	}
+	return g.getenv(key)
 }
 
 // open resolves config and opens the library for a mutating command (read-write

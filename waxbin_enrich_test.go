@@ -82,7 +82,7 @@ func TestEnrichScopedFacade(t *testing.T) {
 		Title: "Two", Artist: "Artist Two", Album: "Album Two", Audio: testaudio.AudioWithSeed(2)}))
 
 	mb := enrichMBMock(t)
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:     db,
 		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment: enrichTestConfig(mb.URL),
@@ -143,7 +143,7 @@ func TestEnrichRefusesTheRetiredAuxArtPhase(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:     filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment: enrichTestConfig(enrichMBMock(t).URL),
@@ -177,7 +177,7 @@ func TestServeProxiedScopedEnrich(t *testing.T) {
 		Title: "Two", Artist: "Artist Two", Album: "Album Two", Audio: testaudio.AudioWithSeed(2)}))
 
 	mb := enrichMBMock(t)
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:     db,
 		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		IPCSocket:  sock,
@@ -233,7 +233,7 @@ func TestServeProxiedForcePhase(t *testing.T) {
 		Title: "Two", Artist: "Artist Two", Album: "Album Two", Audio: testaudio.AudioWithSeed(2)}))
 
 	mb := enrichMBMock(t)
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:     db,
 		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		IPCSocket:  sock,
@@ -344,7 +344,7 @@ func TestScannedBookEnriches(t *testing.T) {
 	}))
 	t.Cleanup(mb.Close)
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:     db,
 		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment: enrichTestConfig(mb.URL),
@@ -414,7 +414,7 @@ func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
 	}))
 	t.Cleanup(mb.Close)
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment:          enrichTestConfig(mb.URL),
@@ -505,7 +505,7 @@ func TestMatchedReleaseStaysOffDisk(t *testing.T) {
 	}))
 	t.Cleanup(mb.Close)
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment:          enrichTestConfig(mb.URL),
@@ -585,7 +585,7 @@ func TestEnrichWithoutContactRunsInjectedProvider(t *testing.T) {
 				model.ArtRoleFront: {Data: coverPNG(t), Format: "png", Width: 4, Height: 4},
 			}}, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Enrichment:          config.EnrichConfig{}, // no contact
@@ -645,7 +645,7 @@ func TestEnrichmentWritesTheNewFillsToDisk(t *testing.T) {
 			}
 			return nil, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{fields},
@@ -721,7 +721,7 @@ func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
 				},
 			}, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{books},
@@ -816,7 +816,7 @@ func TestEnrichmentWriteBackRetriesOnTheNextPass(t *testing.T) {
 			}
 			return nil, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{fields},
@@ -928,7 +928,7 @@ func TestEnrichmentWriteTagsCatchesUpAfterAPassWithoutIt(t *testing.T) {
 			}
 			return nil, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{fields},
@@ -1005,7 +1005,7 @@ func TestEnrichmentScopedWriteTagsStaysScoped(t *testing.T) {
 			}
 			return nil, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{fields},
@@ -1077,7 +1077,7 @@ func TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp(t *testing.T) {
 			}
 			return nil, nil
 		}}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{fields},
@@ -1151,7 +1151,7 @@ func TestEnrichmentPhaseListWriteTagsStaysInItsReach(t *testing.T) {
 			return nil, nil
 		}}
 	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{fields, art},
@@ -1193,7 +1193,7 @@ func TestEnrichJobNamesItsTarget(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Pink Floyd", "Animals", 1))
 	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{art},
@@ -1249,7 +1249,7 @@ func TestStartEnrichTakesItsPhasesAtTheCall(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Pink Floyd", "Animals", 1))
 	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{art},
@@ -1293,7 +1293,7 @@ func TestEnrichmentProviderListFacade(t *testing.T) {
 			}}
 	}
 	chosen := "deezer"
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              db,
 		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		EnrichmentProviders: []enrich.Provider{artFrom("deezer"), artFrom("fanart")},
@@ -1357,7 +1357,7 @@ func TestEnrichmentProviderListFacade(t *testing.T) {
 // embedder's slip the engine drops, not a panic out of Open.
 func TestOpenDropsANilEnrichmentProvider(t *testing.T) {
 	t.Parallel()
-	lib, err := waxbin.Open(context.Background(), waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, context.Background(), waxbin.Options{
 		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
 		EnrichmentProviders: []enrich.Provider{nil},
 	})
@@ -1382,7 +1382,7 @@ func TestEnrichmentBuiltinsFacade(t *testing.T) {
 	}
 	open := func(t *testing.T, ec config.EnrichConfig) *waxbin.Library {
 		t.Helper()
-		lib, err := waxbin.Open(ctx, waxbin.Options{
+		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 			DBPath:     filepath.Join(t.TempDir(), "catalog.db"),
 			Enrichment: ec,
 		})
@@ -1413,7 +1413,7 @@ func TestEnrichmentPhasesFacade(t *testing.T) {
 	open := func(t *testing.T, opts waxbin.Options) *waxbin.Library {
 		t.Helper()
 		opts.DBPath = filepath.Join(t.TempDir(), "catalog.db")
-		lib, err := waxbin.Open(ctx, opts)
+		lib, err := waxbin.OpenSeeded(t, ctx, opts)
 		if err != nil {
 			t.Fatalf("open library: %v", err)
 		}
@@ -1445,7 +1445,7 @@ func TestDoctorReportsEnrichmentPhases(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	lyrics := &enrich.Mock{ProviderName: "lyrics", Caps: enrich.CapLyrics}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
 		EnrichmentProviders: []enrich.Provider{lyrics},
 	})

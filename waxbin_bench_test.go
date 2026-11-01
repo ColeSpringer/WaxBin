@@ -15,7 +15,7 @@ import (
 
 func openBench(b *testing.B, ctx context.Context, db, root string) *waxbin.Library {
 	b.Helper()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(b, ctx, waxbin.Options{
 		DBPath: db,
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 	})

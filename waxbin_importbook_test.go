@@ -174,7 +174,7 @@ func TestStagedTracksStayTracksWhereTheScanKeepsThem(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	music, staging := t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: music, Mode: model.ModeManaged, Media: model.MediaMusic, Profile: "waxbin-native"}},
 	})
@@ -375,7 +375,7 @@ func TestStagedEncodingOfAPartTakesItsNumber(t *testing.T) {
 			t.Fatalf("tag %s: %v", f.rel, err)
 		}
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: books, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -426,7 +426,7 @@ func TestStagedEncodingOfACatalogedPartTakesItsNumber(t *testing.T) {
 		}
 		return staging
 	}
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: books, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
 	})
@@ -489,7 +489,7 @@ func TestConfiguredInboxNamesNoBook(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root, inboxDir := t.TempDir(), t.TempDir()
-	lib, err := waxbin.Open(ctx, waxbin.Options{
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
 		Inbox:  []string{inboxDir},

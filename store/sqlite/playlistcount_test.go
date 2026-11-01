@@ -253,6 +253,8 @@ func TestCountEvaluatedPlaylistChunkBoundary(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const n = idBatchSize + 7
+	// The puts defer their rollups and settle once, as a scan does: recounted per put,
+	// one artist and one album over this many tracks cost the test most of a minute.
 	for i := 0; i < n; i++ {
 		genre := "Rock"
 		if i%2 == 1 {
@@ -260,7 +262,10 @@ func TestCountEvaluatedPlaylistChunkBoundary(t *testing.T) {
 		}
 		s := fmt.Sprintf("%04d", i)
 		putTrack(t, st, lib.ID, trackSpec{path: "/lib/t" + s + ".flac", essence: "e" + s, content: "c" + s,
-			title: "T" + s, artist: "X", album: "Al", genre: genre})
+			title: "T" + s, artist: "X", album: "Al", genre: genre, deferRollups: true})
+	}
+	if _, err := st.SettleRollups(ctx); err != nil {
+		t.Fatalf("settle rollups: %v", err)
 	}
 	// An offset forces the evaluate-then-count path over the whole remainder.
 	rule := query.New(query.EntityItems).

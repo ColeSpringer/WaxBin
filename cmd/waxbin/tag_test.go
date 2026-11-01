@@ -54,6 +54,7 @@ func runTagCLI(t *testing.T, db, root string, args ...string) (string, string, e
 // TestTagWriteBackWritesTheFile: `tag --write-back` writes the custom tag into the backing
 // file as well as the catalog, and like every other set-side flag it needs --key.
 func TestTagWriteBackWritesTheFile(t *testing.T) {
+	t.Parallel()
 	db, root, pid := creditCLIFixture(t)
 
 	stdout, _, err := runTagCLI(t, db, root, string(pid), "--key", "mood", "--value", "calm", "--write-back")

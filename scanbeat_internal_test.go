@@ -50,7 +50,7 @@ func twoRootLibrary(t *testing.T) *Library {
 	t.Helper()
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
-	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+	lib, err := OpenSeeded(t, ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
 		Roots: []config.Root{{Path: rootA, Mode: model.ModeInPlace}, {Path: rootB, Mode: model.ModeInPlace}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)

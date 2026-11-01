@@ -21,7 +21,13 @@ func runStateCLI(t *testing.T, db, root string, args ...string) (string, error) 
 // JSON output, and returns what it printed.
 func runCLIJSON(t *testing.T, db, root string, args ...string) (string, error) {
 	t.Helper()
-	cmd := newRootCmd(&globals{})
+	return runCLIJSONEnv(t, nil, db, root, args...)
+}
+
+// runCLIJSONEnv is runCLIJSON with the command reading its WAXBIN_ settings from env.
+func runCLIJSONEnv(t *testing.T, env func(string) string, db, root string, args ...string) (string, error) {
+	t.Helper()
+	cmd := newRootCmd(&globals{getenv: env})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -34,6 +40,7 @@ func runCLIJSON(t *testing.T, db, root string, args ...string) (string, error) {
 // through a real catalog: a recorded play, a count reset composed with a play at one
 // recorded time, and a recorded checkpoint older than the play.
 func TestStateSetAsOfCoversPlaybackWrites(t *testing.T) {
+	t.Parallel()
 	db, root, pid := creditCLIFixture(t)
 	type view struct {
 		PositionMS     int64  `json:"positionMs"`

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/testcatalog"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
@@ -24,7 +25,7 @@ func renamedShow(t *testing.T) (svc *podcast.Service, dir string, pod *model.Pod
 	t.Helper()
 	ctx := context.Background()
 	dir = t.TempDir()
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test"})
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: testcatalog.Seed(t, filepath.Join(t.TempDir(), "catalog.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

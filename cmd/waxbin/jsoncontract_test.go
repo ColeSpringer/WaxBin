@@ -42,7 +42,6 @@ func writeAsset(t *testing.T, path string, b []byte) string {
 
 func newJSONFixture(t *testing.T) *jsonFixture {
 	t.Helper()
-	t.Setenv("WAXBIN_CONFIG", "")
 	ctx := context.Background()
 	fx := &jsonFixture{root: t.TempDir(), assets: t.TempDir(), db: filepath.Join(t.TempDir(), "catalog.db")}
 	for i, s := range []struct{ title, artist, album string }{
@@ -70,7 +69,7 @@ func newJSONFixture(t *testing.T) *jsonFixture {
 	writeAsset(t, filepath.Join(fx.assets, "feeds.opml"), []byte(`<?xml version="1.0"?><opml version="2.0"><body>`+
 		`<outline type="rss" text="Gone" xmlUrl="https://example.invalid/feed.xml"/></body></opml>`))
 
-	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: fx.db,
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: fx.db,
 		Roots: []config.Root{{Path: fx.root, Mode: model.ModeManaged, Profile: "waxbin-native"}}})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -184,6 +183,7 @@ func oneEnvelope(out string) (map[string]json.RawMessage, string) {
 // run as a success. serve and watch run until stopped, completion prints shell code,
 // and help is help.
 func TestEveryCommandAnswersJSON(t *testing.T) {
+	t.Parallel()
 	fx := newJSONFixture(t)
 	p := func(pid model.PID) string { return string(pid) }
 	asset := func(name string) string { return filepath.Join(fx.assets, name) }
