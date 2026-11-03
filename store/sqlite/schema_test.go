@@ -43,6 +43,9 @@ func TestSchemaBatchColumnsExist(t *testing.T) {
 			}
 			have = append(have, name)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s columns: %v", table, err)
+		}
 		rows.Close()
 		for _, c := range want {
 			if !slices.Contains(have, c) {
@@ -74,6 +77,9 @@ func TestSchemaBatchColumnsExist(t *testing.T) {
 				t.Fatalf("%s keys: %v", index, err)
 			}
 			have = append(have, k)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s keys: %v", index, err)
 		}
 		rows.Close()
 		if !slices.Equal(have, want) {

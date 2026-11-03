@@ -903,3 +903,228 @@ func TestSeriesTextFields(t *testing.T) {
 		t.Errorf("by series_seq_sort = %s, want Book 1.5,Book 2,Book 10", got)
 	}
 }
+
+// TestAuthorFacetFansOutOverEveryAuthor is the point of the dimension: the artist facet
+// files a co-authored book under its first author alone, while this one gives every
+// author a bucket, so a second author is browsable. A book crediting no author lands
+// in the unknown bucket, a track by someone of the same name stays out (the role is
+// what counts, not the artist), and so does an episode.
+func TestAuthorFacetFansOutOverEveryAuthor(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
+		title: "Song", artist: "Neil Gaiman", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/omens.m4b", essence: "e1", content: "c1",
+		title: "Good Omens", author: "Terry Pratchett & Neil Gaiman",
+		authors: []string{"Terry Pratchett", "Neil Gaiman"}})
+	mort := putBook(t, st, lib.ID, bookSpec{path: "/lib/mort.m4b", essence: "e2", content: "c2",
+		title: "Mort", author: "Terry Pratchett"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/anon.m4b", essence: "e3", content: "c3",
+		title: "Anonymous Memoir"})
+
+	all := query.New(query.EntityItems).Build()
+	buckets := func(g read.GroupBy) map[string]int {
+		res, err := st.Facet(ctx, all, g, "", 0, "")
+		if err != nil {
+			t.Fatalf("facet %s: %v", g, err)
+		}
+		out := map[string]int{}
+		for _, b := range res.Buckets {
+			out[b.Display] = b.Count
+		}
+		return out
+	}
+
+	// The artist facet: the co-authored book under Pratchett alone, the track under
+	// Gaiman, the authorless book unknown.
+	if got := buckets(read.GroupArtist); got["Terry Pratchett"] != 2 || got["Neil Gaiman"] != 1 || got[read.UnknownArtist] != 1 {
+		t.Errorf("artist buckets = %v, want Pratchett 2, Gaiman 1 (the track), unknown 1", got)
+	}
+	res, err := st.Facet(ctx, all, read.GroupAuthor, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet author: %v", err)
+	}
+	if len(res.Buckets) != 3 {
+		t.Fatalf("author buckets = %+v, want Gaiman, Pratchett and the unknown bucket", res.Buckets)
+	}
+	gaiman, pratchett, unknown := res.Buckets[0], res.Buckets[1], res.Buckets[2]
+	if gaiman.Display != "Neil Gaiman" || gaiman.Count != 1 || gaiman.EntityPID == "" {
+		t.Errorf("first bucket = %+v, want Neil Gaiman with the one book he co-wrote and his pid", gaiman)
+	}
+	if pratchett.Display != "Terry Pratchett" || pratchett.Count != 2 || pratchett.EntityPID == "" {
+		t.Errorf("second bucket = %+v, want Terry Pratchett with both books and his pid", pratchett)
+	}
+	if !unknown.IsUnknown || unknown.Display != read.UnknownAuthor || unknown.Count != 1 || unknown.EntityPID != "" {
+		t.Errorf("last bucket = %+v, want %s holding the authorless book", unknown, read.UnknownAuthor)
+	}
+	info, err := st.EntityByPID(ctx, read.EntityArtist, gaiman.EntityPID)
+	if err != nil || info.Name != "Neil Gaiman" {
+		t.Errorf("bucket pid resolves to %+v (err %v), want the artist Neil Gaiman", info, err)
+	}
+
+	// The field mirrors the bucket: Gaiman's author credit matches the book he co-wrote
+	// and not the track he performs on.
+	if n := countWhere(t, st, "author_pid", query.OpIs, string(gaiman.EntityPID)); n != 1 {
+		t.Errorf("author_pid is Gaiman = %d, want 1 (the co-written book, not the track)", n)
+	}
+	if n := countWhere(t, st, "author_pid", query.OpIs, string(pratchett.EntityPID)); n != 2 {
+		t.Errorf("author_pid is Pratchett = %d, want 2", n)
+	}
+	// No author row at all: the authorless book, the track and the episode.
+	if n := countWhere(t, st, "author_pid", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("author_pid isMissing = %d, want 3", n)
+	}
+	// isNot is the deny-list the other set fields have: everything not crediting him.
+	if n := countWhere(t, st, "author_pid", query.OpIsNot, string(pratchett.EntityPID)); n != 3 {
+		t.Errorf("author_pid isNot Pratchett = %d, want 3", n)
+	}
+	// Only books carry the role, so a filter on the track entity matches nothing.
+	n, err := st.CountItems(ctx, query.New(query.EntityTracks).
+		Where("author_pid", query.OpIs, string(gaiman.EntityPID)).Build(), "")
+	if err != nil || n != 0 {
+		t.Errorf("author_pid over tracks = %d (err %v), want 0", n, err)
+	}
+
+	// A credit edit moves the bucket: Mort re-credited to Gaiman leaves Pratchett one
+	// book and gives Gaiman two.
+	if _, _, err := st.SetItemCredits(ctx, mort.ItemPID, model.RoleAuthor, []string{"Neil Gaiman"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
+		t.Fatalf("re-credit Mort: %v", err)
+	}
+	if got := buckets(read.GroupAuthor); got["Neil Gaiman"] != 2 || got["Terry Pratchett"] != 1 {
+		t.Errorf("author buckets after the edit = %v, want Gaiman 2 and Pratchett 1", got)
+	}
+}
+
+// TestNarratorFacetAndField gives a book's narrators the bucket and the field the
+// author has: one bucket per narrator, a book read by two in both, a book read by
+// nobody in the unknown bucket, and tracks and episodes out. A narrator who is nothing
+// else in the catalog is a real artist entity here, where the artist facet never
+// surfaces one.
+func TestNarratorFacetAndField(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
+		title: "Song", artist: "X", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/dune.m4b", essence: "e1", content: "c1",
+		title: "Dune", author: "Frank Herbert", narrators: []string{"Scott Brick", "Simon Vance"}})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/messiah.m4b", essence: "e2", content: "c2",
+		title: "Dune Messiah", author: "Frank Herbert", narrators: []string{"Scott Brick"}})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/silent.m4b", essence: "e3", content: "c3",
+		title: "Silent", author: "Frank Herbert"})
+
+	all := query.New(query.EntityItems).Build()
+	res, err := st.Facet(ctx, all, read.GroupNarrator, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet narrator: %v", err)
+	}
+	if len(res.Buckets) != 3 {
+		t.Fatalf("narrator buckets = %+v, want Brick, Vance and the unknown bucket", res.Buckets)
+	}
+	brick, vance, unknown := res.Buckets[0], res.Buckets[1], res.Buckets[2]
+	if brick.Display != "Scott Brick" || brick.Count != 2 || brick.EntityPID == "" {
+		t.Errorf("first bucket = %+v, want Scott Brick with both Dune books", brick)
+	}
+	if vance.Display != "Simon Vance" || vance.Count != 1 || vance.EntityPID == "" {
+		t.Errorf("second bucket = %+v, want Simon Vance with Dune", vance)
+	}
+	if !unknown.IsUnknown || unknown.Display != read.NoNarrator || unknown.Count != 1 || unknown.EntityPID != "" {
+		t.Errorf("last bucket = %+v, want %s holding the unnarrated book", unknown, read.NoNarrator)
+	}
+	// Narrators never reach the artist facet, which files a book under its author.
+	artists, err := st.Facet(ctx, all, read.GroupArtist, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet artist: %v", err)
+	}
+	if _, ok := bucketByDisplay(artists, "Scott Brick"); ok {
+		t.Errorf("artist buckets = %+v, want no narrator among them", artists.Buckets)
+	}
+	// A narrator who is nothing else is still an entity a consumer can read back.
+	info, err := st.EntityByPID(ctx, read.EntityArtist, vance.EntityPID)
+	if err != nil || info.Name != "Simon Vance" {
+		t.Errorf("bucket pid resolves to %+v (err %v), want the artist Simon Vance", info, err)
+	}
+
+	if n := countWhere(t, st, "narrator_pid", query.OpIs, string(brick.EntityPID)); n != 2 {
+		t.Errorf("narrator_pid is Brick = %d, want 2", n)
+	}
+	// Dune counts once however many of its narrators the list names.
+	if n := countValuesWhere(t, st, "narrator_pid", query.OpIn, string(brick.EntityPID), string(vance.EntityPID)); n != 2 {
+		t.Errorf("narrator_pid in [Brick Vance] = %d, want 2", n)
+	}
+	// The deny-list keeps every item Vance did not narrate: Messiah, Silent, the track
+	// and the episode.
+	if n := countValuesWhere(t, st, "narrator_pid", query.OpNotIn, string(vance.EntityPID)); n != 4 {
+		t.Errorf("narrator_pid notIn [Vance] = %d, want 4", n)
+	}
+	// No narrator row: the unnarrated book, the track and the episode.
+	if n := countWhere(t, st, "narrator_pid", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("narrator_pid isMissing = %d, want 3", n)
+	}
+	if n := countWhere(t, st, "narrator_pid", query.OpIsPresent, nil); n != 2 {
+		t.Errorf("narrator_pid isPresent = %d, want 2", n)
+	}
+	// A query scoped to one narrator still facets by the other: Vance's books by
+	// narrator show Brick beside him, since Dune credits both.
+	scoped, err := st.Facet(ctx, query.New(query.EntityItems).
+		Where("narrator_pid", query.OpIs, string(vance.EntityPID)).Build(), read.GroupNarrator, "", 0, "")
+	if err != nil {
+		t.Fatalf("scoped facet: %v", err)
+	}
+	if len(scoped.Buckets) != 2 || scoped.Buckets[0].Display != "Scott Brick" || scoped.Buckets[0].Count != 1 ||
+		scoped.Buckets[1].Display != "Simon Vance" || scoped.Buckets[1].Count != 1 {
+		t.Errorf("narrator facet over Vance's books = %+v, want Brick 1 and Vance 1", scoped.Buckets)
+	}
+}
+
+// TestAuthorAndNarratorTextFields: author and narrator compare the displays a book's row
+// shows, both the empty string for every other kind, the way series does. A joined
+// display matches whole or by substring; the pid fields are the exact path for one of
+// several names.
+func TestAuthorAndNarratorTextFields(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
+		title: "Song", artist: "Frank Herbert", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/dune.m4b", essence: "e1", content: "c1",
+		title: "Dune", author: "Frank Herbert", narrators: []string{"Scott Brick", "Simon Vance"}})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/messiah.m4b", essence: "e2", content: "c2",
+		title: "Dune Messiah", author: "Frank Herbert", narrators: []string{"Scott Brick"}})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/silent.m4b", essence: "e3", content: "c3",
+		title: "Silent", author: "Frank Herbert"})
+
+	// author is the book's own column: the track by a performer of the same name reads ''.
+	if n := countWhere(t, st, "author", query.OpIs, "Frank Herbert"); n != 3 {
+		t.Errorf("author is Frank Herbert = %d, want 3 (the books, not the track)", n)
+	}
+	if n := countWhere(t, st, "author", query.OpIsMissing, nil); n != 2 {
+		t.Errorf("author isMissing = %d, want 2 (the track and the episode)", n)
+	}
+	if n := countWhere(t, st, "narrator", query.OpIs, "Scott Brick"); n != 1 {
+		t.Errorf("narrator is Scott Brick = %d, want 1 (Messiah; Dune's display names two)", n)
+	}
+	if n := countWhere(t, st, "narrator", query.OpContains, "Vance"); n != 1 {
+		t.Errorf("narrator contains Vance = %d, want 1", n)
+	}
+	if n := countWhere(t, st, "narrator", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("narrator isMissing = %d, want 3 (the unnarrated book, the track and the episode)", n)
+	}
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("narrator", query.OpIsPresent, nil).OrderBy("narrator", true).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got := strings.Join(titlesOf(items), ","); got != "Dune,Dune Messiah" {
+		t.Errorf("narrated books by narrator descending = %s, want Dune,Dune Messiah", got)
+	}
+	n, err := st.CountItems(ctx, query.New(query.EntityTracks).Where("author", query.OpIsPresent, nil).Build(), "")
+	if err != nil || n != 0 {
+		t.Errorf("author isPresent over tracks = %d (err %v), want 0", n, err)
+	}
+}

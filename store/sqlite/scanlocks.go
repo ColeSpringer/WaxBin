@@ -530,7 +530,7 @@ func bookFieldSilent(col string, b model.Book, derived []string) bool {
 	case "year":
 		return b.Year == 0
 	}
-	return bookFieldValue(col, b, false) == ""
+	return bookFieldValue(col, b) == ""
 }
 
 // copyBookField copies one field's stored value from cur onto the scanned book, the

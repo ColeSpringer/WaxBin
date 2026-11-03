@@ -250,3 +250,29 @@ func TestSeriesKey(t *testing.T) {
 		t.Errorf("empty series key = %q, want empty", got)
 	}
 }
+
+// TestCreditDisplay: a credit splits into the people it names and joins back into the
+// display stored beside them; a comma is not a separator, and text naming nobody gives
+// neither names nor a display.
+func TestCreditDisplay(t *testing.T) {
+	for raw, want := range map[string]struct {
+		names   []string
+		display string
+	}{
+		"Terry Pratchett & Neil Gaiman": {[]string{"Terry Pratchett", "Neil Gaiman"}, "Terry Pratchett, Neil Gaiman"},
+		"Le Guin, Ursula K.":            {[]string{"Le Guin, Ursula K."}, "Le Guin, Ursula K."},
+		" / ":                           {nil, ""},
+		"":                              {nil, ""},
+	} {
+		names, display := CreditDisplay(raw)
+		if len(names) == 0 {
+			names = nil
+		}
+		if !reflect.DeepEqual(names, want.names) || display != want.display {
+			t.Errorf("CreditDisplay(%q) = (%v, %q), want (%v, %q)", raw, names, display, want.names, want.display)
+		}
+	}
+	if got := JoinCredits(nil); got != "" {
+		t.Errorf("JoinCredits(nil) = %q, want empty", got)
+	}
+}

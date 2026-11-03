@@ -363,6 +363,9 @@ func TestBrowseRandomSortsNarrowRows(t *testing.T) {
 		}
 		want = append(want, title)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	if got := drainBrowse(t, st, read.ListRandom, read.BrowseOptions{Seed: 42}, 3); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("random seed 42 = %v, want the seed's order %v", got, want)
@@ -439,6 +442,9 @@ func TestBrowseMostPlayedSortsTiesAsNarrowRows(t *testing.T) {
 			t.Fatal(err)
 		}
 		want = append(want, title)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	rows.Close()
 	if got := drainBrowse(t, st, read.ListMostPlayed, read.BrowseOptions{}, 2); strings.Join(got, ",") != strings.Join(want, ",") {

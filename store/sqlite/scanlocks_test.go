@@ -321,6 +321,9 @@ func itemGenreNames(t *testing.T, st *Store, pid model.PID) []string {
 		}
 		out = append(out, name)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("genre links: %v", err)
+	}
 	return out
 }
 

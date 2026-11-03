@@ -42,12 +42,31 @@ type facetSpec struct {
 }
 
 // Kind scopes shared by the facet specs. notEpisodes is the music dimensions' scope;
-// onlyEpisodes is the podcast dimension's and onlyBooks the series dimension's.
+// onlyEpisodes is the podcast dimension's and onlyBooks the series, author and narrator
+// dimensions'.
 const (
 	notEpisodes  = "pi.kind <> 'episode'"
 	onlyEpisodes = "pi.kind = 'episode'"
 	onlyBooks    = "pi.kind = 'book'"
 )
+
+// contributorFacetSpec is the recipe shared by the dimensions that fan an item across
+// the artists credited on it in one role (creditArtist, author, narrator): one bucket
+// per item_contributor row, so a many-credited item counts in several and the counts
+// sum above the item count, as genre's do. The LEFT JOIN keeps an item with no row in
+// the role, which lands in the dimension's unknown bucket. The role is bound through
+// joinArgs rather than inlined, as the tag dimension binds its key, and each
+// dimension's query-field twin binds the same role (contributorPIDColumn), so a bucket
+// and a pid filter cannot disagree about which rows count.
+func contributorFacetSpec(role model.ContributorRole, unknown, kindWhere string) facetSpec {
+	return facetSpec{
+		join: " LEFT JOIN item_contributor fic ON fic.item_id = pi.id AND fic.role = ?" +
+			" LEFT JOIN artist fca ON fca.id = fic.artist_id",
+		joinArgs: []any{string(role)},
+		groupBy:  "fca.id", keyExpr: "fca.pid", display: "fca.name", sortExpr: "fca.sort_key",
+		entity: true, unknown: unknown, kindWhere: kindWhere,
+	}
+}
 
 // facetSpecFor returns the SQL recipe for one dimension. userID is the resolved
 // calling user and is read only by the dimensions read.GroupBy.UserScoped reports,
@@ -74,16 +93,18 @@ func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 			entity: true, unknown: read.UnknownArtist, kindWhere: notEpisodes,
 		}, true
 	case read.GroupCreditArtist:
-		// The many-per-item shape genre already has: the join fans a track across one
-		// bucket per credited artist, so counts sum above the item count. Scoped to
-		// role='artist' because that is the only role a scan writes; a book's author
-		// shares the table and already has a bucket under GroupArtist.
-		return facetSpec{
-			join: " LEFT JOIN item_contributor fic ON fic.item_id = pi.id AND fic.role = 'artist'" +
-				" LEFT JOIN artist fca ON fca.id = fic.artist_id",
-			groupBy: "fca.id", keyExpr: "fca.pid", display: "fca.name", sortExpr: "fca.sort_key",
-			entity: true, unknown: read.UnknownArtist, kindWhere: notEpisodes,
-		}, true
+		// This is the performing credit, the only music role a scan writes. A book
+		// shares the table under its own roles and has its own dimensions for them
+		// below; here it has no row and lands in the unknown bucket, as it does for
+		// album.
+		return contributorFacetSpec(model.RoleArtist, read.UnknownArtist, notEpisodes), true
+	case read.GroupAuthor:
+		// A book counts under every author it credits, where GroupArtist files it
+		// under the first alone (itemArtistIDExpr). The scope is books only because a
+		// track never carries the role.
+		return contributorFacetSpec(model.RoleAuthor, read.UnknownAuthor, onlyBooks), true
+	case read.GroupNarrator:
+		return contributorFacetSpec(model.RoleNarrator, read.NoNarrator, onlyBooks), true
 	case read.GroupAlbumArtist:
 		// Shares itemAlbumArtistIDExpr with the album_artist_pid query field (see
 		// GroupArtist).

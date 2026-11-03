@@ -156,6 +156,9 @@ func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
 			}
 			ids = append(ids, id)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
 		return ids
 	}
 	for _, tc := range []struct {

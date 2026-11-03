@@ -1197,7 +1197,9 @@ func trackInput(libraryID int64, file model.File, tags model.Tags, essenceHash s
 // whole-file chapter so a multi-file book still navigates by part.
 func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, cover *model.ArtImage, at place) model.PutScannedBookInput {
 	title := BookTitle(tags)
-	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
+	// The store writes the displays as given, so the split names and the display they
+	// make are settled here (identity.CreditDisplay), as an edit settles its own.
+	authors, author := identity.CreditDisplay(firstNonEmpty(tags.AlbumArtist, tags.Artist))
 	key := BookIdentityKey(tags)
 	if key == "" {
 		key = identity.TrackKey("", essenceHash)
@@ -1228,9 +1230,9 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 			Subtitle:   tags.Subtitle,
 			Author:     author,
 			AuthorSort: authorSort,
-			Authors:    meta.SplitCredits(author),
+			Authors:    authors,
 			Narrators:  tags.Narrators,
-			Narrator:   strings.Join(tags.Narrators, ", "),
+			Narrator:   identity.JoinCredits(tags.Narrators),
 			Series:     tags.Series,
 			SeriesSeq:  tags.SeriesSeq,
 			Year:       tags.Year,

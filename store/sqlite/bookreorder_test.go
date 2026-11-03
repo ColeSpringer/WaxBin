@@ -155,6 +155,9 @@ func TestARipJoiningALargerBookLeavesItUnfinished(t *testing.T) {
 		}
 		tracks = append(tracks, model.PID(pid))
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	if len(tracks) != 2 {
 		t.Fatalf("rip tracks = %v, want two", tracks)

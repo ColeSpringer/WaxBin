@@ -27,6 +27,9 @@ func episodePIDsByTitle(t *testing.T, st *Store) map[string]model.PID {
 		}
 		out[title] = model.PID(pid)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	return out
 }
 

@@ -309,7 +309,7 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entri
 	if err := renameSeriesForEditsTx(ctx, tx, books, fold, op); err != nil {
 		return err
 	}
-	if err := renameReleaseGroupsForEditsTx(ctx, tx, groups, fold, affected, op); err != nil {
+	if err := renameReleaseGroupsForEditsTx(ctx, tx, groups, fold, op); err != nil {
 		return err
 	}
 	ids := make([]int64, 0, len(groups))
@@ -437,7 +437,7 @@ func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []credit
 // search text. Partial coverage falls through to renameAlbumChainTx's per-album
 // fallback, which moves the covered album under a found-or-created group and leaves
 // the old one with its remaining albums.
-func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[int64][]*renameMember, fold bool, affected *affectedRollups, op string) error {
+func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[int64][]*renameMember, fold bool, op string) error {
 	// Qualify each album group for RG purposes: the batch covers every track of the
 	// album and every member computes one non-empty new RG key. Album-key uniformity
 	// is deliberately not required: the folder is an album-key segment but not an RG

@@ -115,6 +115,20 @@ func SplitCredits(s string) []string {
 	return out
 }
 
+// JoinCredits is the display the catalog stores beside a split credit's contributor
+// rows: the names joined with ", ", so a column names exactly the people linked. A
+// comma is not a separator SplitCredits knows, so the display does not split back;
+// changing the people goes through the credit surface, which takes a list.
+func JoinCredits(names []string) string { return strings.Join(names, ", ") }
+
+// CreditDisplay splits a credit into the people it names (SplitCredits) and the display
+// stored beside them (JoinCredits): "A & B" is two people shown as "A, B". Text naming
+// nobody, empty or separators alone, gives neither, so it reads as no credit.
+func CreditDisplay(raw string) (names []string, display string) {
+	names = SplitCredits(raw)
+	return names, JoinCredits(names)
+}
+
 // performerSplitRe are the separators between artists in a MUSIC credit: a featuring
 // marker ("feat", "feat.", "ft", "ft.", "featuring", "vs", "vs.") standing as its own
 // word so a name containing the letters survives ("Ftera", "Vsevolod"), a semicolon,

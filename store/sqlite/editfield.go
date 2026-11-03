@@ -404,7 +404,7 @@ func editFieldValuesTx(ctx context.Context, tx *sql.Tx, itemID int64, kind strin
 			case "title", "title_sort":
 				out[f] = scanFieldValue(f, title, model.Track{})
 			default:
-				out[f] = bookFieldValue(f, b, true)
+				out[f] = bookFieldValue(f, b)
 			}
 		}
 	default:
@@ -686,6 +686,16 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 		editedAuthor = editedAuthor || f == "author"
 		editedAuthorSort = editedAuthorSort || f == "author_sort"
 	}
+	// The value recorded for a credit-backed field is the display the column holds,
+	// not the text typed, so the row goes on describing the column: a later credit
+	// write naming the same people keeps it (supersedeTwinTx, twinReproduces) and a
+	// rescan finds the file reproducing it.
+	if editedAuthor {
+		edits["author"] = b.Author
+	}
+	if slices.Contains(fields, "narrator") {
+		edits["narrator"] = b.Narrator
+	}
 
 	// An author edit drops the author_sort spelling, but a locked spelling the edit did
 	// not name is curated state that must survive it. The lock validation above checks
@@ -901,22 +911,32 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 func applyBookEdit(b *model.Book, field, value, op string) error {
 	switch field {
 	case "author":
-		// A new author drops the sort spelling of the name it replaced, so the key
-		// follows the new author. When author_sort is locked and not itself edited,
-		// editBookFieldsTx restores the locked spelling after the apply loop.
-		if value != b.Author {
-			b.AuthorSort = ""
+		// The text names the people to credit and the display they make
+		// (identity.CreditDisplay): "A & B" is two authors shown as "A, B", and text
+		// naming nobody clears the role. A comma is not a separator, so restating the
+		// display the catalog shows makes the same display again, and then the credits
+		// stand as they are rather than becoming one artist named after the line;
+		// changing the people goes through the credit surface. A new author drops the
+		// sort spelling of the name it replaced, so the key follows the new author. When
+		// author_sort is locked and not itself edited, editBookFieldsTx restores the
+		// locked spelling after the apply loop.
+		names, display := identity.CreditDisplay(value)
+		if display == b.Author {
+			return nil
 		}
-		b.Authors = identity.SplitCredits(value)
-		b.Author = value
+		b.Authors, b.Author, b.AuthorSort = names, display, ""
 	case "author_sort":
 		// The literal spelling is stored and upsertBook folds the key from it; an empty
 		// value clears it, so the key folds the author again. The sorted field order
 		// applies "author" first, so a combined edit keeps the explicit spelling.
 		b.AuthorSort = value
 	case "narrator":
-		b.Narrators = identity.SplitCredits(value)
-		b.Narrator = strings.Join(b.Narrators, ", ")
+		// The author's rule, without a sort spelling to drop.
+		names, display := identity.CreditDisplay(value)
+		if display == b.Narrator {
+			return nil
+		}
+		b.Narrators, b.Narrator = names, display
 	case "series":
 		b.Series = value
 	case "subtitle":
@@ -951,15 +971,6 @@ func applyBookEdit(b *model.Book, field, value, op string) error {
 		return waxerr.New(waxerr.CodeInvalid, op, "unhandled book field: "+field)
 	}
 	return nil
-}
-
-// bookAuthorDisplay derives a book's author display from its split authors (matching
-// upsertBook), falling back to the raw author when no split authors are present.
-func bookAuthorDisplay(b model.Book) string {
-	if a := strings.Join(b.Authors, ", "); a != "" {
-		return a
-	}
-	return b.Author
 }
 
 // parseIntField parses an integer field value, treating an empty string as 0 (a

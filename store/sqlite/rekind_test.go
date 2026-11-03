@@ -164,6 +164,9 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 		}
 		owed[k] = true
 	}
+	if err := rowsOwed.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rowsOwed.Close()
 	if owed["album"] || !owed["tag.MOOD"] {
 		t.Errorf("owed = %v, want the album dropped with the track and the custom tag kept", owed)

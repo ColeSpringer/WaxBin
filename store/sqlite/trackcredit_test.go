@@ -673,3 +673,44 @@ func TestCreditMBIDsReducesToTheSoleCase(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackCreditResavedSurvivesARescan is TestBookCreditResavedSurvivesARescan for a
+// track's performing credit: saved again with the artist the file names, spelled as the
+// catalog spells it, the display keeps the file's spelling and a rescan of the same
+// bytes keeps the credit row without reporting a metadata change.
+func TestTrackCreditResavedSurvivesARescan(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1",
+		title: "One", artist: "Jay-Z", albumArt: "Jay-Z", album: "Album"})
+	spec := trackSpec{path: "/lib/a/2.flac", essence: "e2", content: "c2",
+		title: "Two", artist: "JAY-Z", albumArt: "JAY-Z", album: "Album"}
+	res := putTrack(t, st, lib.ID, spec)
+	if got := trackArtistName(t, st, res.ItemPID); got != "Jay-Z" {
+		t.Fatalf("the second credit resolved to %q, want the entity the first minted", got)
+	}
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist, []string{"Jay-Z"},
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("re-save the credit: %v", err)
+	}
+	id := scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(res.ItemPID))
+	credit := func() int {
+		return scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance WHERE item_id = ? AND field = 'credit.artist'", id)
+	}
+	if got := trackColumn(t, st, res.ItemPID, "artist"); got != "JAY-Z" {
+		t.Fatalf("artist after re-saving = %q, want the file's spelling kept", got)
+	}
+	if credit() != 1 {
+		t.Fatalf("credit rows after re-saving = %d, want 1", credit())
+	}
+	if again := putTrack(t, st, lib.ID, spec); again.MetadataChanged {
+		t.Errorf("a rescan of the same bytes reported a metadata change")
+	}
+	if credit() != 1 {
+		t.Errorf("credit rows after the rescan = %d, want the row kept", credit())
+	}
+	if got := trackColumn(t, st, res.ItemPID, "artist"); got != "JAY-Z" {
+		t.Errorf("artist after the rescan = %q, want the file's spelling still", got)
+	}
+}

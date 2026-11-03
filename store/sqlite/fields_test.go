@@ -18,8 +18,8 @@ import (
 // added straight to the map would evaluate fine and export as an unsupported field, so
 // it fails here instead.
 //
-// Set fields are skipped: their Expr is empty by contract, so genre_pid,
-// credit_artist_pid, and playlist_pid would otherwise read as one group.
+// Set fields are skipped: their Expr is empty by contract, so genre_pid, the three
+// contributor fields, and playlist_pid would otherwise read as one group.
 func TestNoUndeclaredFieldAliases(t *testing.T) {
 	t.Parallel()
 	byExpr := map[string][]string{}

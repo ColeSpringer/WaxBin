@@ -175,6 +175,9 @@ func TestQueryShuffleSortsNarrowRows(t *testing.T) {
 		}
 		order = append(order, title)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	items, err := st.QueryItems(ctx, draw, "")
 	if err != nil {

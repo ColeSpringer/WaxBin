@@ -313,9 +313,8 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// them. Any read of the primary re-derives, a forced rescan of unchanged bytes
 		// included, the way a track's put does.
 		var rederived []string
-		var prov map[string]rederivable
 		if ownsMeta && !created {
-			if rederived, prov, err = rederivedBookTx(ctx, tx, itemID, in.Book, in.PreserveLocks, prior); err != nil {
+			if rederived, err = rederivedBookTx(ctx, tx, itemID, in.Book, in.PreserveLocks, prior); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -332,7 +331,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			if err := affected.collect(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := settleRederivedBookTx(ctx, tx, itemID, rederived, prov, in.PreserveLocks); err != nil {
+			if err := settleRederivedBookTx(ctx, tx, itemID, rederived, in.PreserveLocks); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			res.MetadataChanged = res.MetadataChanged || len(rederived) > 0
@@ -491,13 +490,21 @@ func upsertBook(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, aff
 	if err != nil {
 		return err
 	}
-	// Derive the stored author display from the split author entities, so the
-	// denormalized column lists exactly the authors that were linked as contributors
-	// (author_id points at the first of them) rather than the raw combined credit. A
-	// book with no split authors falls back to the raw value.
-	author := strings.Join(b.Authors, ", ")
+	// The author and narrator displays are stored as given. Whoever builds the split
+	// lists from text joins them into the display beside them (the scanner's bookInput,
+	// applyBookEdit, syncCreditDenormTx), while the edit and lock-overlay paths carry
+	// the stored display next to lists of the linked entities' own names. Deriving the
+	// display here from those names would respell a locked author on a rescan and move
+	// the column on an edit of another field, since a credit folds onto an entity
+	// spelled otherwise ("FRANK HERBERT" on the file, "Frank Herbert" in the catalog).
+	// A put handing split names with no display at all gets the display those names
+	// make, so a column never disagrees with the credits beside it.
+	author := b.Author
 	if author == "" {
-		author = b.Author
+		author = identity.JoinCredits(b.Authors)
+	}
+	if b.Narrator == "" {
+		b.Narrator = identity.JoinCredits(b.Narrators)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO book
 		(item_id, subtitle, author, author_sort, author_sort_key, author_id, narrator, series_id, series_seq,
@@ -1161,7 +1168,8 @@ var chapterSourcesByRank = []string{"podcast_url", "embedded", "cue", "synthetic
 // order by.
 func chapterRankSQL(col string) string {
 	var b strings.Builder
-	b.WriteString("CASE " + col)
+	b.WriteString("CASE ")
+	b.WriteString(col)
 	for i, s := range chapterSourcesByRank {
 		fmt.Fprintf(&b, " WHEN '%s' THEN %d", s, i)
 	}

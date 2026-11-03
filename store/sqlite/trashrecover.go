@@ -70,6 +70,10 @@ func (s *Store) recoverTrash(ctx context.Context) (int, error) {
 		}
 		pending = append(pending, p)
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	if err := rows.Close(); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

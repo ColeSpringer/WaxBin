@@ -171,3 +171,244 @@ func TestEditTrackRejectsBookOnlyField(t *testing.T) {
 		t.Fatalf("book field on a track: want CodeInvalid, got %v", err)
 	}
 }
+
+// bookColumn reads one column of a book's row by item pid.
+func bookColumn(t *testing.T, st *Store, pid model.PID, col string) string {
+	t.Helper()
+	return scalarStr(t, st, "SELECT "+col+" FROM book WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)", string(pid))
+}
+
+// bookCreditNames lists the names of a book's credited entities in role order, joined by
+// a bar, to check which entities its credits folded onto.
+func bookCreditNames(t *testing.T, st *Store, pid model.PID) string {
+	t.Helper()
+	return scalarStr(t, st, `SELECT COALESCE(group_concat(name, '|'), '') FROM (SELECT a.name FROM item_contributor ic
+		JOIN artist a ON a.id = ic.artist_id JOIN playable_item pi ON pi.id = ic.item_id
+		WHERE pi.pid = ? ORDER BY ic.role, ic.position)`, string(pid))
+}
+
+// TestBookEditKeepsTheSpellingTheFileStated: the author and narrator displays keep the
+// spelling the file stated when a credit folds onto an entity spelled otherwise, through
+// an edit of another field, so a rescan of the same bytes has nothing to re-derive. The
+// edit path loads the credited entities by their own names to re-link them; those names
+// are not the display.
+func TestBookEditKeepsTheSpellingTheFileStated(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/h.flac", essence: "eh", content: "ch",
+		title: "Reading", artist: "Frank Herbert", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/s.flac", essence: "es", content: "cs",
+		title: "Intro", artist: "Scott Brick", album: "Al"})
+	spec := bookSpec{path: "/lib/dune.m4b", essence: "e1", content: "c1",
+		title: "Dune", author: "FRANK HERBERT", narrators: []string{"SCOTT BRICK"}}
+	pid := putBook(t, st, lib.ID, spec).ItemPID
+	if got := bookCreditNames(t, st, pid); got != "Frank Herbert|Scott Brick" {
+		t.Fatalf("credits = %q, want both folded onto the entities the tracks minted", got)
+	}
+	if a, n := bookColumn(t, st, pid, "author"), bookColumn(t, st, pid, "narrator"); a != "FRANK HERBERT" || n != "SCOTT BRICK" {
+		t.Fatalf("scanned author = %q, narrator = %q; want the file's spellings", a, n)
+	}
+
+	// The edit is locked so a rescan honouring locks has nothing of its own to
+	// re-derive: a reported change could then only be a display that moved.
+	if err := st.EditItemField(ctx, pid, "year", "1965", model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+		t.Fatalf("edit year: %v", err)
+	}
+	if a, n := bookColumn(t, st, pid, "author"), bookColumn(t, st, pid, "narrator"); a != "FRANK HERBERT" || n != "SCOTT BRICK" {
+		t.Errorf("after a year edit author = %q, narrator = %q; want the file's spellings kept", a, n)
+	}
+	spec.preserveLocks = true
+	if res := putBook(t, st, lib.ID, spec); res.MetadataChanged {
+		t.Errorf("a rescan of the same bytes reported a metadata change")
+	}
+	if a, n := bookColumn(t, st, pid, "author"), bookColumn(t, st, pid, "narrator"); a != "FRANK HERBERT" || n != "SCOTT BRICK" {
+		t.Errorf("after the rescan author = %q, narrator = %q; want the file's spellings still", a, n)
+	}
+}
+
+// TestBookLockedDisplaysSurviveARescan: a locked author or narrator keeps the spelling
+// the edit typed through a rescan that honours locks, even though its credit links an
+// entity spelled otherwise. The overlay carries the stored display beside the entity
+// names, and the put stores the display it was given.
+func TestBookLockedDisplaysSurviveARescan(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/h.flac", essence: "eh", content: "ch",
+		title: "Reading", artist: "Frank Herbert", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/s.flac", essence: "es", content: "cs",
+		title: "Intro", artist: "Scott Brick", album: "Al"})
+	spec := bookSpec{path: "/lib/dune.m4b", essence: "e1", content: "c1",
+		title: "Dune", author: "Frank Herbert", narrators: []string{"Scott Brick"}}
+	pid := putBook(t, st, lib.ID, spec).ItemPID
+	user := model.Attribution{Source: model.SourceUser}
+	if err := st.EditItemField(ctx, pid, "author", "FRANK HERBERT", user, model.LockOn, false); err != nil {
+		t.Fatalf("edit author: %v", err)
+	}
+	if err := st.EditItemField(ctx, pid, "narrator", "SCOTT BRICK", user, model.LockOn, false); err != nil {
+		t.Fatalf("edit narrator: %v", err)
+	}
+	if got := bookCreditNames(t, st, pid); got != "Frank Herbert|Scott Brick" {
+		t.Fatalf("credits after the edits = %q, want the same two entities", got)
+	}
+
+	spec.content, spec.preserveLocks = "c2", true
+	putBook(t, st, lib.ID, spec)
+	if a, n := bookColumn(t, st, pid, "author"), bookColumn(t, st, pid, "narrator"); a != "FRANK HERBERT" || n != "SCOTT BRICK" {
+		t.Errorf("after a locked rescan author = %q, narrator = %q; want the locked spellings", a, n)
+	}
+}
+
+// TestBookAuthorEditSplitsLikeTheScannerAndKeepsRestatedCredits: an author edit credits
+// the people the text names the way a scan does ("A & B" is two authors shown as "A, B"),
+// restating the display the catalog shows, which no splitter can take apart, leaves the
+// credits as they are instead of minting one artist named after the whole line, a real
+// change re-credits in the new order, and text naming nobody clears the author and the
+// narrator alike.
+func TestBookAuthorEditSplitsLikeTheScannerAndKeepsRestatedCredits(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	user := model.Attribution{Source: model.SourceUser}
+	pid := putBook(t, st, lib.ID, bookSpec{path: "/lib/omens.m4b", essence: "e1", content: "c1",
+		title: "Good Omens", author: "Terry Pratchett & Neil Gaiman"}).ItemPID
+	if got := bookCreditNames(t, st, pid); got != "Terry Pratchett|Neil Gaiman" {
+		t.Fatalf("scanned credits = %q, want both authors", got)
+	}
+	if got := bookColumn(t, st, pid, "author"); got != "Terry Pratchett, Neil Gaiman" {
+		t.Fatalf("scanned author = %q, want the joined display", got)
+	}
+
+	for _, same := range []string{"Terry Pratchett, Neil Gaiman", "Terry Pratchett & Neil Gaiman"} {
+		if err := st.EditItemField(ctx, pid, "author", same, user, model.LockUnchanged, false); err != nil {
+			t.Fatalf("restate author as %q: %v", same, err)
+		}
+		if got := bookCreditNames(t, st, pid); got != "Terry Pratchett|Neil Gaiman" {
+			t.Errorf("after restating %q credits = %q, want both authors kept", same, got)
+		}
+		if got := bookColumn(t, st, pid, "author"); got != "Terry Pratchett, Neil Gaiman" {
+			t.Errorf("after restating %q author = %q, want the display kept", same, got)
+		}
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist WHERE name LIKE '%,%'"); n != 0 {
+		t.Errorf("%d artist(s) named after a joined display", n)
+	}
+
+	if err := st.EditItemField(ctx, pid, "author", "Neil Gaiman & Terry Pratchett", user, model.LockUnchanged, false); err != nil {
+		t.Fatalf("reorder authors: %v", err)
+	}
+	if got := bookCreditNames(t, st, pid); got != "Neil Gaiman|Terry Pratchett" {
+		t.Errorf("reordered credits = %q, want Gaiman first", got)
+	}
+	if got := bookColumn(t, st, pid, "author"); got != "Neil Gaiman, Terry Pratchett" {
+		t.Errorf("reordered author = %q, want the new display", got)
+	}
+	if got := scalarStr(t, st, `SELECT a.name FROM book bk JOIN artist a ON a.id = bk.author_id
+		WHERE bk.item_id = (SELECT id FROM playable_item WHERE pid = ?)`, string(pid)); got != "Neil Gaiman" {
+		t.Errorf("author_id names %q, want the first credited author", got)
+	}
+
+	for _, f := range []string{"author", "narrator"} {
+		if err := st.EditItemField(ctx, pid, f, " / ", user, model.LockUnchanged, false); err != nil {
+			t.Fatalf("clear %s: %v", f, err)
+		}
+		if got := bookColumn(t, st, pid, f); got != "" {
+			t.Errorf("%s set to a bare separator = %q, want cleared", f, got)
+		}
+	}
+	if got := bookCreditNames(t, st, pid); got != "" {
+		t.Errorf("credits after clearing = %q, want none", got)
+	}
+}
+
+// TestBookAuthorEditSurvivesALaterCreditWrite: the plain author edit records the display
+// it stored, so a later credit write naming the same people finds the row describing
+// the column and keeps it, lock included, instead of retiring an edit that still holds.
+func TestBookAuthorEditSurvivesALaterCreditWrite(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	user := model.Attribution{Source: model.SourceUser}
+	pid := putBook(t, st, lib.ID, bookSpec{path: "/lib/mort.m4b", essence: "e1", content: "c1",
+		title: "Mort", author: "Terry Pratchett"}).ItemPID
+	id := scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(pid))
+	if err := st.EditItemField(ctx, pid, "author", "Terry Pratchett & Neil Gaiman", user, model.LockOn, false); err != nil {
+		t.Fatalf("edit author: %v", err)
+	}
+	if got := scalarStr(t, st, "SELECT value FROM field_provenance WHERE item_id = ? AND field = 'author'", id); got != "Terry Pratchett, Neil Gaiman" {
+		t.Fatalf("recorded author = %q, want the display the column holds", got)
+	}
+	if _, _, err := st.SetItemCredits(ctx, pid, model.RoleAuthor, []string{"Terry Pratchett", "Neil Gaiman"},
+		user, model.LockUnchanged, true, false); err != nil {
+		t.Fatalf("re-credit the same people: %v", err)
+	}
+	if got := bookColumn(t, st, pid, "author"); got != "Terry Pratchett, Neil Gaiman" {
+		t.Errorf("author after the credit write = %q, want unchanged", got)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance WHERE item_id = ? AND field = 'author' AND locked = 1", id); n != 1 {
+		t.Errorf("locked plain author rows after the credit write = %d, want the edit's row kept", n)
+	}
+}
+
+// TestBookCreditResavedSurvivesARescan: a credit saved again with the people the file
+// already names, spelled as the catalog spells them, keeps the file's display (the same
+// rule), and a rescan of the same bytes then has nothing to re-derive: the credit rows
+// stay and no metadata change is reported.
+func TestBookCreditResavedSurvivesARescan(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	user := model.Attribution{Source: model.SourceUser}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/h.flac", essence: "eh", content: "ch",
+		title: "Reading", artist: "Frank Herbert", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/s.flac", essence: "es", content: "cs",
+		title: "Intro", artist: "Scott Brick", album: "Al"})
+	spec := bookSpec{path: "/lib/dune.m4b", essence: "e1", content: "c1",
+		title: "Dune", author: "FRANK HERBERT", narrators: []string{"SCOTT BRICK"}}
+	pid := putBook(t, st, lib.ID, spec).ItemPID
+	id := scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(pid))
+	for role, names := range map[model.ContributorRole][]string{model.RoleAuthor: {"Frank Herbert"}, model.RoleNarrator: {"Scott Brick"}} {
+		if _, _, err := st.SetItemCredits(ctx, pid, role, names, user, model.LockUnchanged, false, false); err != nil {
+			t.Fatalf("re-save %s: %v", role, err)
+		}
+	}
+	credits := func() int {
+		return scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance WHERE item_id = ? AND field IN ('credit.author', 'credit.narrator')", id)
+	}
+	if a, n := bookColumn(t, st, pid, "author"), bookColumn(t, st, pid, "narrator"); a != "FRANK HERBERT" || n != "SCOTT BRICK" {
+		t.Fatalf("after re-saving author = %q, narrator = %q; want the file's spellings kept", a, n)
+	}
+	if credits() != 2 {
+		t.Fatalf("credit rows after re-saving = %d, want 2", credits())
+	}
+
+	if res := putBook(t, st, lib.ID, spec); res.MetadataChanged {
+		t.Errorf("a rescan of the same bytes reported a metadata change")
+	}
+	if credits() != 2 {
+		t.Errorf("credit rows after the rescan = %d, want both kept", credits())
+	}
+	if a, n := bookColumn(t, st, pid, "author"), bookColumn(t, st, pid, "narrator"); a != "FRANK HERBERT" || n != "SCOTT BRICK" {
+		t.Errorf("after the rescan author = %q, narrator = %q; want the file's spellings still", a, n)
+	}
+}
+
+// TestPutScannedBookDerivesAMissingDisplay: a put handed split names without the joined
+// display stores the display those names make, so a column never disagrees with the
+// credits beside it; a display that was given is stored as given.
+func TestPutScannedBookDerivesAMissingDisplay(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	in := bookSpecInput(lib.ID, bookSpec{path: "/lib/tome.m4b", essence: "e1", content: "c1",
+		title: "Tome", author: "Ann Author"})
+	in.Book.Author, in.Book.Authors = "", []string{"Ann Author", "Bob Writer"}
+	in.Book.Narrator, in.Book.Narrators = "", []string{"Cy Reader"}
+	res, err := st.PutScannedBook(context.Background(), in)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if a, n := bookColumn(t, st, res.ItemPID, "author"), bookColumn(t, st, res.ItemPID, "narrator"); a != "Ann Author, Bob Writer" || n != "Cy Reader" {
+		t.Errorf("author = %q, narrator = %q; want the displays the split names make", a, n)
+	}
+}

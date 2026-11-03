@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -215,7 +217,7 @@ func TestEntityByPIDMatchesFacet(t *testing.T) {
 
 // TestEntityLibraryPIDsSpanLibraries verifies membership resolves libraries per
 // member: an artist backing items in two libraries reports both, and a book
-// counts under its author (the facet membership rule).
+// counts under its author.
 func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
@@ -242,7 +244,7 @@ func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
 	}
 
 	// The author artist has no tracks, so the rollup count is zero, but the
-	// authored book still places the artist in its library (facet membership).
+	// authored book still places the artist in its library.
 	author, err := st.EntityByPID(ctx, read.EntityArtist, entityPIDByName(t, st, "artist", "name", "Lone Author"))
 	if err != nil {
 		t.Fatalf("author: %v", err)
@@ -622,5 +624,106 @@ func TestEntityInfoListsAliases(t *testing.T) {
 	album, err := st.EntityByPID(ctx, read.EntityAlbum, entityPIDByName(t, st, "album", "title", "A"))
 	if err != nil || len(album.Aliases) != 0 {
 		t.Errorf("album info = %+v (err %v), want no aliases", album, err)
+	}
+}
+
+// TestArtistLibrariesFollowEveryCredit: an artist's libraries are those holding any
+// item it files under by any artist dimension, not only the items whose effective
+// artist it is. A featured artist (creditArtist), an album-artist-only artist
+// (albumArtist), a co-author (author) and a narrator (narrator) each report the
+// library of the item crediting them, in the single and the batched lookup alike,
+// where before this they reported none and a host scoping entities by library hid them.
+func TestArtistLibrariesFollowEveryCredit(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	lib2, err := st.EnsureLibrary(ctx, &model.Library{
+		Root: []byte("/other"), DisplayRoot: "/other", Mode: model.ModeManaged, Profile: "waxbin-native",
+	})
+	if err != nil {
+		t.Fatalf("second library: %v", err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/feat.flac", essence: "e1", content: "c1",
+		title: "Song", artist: "Jay-Z feat. Alicia Keys", artists: []string{"Jay-Z", "Alicia Keys"},
+		albumArt: "Jay-Z", album: "Album"})
+	putTrack(t, st, lib2.ID, trackSpec{path: "/other/mix.flac", essence: "e2", content: "c2",
+		title: "Mix", artist: "DJ Guest", albumArt: "Various Artists", album: "Comp"})
+	putBook(t, st, lib2.ID, bookSpec{path: "/other/omens.m4b", essence: "e3", content: "c3",
+		title: "Good Omens", author: "Terry Pratchett & Neil Gaiman",
+		authors: []string{"Terry Pratchett", "Neil Gaiman"}, narrators: []string{"Martin Jarvis"}})
+
+	want := map[string][]model.PID{
+		"Jay-Z":           {lib.PID},
+		"Alicia Keys":     {lib.PID},
+		"DJ Guest":        {lib2.PID},
+		"Various Artists": {lib2.PID},
+		"Terry Pratchett": {lib2.PID},
+		"Neil Gaiman":     {lib2.PID},
+		"Martin Jarvis":   {lib2.PID},
+	}
+	var pids []model.PID
+	byName := map[model.PID]string{}
+	for name := range want {
+		pid := entityPIDByName(t, st, "artist", "name", name)
+		pids = append(pids, pid)
+		byName[pid] = name
+	}
+	batch, err := st.EntityByPIDs(ctx, read.EntityArtist, pids)
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	for _, pid := range pids {
+		name := byName[pid]
+		single, err := st.EntityByPID(ctx, read.EntityArtist, pid)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(single.LibraryPIDs, want[name]) {
+			t.Errorf("%s libraries = %v, want %v", name, single.LibraryPIDs, want[name])
+		}
+		if b := batch[pid]; b == nil || !reflect.DeepEqual(b.LibraryPIDs, single.LibraryPIDs) {
+			t.Errorf("%s batch libraries = %+v, single %v", name, b, single.LibraryPIDs)
+		}
+	}
+}
+
+// TestArtistMemberSourceSeeksEveryArm pins the cost of the widened artist membership:
+// the predicate on the artist id is pushed into each arm of the member union, so every
+// arm seeks its own index, in the single statement and the batched one. A plan that
+// scans track, book or item_contributor would price every artist lookup at the whole
+// catalog.
+func TestArtistMemberSourceSeeksEveryArm(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", albumArt: "X", album: "Al"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb",
+		title: "Tome", author: "Auth", narrators: []string{"Reader"}})
+	id := scalarInt(t, st, "SELECT id FROM artist WHERE name = 'X'")
+
+	scan := regexp.MustCompile(`\bSCAN (t|bk|ic)\b`)
+	for name, stmt := range map[string]struct {
+		text string
+		args []any
+	}{
+		"single": {entityLibraryPIDsStmt(read.EntityArtist), []any{id}},
+		"batch":  {entityLibraryPIDsBatchStmt(read.EntityArtist), []any{idArray([]int64{int64(id)})}},
+	} {
+		lines := explainPlanLines(t, st, stmt.text, stmt.args...)
+		plan := strings.Join(lines, "\n")
+		for _, index := range []string{"track_artist_id", "track_album_artist_id", "book_author", "item_contributor_artist"} {
+			var sought bool
+			for _, l := range lines {
+				if strings.Contains(l, "SEARCH") && strings.Contains(l, index) {
+					sought = true
+				}
+			}
+			if !sought {
+				t.Errorf("%s: no arm seeks %s:\n%s", name, index, plan)
+			}
+		}
+		if scan.MatchString(plan) {
+			t.Errorf("%s: an arm scans its table:\n%s", name, plan)
+		}
 	}
 }

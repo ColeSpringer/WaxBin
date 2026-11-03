@@ -39,8 +39,8 @@ func EntityKinds() []EntityKind {
 // facet bucket, a query field match, an item view) without a full facet scan.
 //
 // Counts come from the maintained rollups for artist, release group, and genre
-// (track-based for the first two, so a book credits its author's LibraryPIDs
-// membership but not the artist's ItemCount; item-based for genre), and from
+// (track-based for the first two, so a book or a credit places an artist in
+// LibraryPIDs without raising its ItemCount; item-based for genre), and from
 // live indexed aggregates for album and series, which have no rollup rows. While a scan
 // runs, the rollup counts, an album's Year and the sort spellings the albums, release
 // groups and artists derive from their members (so their SortKey) trail its writes until
@@ -86,10 +86,12 @@ type EntityInfo struct {
 	TotalDurationMS   int64
 
 	// LibraryPIDs are the distinct libraries holding the member items' files, an
-	// alternate copy's included, in library order. Artist membership follows the artist
-	// facet: an item counts under its effective artist (a book under its
-	// author). A fileless member, such as an undownloaded episode carrying the
-	// genre, contributes nothing.
+	// alternate copy's included, in library order. Artist membership is every way an
+	// item files under the artist: as its performing or album artist, as a book's
+	// author, or through any credit on it, so an artist reachable from any artist
+	// dimension's bucket (creditArtist, author, narrator included) reports the
+	// libraries of the items crediting it. A fileless member, such as an undownloaded
+	// episode carrying the genre, contributes nothing.
 	LibraryPIDs []model.PID
 
 	// Aliases are an artist's other names, by name: a merged loser's, a name a locked

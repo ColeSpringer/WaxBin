@@ -253,21 +253,36 @@ func entityPageStmt(table string, afterCursor bool, limit int) string {
 	return stmt + " ORDER BY sort_key, pid LIMIT " + strconv.Itoa(limit+1)
 }
 
+// artistMembersSub pairs every item with each artist it files under on any artist
+// dimension: its performing artist and album artist, a book's first author, and every
+// artist credited on it in any role, which is where the creditArtist, author and
+// narrator buckets come from and where the DB-only roles live. A featured artist, an
+// album-artist-only artist, a co-author or a narrator is reachable from a bucket, so it
+// has to be reachable here too, or a host scoping entities by library would hide it. The
+// first and third arms repeat the contributor rows a put writes beside them, and the
+// readers join each row to its files, so the arms are deduplicated here (UNION, one sort
+// of the candidate rows) rather than after the joins; they stay rather than trusting
+// the rows to be complete, since the artist facet reads the columns, not the rows. Each
+// arm seeks its own index once the reader's predicate on am.artist_id is pushed into
+// it, which TestArtistMemberSourceSeeksEveryArm pins.
+const artistMembersSub = `SELECT t.item_id AS item_id, t.artist_id AS artist_id FROM track t WHERE t.artist_id IS NOT NULL
+	UNION SELECT t.item_id, t.album_artist_id FROM track t WHERE t.album_artist_id IS NOT NULL
+	UNION SELECT bk.item_id, bk.author_id FROM book bk WHERE bk.author_id IS NOT NULL
+	UNION SELECT ic.item_id, ic.artist_id FROM item_contributor ic`
+
 // entityMemberSource returns the FROM/JOIN clause reaching every file of an entity's
 // member items, alternates included the way the library query field reaches them, and
-// the expression selecting each member's entity id. It is shared by the single and batched library-pid lookups so the two can
-// never diverge about which items back an entity. Artist membership uses
-// itemArtistIDExpr, the same expression the artist facet and the artist_pid query
-// field consume, so a book counts under its author consistently across all of them.
-// A fileless member contributes nothing (the INNER file join).
+// the expression selecting each member's entity id. It is shared by the single and
+// batched library-pid lookups so the two can never diverge about which items back an
+// entity. Artist membership is artistMembersSub, wider than the artist facet's
+// itemArtistIDExpr: every dimension that hands out an artist pid counts. A fileless
+// member contributes nothing (the INNER file join).
 func entityMemberSource(kind read.EntityKind) (from, idExpr string) {
 	switch kind {
 	case read.EntityArtist:
-		return ` FROM playable_item pi
-			LEFT JOIN track t ON t.item_id = pi.id
-			LEFT JOIN book bk ON bk.item_id = pi.id
-			JOIN item_file pf ON pf.item_id = pi.id
-			JOIN file f ON f.id = pf.file_id`, itemArtistIDExpr
+		return ` FROM (` + artistMembersSub + `) am
+			JOIN item_file pf ON pf.item_id = am.item_id
+			JOIN file f ON f.id = pf.file_id`, "am.artist_id"
 	case read.EntityReleaseGroup:
 		return ` FROM track t
 			JOIN album al ON al.id = t.album_id
@@ -289,12 +304,25 @@ func entityMemberSource(kind read.EntityKind) (from, idExpr string) {
 	return "", ""
 }
 
-// entityLibraryPIDs returns the distinct libraries holding an entity's member
-// items' primary backing files, in library order.
-func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id int64, op string) ([]model.PID, error) {
+// entityLibraryPIDsStmt selects the distinct libraries holding one entity's member files,
+// in library order; entityLibraryPIDsBatchStmt is the same over an id array, keyed by
+// entity id. The plan test reads both.
+func entityLibraryPIDsStmt(kind read.EntityKind) string {
 	from, idExpr := entityMemberSource(kind)
-	rows, err := s.rstmts.queryContext(ctx, s.rdb(),
-		"SELECT l.pid"+from+" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" = ? GROUP BY l.id ORDER BY l.id", id)
+	return "SELECT l.pid" + from + " JOIN library l ON l.id = f.library_id WHERE " + idExpr + " = ? GROUP BY l.id ORDER BY l.id"
+}
+
+func entityLibraryPIDsBatchStmt(kind read.EntityKind) string {
+	from, idExpr := entityMemberSource(kind)
+	return "SELECT " + idExpr + " AS eid, l.pid" + from +
+		" JOIN library l ON l.id = f.library_id WHERE " + idExpr + " IN " + inArray +
+		" GROUP BY eid, l.id ORDER BY eid, l.id"
+}
+
+// entityLibraryPIDs returns the distinct libraries holding an entity's member
+// items' files, in library order.
+func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id int64, op string) ([]model.PID, error) {
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), entityLibraryPIDsStmt(kind), id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -667,11 +695,7 @@ func (s *Store) entityLiveCountsBatch(ctx context.Context, kind read.EntityKind,
 // entity. It shares entityMemberSource with the single lookup, projecting and
 // grouping by the member's entity id so one query serves the whole chunk.
 func (s *Store) entityLibraryPIDsBatch(ctx context.Context, kind read.EntityKind, ids []int64, op string) (map[int64][]model.PID, error) {
-	from, idExpr := entityMemberSource(kind)
-	rows, err := s.rstmts.queryContext(ctx, s.rdb(),
-		"SELECT "+idExpr+" AS eid, l.pid"+from+
-			" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" IN "+inArray+
-			" GROUP BY eid, l.id ORDER BY eid, l.id", idArray(ids))
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), entityLibraryPIDsBatchStmt(kind), idArray(ids))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

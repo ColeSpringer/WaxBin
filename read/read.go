@@ -15,9 +15,9 @@ const (
 	GroupArtist GroupBy = "artist"
 	// GroupCreditArtist buckets a track under EVERY artist its credit names, where
 	// GroupArtist buckets it once under the primary. A featured artist has a bucket
-	// here and none there. It is the second many-per-item dimension after genre, so a
-	// track appears in several buckets and the bucket counts sum to more than the
-	// item count.
+	// here and none there. Like genre it is many-per-item, so a track appears in
+	// several buckets and the bucket counts sum to more than the item count.
+	// GroupAuthor and GroupNarrator are its book-side twins.
 	GroupCreditArtist GroupBy = "creditArtist"
 	GroupAlbumArtist  GroupBy = "albumArtist"
 	GroupAlbum        GroupBy = "album"
@@ -57,6 +57,21 @@ const (
 	// It is the mirror of the series_pid query field. Only books are counted, since a
 	// track or an episode has no series, and a book in none lands in NoSeries.
 	GroupSeries GroupBy = "series"
+	// GroupAuthor buckets a book under every author its credit names (key = artist
+	// pid, display = its name), where GroupArtist files it under the first alone, so a
+	// co-author is browsable. It is the mirror of the author_pid query field and
+	// many-per-item like GroupCreditArtist. Only books are counted, since only a book
+	// carries the role, and a book crediting no author lands in UnknownAuthor. That
+	// bucket drills down as `kind is book` with `author_pid isMissing`, since the
+	// field's isMissing is catalog-wide and matches a track or an episode too, the
+	// way series_pid pairs with NoSeries.
+	GroupAuthor GroupBy = "author"
+	// GroupNarrator buckets a book under every narrator its credit names, the mirror
+	// of the narrator_pid query field. It is book-scoped and many-per-item like
+	// GroupAuthor, and a book crediting no narrator lands in NoNarrator, drilled down
+	// as `kind is book` with `narrator_pid isMissing`. A narrator who is nothing else
+	// in the catalog has a bucket here and none under GroupArtist.
+	GroupNarrator GroupBy = "narrator"
 )
 
 // Valid reports whether g is a known faceting dimension: one of the fixed dimensions
@@ -64,7 +79,8 @@ const (
 func (g GroupBy) Valid() bool {
 	switch g {
 	case GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
-		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries:
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries,
+		GroupAuthor, GroupNarrator:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -75,7 +91,8 @@ func (g GroupBy) Valid() bool {
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
 	return []GroupBy{GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
-		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries}
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries,
+		GroupAuthor, GroupNarrator}
 }
 
 // UserScoped reports whether g's bucket set depends on the calling user. Only
@@ -96,4 +113,10 @@ const (
 	// still have no release group, so folding the two would hide that state.
 	NoReleaseGroup = "[No Release Group]"
 	NoSeries       = "[No Series]"
+	// UnknownAuthor is the author dimension's bucket for a book crediting no author; an
+	// author is a book's identity, as the artist facet already files such a book under
+	// UnknownArtist. NoNarrator is the narrator dimension's, spelled like NoGenre and
+	// NoSeries because a narrator is optional metadata a book can lack.
+	UnknownAuthor = "[Unknown Author]"
+	NoNarrator    = "[No Narrator]"
 )

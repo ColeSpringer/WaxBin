@@ -890,7 +890,9 @@ func (s *Store) queryItemsStmt(ctx context.Context, q query.Query, userPID model
 		}
 		fmt.Fprintf(&sb, "SELECT %s FROM (SELECT pi.id, pi.pid, wb_shuffle(%d, pi.pid) AS ord%s", cols, seed, from)
 	} else {
-		sb.WriteString("SELECT " + cols + itemJoins)
+		sb.WriteString("SELECT ")
+		sb.WriteString(cols)
+		sb.WriteString(itemJoins)
 	}
 	sb.WriteString(userJoin)
 	if where != "" {

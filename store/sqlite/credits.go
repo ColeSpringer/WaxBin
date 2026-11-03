@@ -452,7 +452,7 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 		// so unlike composer_sort there is no lock to probe.
 		_, err = tx.ExecContext(ctx, `UPDATE track SET artist = ?1,
 			artist_sort = CASE WHEN artist = ?1 THEN artist_sort ELSE '' END, artist_id = ?2 WHERE item_id = ?3`,
-			strings.Join(names, ", "), nullInt64(firstArtistID), itemID)
+			identity.JoinCredits(names), nullInt64(firstArtistID), itemID)
 	case kind == string(model.KindTrack) && role == model.RoleComposer:
 		// The composer denormalization uses "; " (matching the scanner's multi-composer join).
 		display := strings.Join(names, "; ")
@@ -467,7 +467,7 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 				composer_sort = CASE WHEN composer = ?1 THEN composer_sort ELSE '' END WHERE item_id = ?2`, display, itemID)
 		}
 	case kind == string(model.KindBook) && role == model.RoleAuthor:
-		display := strings.Join(names, ", ")
+		display := identity.JoinCredits(names)
 		sortLocked, lerr := fieldLockedTx(ctx, tx, itemID, "author_sort")
 		if lerr != nil {
 			return lerr
@@ -482,7 +482,7 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 		}
 	case kind == string(model.KindBook) && role == model.RoleNarrator:
 		_, err := tx.ExecContext(ctx, "UPDATE book SET narrator=? WHERE item_id=?",
-			strings.Join(names, ", "), itemID)
+			identity.JoinCredits(names), itemID)
 		return err
 	default:
 		// Other roles have no denormalized column.

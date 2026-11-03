@@ -136,6 +136,9 @@ func rollupSnapshot(t *testing.T, st *Store) string {
 			}
 			fmt.Fprintf(&b, "%s %d %d %d %d\n", kind, id, a, n, d)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
 		rows.Close()
 	}
 	return b.String()

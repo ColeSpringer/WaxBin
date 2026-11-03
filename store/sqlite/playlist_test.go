@@ -295,6 +295,9 @@ func playlistPositions(t *testing.T, st *Store, pl model.PID) []int {
 		}
 		out = append(out, p)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("positions: %v", err)
+	}
 	return out
 }
 

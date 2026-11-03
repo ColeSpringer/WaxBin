@@ -353,7 +353,7 @@ func bookFileAgrees(col string, file, stored model.Book) bool {
 	case "credit.editor":
 		return foldedNamesEqual(file.Editors, stored.Editors)
 	}
-	return bookFieldValue(col, file, false) == bookFieldValue(col, stored, true)
+	return bookFieldValue(col, file) == bookFieldValue(col, stored)
 }
 
 // owedCoverPaidTx reports whether a put paid an owed cover: on every file once the item's

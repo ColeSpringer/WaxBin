@@ -119,9 +119,12 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		title: "Two", artist: "Radiohead", albumArt: "Radiohead", album: "OK Computer", genre: "Rock"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/o1.flac", essence: "e3", content: "c3",
 		title: "Three", artist: "Orbital", albumArt: "Orbital", album: "Insides", genre: "Electronic"})
+	// A co-author and a narrator, so the author and narrator rows of the mirror table
+	// below have a second bucket to check rather than passing vacuously.
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/earthsea.m4b", essence: "be1", content: "bc1",
-		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", genres: []string{"Fantasy"},
-		series: "Earthsea", seq: "1"})
+		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin & Jane Yolen",
+		authors: []string{"Ursula K. Le Guin", "Jane Yolen"}, narrators: []string{"Rob Inglis"},
+		genres: []string{"Fantasy"}, series: "Earthsea", seq: "1"})
 	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
 
 	// A default-user playlist, so the playlist row of the mirror table below has a
@@ -154,6 +157,8 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		{read.GroupGenre, "genre_pid"},
 		{read.GroupPodcast, "podcast_pid"},
 		{read.GroupSeries, "series_pid"},
+		{read.GroupAuthor, "author_pid"},
+		{read.GroupNarrator, "narrator_pid"},
 		// The playlist dimension holds too, even though its buckets are owner-scoped
 		// and the field is not: scoping selects which playlists get buckets, never
 		// which items land in one. The loop is one-directional, so the divergence is

@@ -12,8 +12,8 @@ type Bucket struct {
 	IsUnknown bool   // the dimension was absent (mapped to a sentinel)
 	// EntityPID is the bucket's entity pid on the entity-keyed dimensions
 	// (genre, artist, creditArtist, albumArtist, album, releaseGroup, library,
-	// podcast, playlist) and "" on the rest, including the unknown bucket of a
-	// dimension that has one.
+	// podcast, playlist, series, author, narrator) and "" on the rest, including the
+	// unknown bucket of a dimension that has one.
 	//
 	// It is a pid, not a typed handle, so the dimension is what says how to resolve
 	// it. Most pair with an EntityKind and read back through EntityByPID or

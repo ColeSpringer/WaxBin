@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -167,9 +168,13 @@ func rowReproduces(field, value string, title itemTitle, tr model.Track) (col st
 	case "title_sort":
 		return "title_sort", value == title.sort
 	case model.CreditField(model.RoleArtist):
-		return "artist", strings.Join(strings.Split(value, "; "), ", ") == tr.Artist
+		// A credit row names people, so the file reproduces it when it credits the same
+		// people however it spells them: a credit saved again keeps the file's display
+		// (creditState.same), which a text compare would read as the catalog departing.
+		names, _ := creditNames(tr.Artist, tr.Artists, tr.MBArtistIDs)
+		return "artist", foldedNamesEqual(strings.Split(value, "; "), names)
 	case model.CreditField(model.RoleComposer):
-		return "composer", value == tr.Composer
+		return "composer", foldedNamesEqual(strings.Split(value, "; "), identity.SplitCredits(tr.Composer))
 	}
 	if !trackEditFields[field] {
 		return "", false
@@ -282,16 +287,12 @@ var bookScanFields = []string{
 // file no longer carries says the catalog departed from the file.
 var bookEntityFields = map[string]bool{"series": true, "credit.translator": true, "credit.editor": true}
 
-// bookFieldValue reads one bookScanFields value off b. A stored book (loadBookForEditTx)
-// carries its columns as written; a scanned one is derived the way upsertBook derives
-// what it writes, the author display from the split authors.
-func bookFieldValue(field string, b model.Book, stored bool) string {
+// bookFieldValue reads one bookScanFields value off b, a stored book (loadBookForEditTx)
+// and a scanned one alike, since upsertBook writes the displays it is given.
+func bookFieldValue(field string, b model.Book) string {
 	switch field {
 	case "author":
-		if stored {
-			return b.Author
-		}
-		return bookAuthorDisplay(b)
+		return b.Author
 	case "author_sort":
 		return b.AuthorSort
 	case "narrator":
@@ -326,7 +327,7 @@ func bookFieldValue(field string, b model.Book, stored bool) string {
 
 // rederivedBookTx is rederivedTrackTx for a book's primary part, read before upsertBook
 // replaces the book row and its contributors.
-func rederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, preserveLocks bool, known *scanPrior) ([]string, map[string]rederivable, error) {
+func rederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, preserveLocks bool, known *scanPrior) ([]string, error) {
 	known = known.priorFor(itemID)
 	var prior model.Book
 	if known != nil && known.book != nil {
@@ -334,10 +335,10 @@ func rederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book
 	} else {
 		stored, _, err := loadBookForEditTx(ctx, tx, itemID)
 		if waxerr.Is(err, waxerr.CodeNotFound) {
-			return nil, nil, nil
+			return nil, nil
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		prior = stored
 	}
@@ -347,12 +348,12 @@ func rederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book
 	} else {
 		var err error
 		if rows, err = rederivableRowsTx(ctx, tx, itemID, preserveLocks); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	set := map[string]bool{}
 	for _, f := range bookScanFields {
-		if !bookEntityFields[f] && bookFieldValue(f, prior, true) != bookFieldValue(f, b, false) {
+		if !bookEntityFields[f] && bookFieldValue(f, prior) != bookFieldValue(f, b) {
 			set[f] = true
 		}
 	}
@@ -361,19 +362,20 @@ func rederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book
 			set[col] = true
 		}
 	}
-	return slices.Sorted(maps.Keys(set)), rows, nil
+	return slices.Sorted(maps.Keys(set)), nil
 }
 
-// bookRowReproduces is rowReproduces for a book. A credit row's "; " list becomes the
-// author or narrator display the way syncCreditDenormTx writes it.
+// bookRowReproduces is rowReproduces for a book. A credit row's "; " list reproduces
+// when the file credits the same people, compared folded as rowReproduces compares a
+// track's.
 func bookRowReproduces(field, value string, b model.Book) (col string, ok bool) {
 	switch field {
 	case model.CreditField(model.RoleAuthor):
-		return "author", strings.Join(strings.Split(value, "; "), ", ") == bookFieldValue("author", b, false)
+		return "author", foldedNamesEqual(strings.Split(value, "; "), b.Authors)
 	case model.CreditField(model.RoleNarrator):
-		return "narrator", strings.Join(strings.Split(value, "; "), ", ") == b.Narrator
+		return "narrator", foldedNamesEqual(strings.Split(value, "; "), b.Narrators)
 	case model.CreditField(model.RoleTranslator), model.CreditField(model.RoleEditor):
-		return field, value == bookFieldValue(field, b, false)
+		return field, value == bookFieldValue(field, b)
 	}
 	if field == "title" || !bookEditFields[field] {
 		return "", false
@@ -382,14 +384,14 @@ func bookRowReproduces(field, value string, b model.Book) (col string, ok bool) 
 	if err := applyBookEdit(&edited, field, value, ""); err != nil {
 		return field, false
 	}
-	return field, bookFieldValue(field, edited, false) == bookFieldValue(field, b, false)
+	return field, bookFieldValue(field, edited) == bookFieldValue(field, b)
 }
 
 // settleRederivedBookTx retires the provenance of every book field the put re-derived,
 // the credit rows behind the author and narrator displays included, and when one held an
 // enrichment value clears the write-back's moot drift on every part, since the book's
 // values ride each part's tags.
-func settleRederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, rows map[string]rederivable, preserveLocks bool) error {
+func settleRederivedBookTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, preserveLocks bool) error {
 	if len(fields) == 0 {
 		return nil
 	}

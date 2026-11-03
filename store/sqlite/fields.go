@@ -113,14 +113,15 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // move updated_at), which is what makes last_progress the ordering key for "where was I".
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
-// text, so a facet drilldown can query by the bucket's EntityPID. There are ten, and
-// they split three ways: artist_pid, album_artist_pid, album_pid, release_group_pid,
-// podcast_pid, and series_pid are scalar columns lowered on the value side; genre_pid,
-// credit_artist_pid, and playlist_pid are set fields, over item_genre,
-// item_contributor, and playlist_item, because those dimensions hold many rows per
-// item (the paragraphs below say why they stay set fields); and library is a member
-// column (query.MemberColumn) over every file edge, since an item with a copy in
-// another library belongs to that library too.
+// text, so a facet drilldown can query by the bucket's EntityPID. There are twelve,
+// and they split three ways: artist_pid, album_artist_pid, album_pid,
+// release_group_pid, podcast_pid, and series_pid are scalar columns lowered on the
+// value side; genre_pid, credit_artist_pid, author_pid, narrator_pid, and
+// playlist_pid are set fields, over item_genre, item_contributor (one role each, see
+// contributorPIDColumn), and playlist_item, because those dimensions hold many rows
+// per item (the paragraphs below say why they stay set fields); and library is a
+// member column (query.MemberColumn) over every file edge, since an item with a copy
+// in another library belongs to that library too.
 //
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
@@ -163,8 +164,8 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // deny-list contract a stale entry needs; see query.Column.ValueSub. A caller
 // scoping visibility by library has to decide what a fileless item means to it.
 //
-// genre_pid, credit_artist_pid, and playlist_pid stay set fields (set-field
-// semantics: isNot is a deny-list, ordered operators are rejected) and are
+// genre_pid, the three contributor fields, and playlist_pid stay set fields
+// (set-field semantics: isNot is a deny-list, ordered operators are rejected) and are
 // deliberately not converted. Their EXISTS correlates on pi.id whatever side the
 // value sits, so lowering would save the per-row join but not the scan, and it would
 // need a second lowering mechanism on SetColumn for no plan change. playlist_pid has
@@ -240,6 +241,12 @@ var itemFields = query.FieldMap{
 	"composer":      {Expr: "COALESCE(t.composer,'')", Kind: query.KindText},
 	"composer_sort": {Expr: "COALESCE(t.composer_sort_key,'')", Kind: query.KindText},
 	"author_sort":   {Expr: "COALESCE(bk.author_sort_key,'')", Kind: query.KindText},
+	// A book's author and narrator displays as its row shows them, '' for every other
+	// kind: author is the book's own column where artist reads it behind a track's
+	// performer, and narrator has no other field. Each joins several names into one
+	// display, so contains reaches one of them and the pid fields are the exact way.
+	"author":   {Expr: "COALESCE(bk.author,'')", Kind: query.KindText},
+	"narrator": {Expr: "COALESCE(bk.narrator,'')", Kind: query.KindText},
 	// A book's series, its place in it as the tag states it, and that place's key, which
 	// orders 2 before 10 as the series listing does; '' outside a series.
 	"series":          {Expr: "COALESCE(srs.name,'')", Kind: query.KindText},
@@ -264,13 +271,13 @@ var itemFields = query.FieldMap{
 	"rel_path": {Expr: relPathExpr, Kind: query.KindText},
 
 	// Entity handles (see the header block): the item's internal id column compared
-	// against a subquery that resolves the caller's pid once, except genre_pid, which
-	// is a set field over item_genre. Kind describes the Expr, which since the lowering
-	// is an integer id column and not the pid text the caller passes. Nothing reads it
-	// today (compileValueSubCond handles every operator these fields accept), but
-	// declaring KindText would leave a live trap: routed back through the generic path,
-	// `library isMissing` would compile the text presence check and test an integer
-	// column against ''.
+	// against a subquery that resolves the caller's pid once, followed by the library
+	// member column and the set fields over their own tables. Kind describes the Expr,
+	// which since the lowering is an integer id column and not the pid text the caller
+	// passes. Nothing reads it today (compileValueSubCond handles every operator these
+	// fields accept), but declaring KindText would leave a live trap: routed back
+	// through the generic path, `library isMissing` would compile the text presence
+	// check and test an integer column against ''.
 	"artist_pid":       {Expr: itemArtistIDExpr, ValueSub: artistIDByPIDSub, Kind: query.KindInt},
 	"album_artist_pid": {Expr: itemAlbumArtistIDExpr, ValueSub: artistIDByPIDSub, Kind: query.KindInt},
 	// album_pid stays t.album_id, not alb.id: track_album_id is the better seek and
@@ -284,11 +291,9 @@ var itemFields = query.FieldMap{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
 		ValueExpr: "gq.pid",
 	}},
-	"credit_artist_pid": {Set: &query.SetColumn{
-		Sub: "SELECT 1 FROM item_contributor icq JOIN artist caq ON caq.id = icq.artist_id" +
-			" WHERE icq.item_id = pi.id AND icq.role = 'artist'",
-		ValueExpr: "caq.pid",
-	}},
+	"credit_artist_pid": contributorPIDColumn(model.RoleArtist),
+	"author_pid":        contributorPIDColumn(model.RoleAuthor),
+	"narrator_pid":      contributorPIDColumn(model.RoleNarrator),
 	"playlist_pid": {Set: &query.SetColumn{
 		Sub: "SELECT 1 FROM playlist_item pliq JOIN playlist plq ON plq.id = pliq.playlist_id" +
 			" WHERE pliq.item_id = pi.id",
@@ -365,6 +370,20 @@ var itemFields = query.FieldMap{
 	// The ps alias joins on play_state's primary key, so a filter or sort here cannot
 	// use play_state_progress; that index serves the in-progress browse list alone.
 	"last_progress": {Expr: "ps.last_progress_at", Kind: query.KindTime, NeedsUser: true},
+}
+
+// contributorPIDColumn is the set field over the artists credited on an item in one
+// role, keyed by artist pid: the drilldown twin of the contributor facet dimension
+// binding the same role (contributorFacetSpec), so a bucket's EntityPID filters to
+// exactly the bucket's items. The role binds through Args, as a tag key does, so the
+// statement text holds no role at all.
+func contributorPIDColumn(role model.ContributorRole) query.Column {
+	return query.Column{Set: &query.SetColumn{
+		Sub: "SELECT 1 FROM item_contributor icq JOIN artist caq ON caq.id = icq.artist_id" +
+			" WHERE icq.item_id = pi.id AND icq.role = ?",
+		ValueExpr: "caq.pid",
+		Args:      []any{string(role)},
+	}}
 }
 
 // relPathExpr reads file.rel_path as text. The column holds the platform's separators,

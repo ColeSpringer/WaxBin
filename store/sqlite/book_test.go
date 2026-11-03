@@ -20,8 +20,9 @@ import (
 type bookSpec struct {
 	path, essence, content string
 	title, author          string
-	authorSort             string // the sort spelling the file states, empty when none
-	titleSort              string // the title's spelling (a book's ALBUMSORT), empty when none
+	authors                []string // the split author credit; nil credits author alone
+	authorSort             string   // the sort spelling the file states, empty when none
+	titleSort              string   // the title's spelling (a book's ALBUMSORT), empty when none
 	narrators              []string
 	series, seq            string
 	asin, isbn, edition    string
@@ -54,6 +55,12 @@ func bookSpecInput(libID int64, s bookSpec) model.PutScannedBookInput {
 	if len(s.genres) > 0 {
 		genre = s.genres[0]
 	}
+	// The names and displays are settled the way the scanner settles them
+	// (scan.bookInput), so a joint credit in author alone names two people.
+	authors, author := s.authors, identity.JoinCredits(s.authors)
+	if authors == nil {
+		authors, author = identity.CreditDisplay(s.author)
+	}
 	return model.PutScannedBookInput{
 		LibraryID: libID,
 		File: model.File{
@@ -67,8 +74,9 @@ func bookSpecInput(libID int64, s bookSpec) model.PutScannedBookInput {
 			TitleSort: s.titleSort, IdentityKey: key,
 		},
 		Book: model.Book{
-			Author: s.author, AuthorSort: s.authorSort, Authors: []string{s.author},
-			Narrators: s.narrators, Series: s.series, SeriesSeq: s.seq,
+			Author: author, AuthorSort: s.authorSort, Authors: authors,
+			Narrators: s.narrators, Narrator: identity.JoinCredits(s.narrators),
+			Series: s.series, SeriesSeq: s.seq,
 			ASIN: s.asin, ISBN: s.isbn, Edition: s.edition, MBID: s.mbid, Year: s.year,
 			Publisher: s.publisher, Genres: s.genres, Genre: genre,
 		},
@@ -1701,6 +1709,9 @@ func listBooks(t *testing.T, st *Store) []model.PID {
 		}
 		out = append(out, p)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	return out
 }
 
@@ -2335,7 +2346,7 @@ func TestTheExtentRuleReadsTheSameInGoAndSQL(t *testing.T) {
 	}
 	bookID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(book)))
 	fileOf := func(n int) int64 {
-		return int64(scalarInt(t, st, "SELECT id FROM file WHERE path = ?", []byte(fmt.Sprintf("/lib/gs/p%d.mp3", n))))
+		return int64(scalarInt(t, st, "SELECT id FROM file WHERE path = ?", fmt.Appendf(nil, "/lib/gs/p%d.mp3", n)))
 	}
 	for _, r := range []struct {
 		part         int
