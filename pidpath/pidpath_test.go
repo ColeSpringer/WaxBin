@@ -549,7 +549,7 @@ func TestNewCacheRefusesAReplacedCatalog(t *testing.T) {
 	fake.mu.Lock()
 	fake.pollErr = waxerr.New(waxerr.CodeNotFound, "fake.DataVersion", "catalog file was replaced")
 	fake.mu.Unlock()
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		wantCode(t, c.Poll(ctx), waxerr.CodeNotFound)
 	}
 	if logs.warns != 1 {
@@ -807,7 +807,7 @@ func TestLocateManyNeverEvicts(t *testing.T) {
 	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
-	for i := 0; i < maxEntries; i++ {
+	for i := range maxEntries {
 		c.store(model.PID(fmt.Sprintf("%026d", i)), Location{Path: fmt.Sprintf("/x/%d", i)}, c.generation())
 	}
 	oldest := model.PID(fmt.Sprintf("%026d", 0))

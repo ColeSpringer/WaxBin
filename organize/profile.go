@@ -6,6 +6,7 @@ package organize
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -126,9 +127,7 @@ func (p Profile) Validate() error {
 // rejected here so the failure surfaces at config load, not at the first organize.
 func NewProfileSet(custom []Profile) (*ProfileSet, error) {
 	set := &ProfileSet{byName: make(map[string]Profile, len(builtins)+len(custom))}
-	for name, p := range builtins {
-		set.byName[name] = p
-	}
+	maps.Copy(set.byName, builtins)
 	for _, p := range custom {
 		// Inherit unspecified templates from the built-in of the same name, or from
 		// the native profile for a brand-new profile, so a user can override just one

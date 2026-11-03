@@ -86,7 +86,7 @@ func TestEpisodesByPIDsCrossesTheChunkBoundary(t *testing.T) {
 	eps := episodePIDsByTitle(t, st)
 	realAt := map[int]string{3: "E0", 499: "E1", 500: "E2", 1250: "E3"}
 	req := make([]model.PID, 0, 1300)
-	for i := 0; i < 1300; i++ {
+	for i := range 1300 {
 		if title, ok := realAt[i]; ok {
 			req = append(req, eps[title])
 			continue

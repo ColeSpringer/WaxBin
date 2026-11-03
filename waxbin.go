@@ -111,7 +111,11 @@ type Library struct {
 
 	// jobsWG tracks in-flight asynchronous (server-run) jobs started via startJob, so
 	// Close drains them against the still-open store instead of tearing it down mid-job.
-	jobsWG sync.WaitGroup
+	// jobsMu orders each start against Close: a job counts in jobsWG before Close sets
+	// jobsClosed, or it is refused, so the drain cannot miss one.
+	jobsMu     sync.Mutex
+	jobsClosed bool
+	jobsWG     sync.WaitGroup
 
 	// rootMu serializes runtime root-set mutations (AddRoot, RelocateRoot, RemoveRoot) so
 	// each validates against the registered set and writes its row atomically. Without
@@ -382,8 +386,11 @@ func auditProbe(r meta.Inspector, eng *decode.Engine) audit.AudioProbe {
 //
 // It first drains any in-flight server-run jobs so they finalize against the still-open
 // store; otherwise a shutdown mid-scan leaves a job row stuck "running", reclaimed as
-// crashed only on a later open.
+// crashed only on a later open. A job started once Close has begun is refused.
 func (l *Library) Close() error {
+	l.jobsMu.Lock()
+	l.jobsClosed = true
+	l.jobsMu.Unlock()
 	l.jobsWG.Wait()
 	if l.playback != nil && !l.ReadOnly() {
 		_ = l.playback.Flush(context.Background())

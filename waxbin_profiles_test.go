@@ -227,7 +227,7 @@ func TestInPlaceRootsKeepAnyProfileName(t *testing.T) {
 func TestAddRootAndSetProfilesSerialize(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
 			DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
 			Roots:    []config.Root{{Path: t.TempDir(), Mode: model.ModeManaged}},

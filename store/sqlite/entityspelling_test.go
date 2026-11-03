@@ -348,7 +348,7 @@ func TestNameLookupsReadTheNameNotTheSpelling(t *testing.T) {
 		mbReleaseGroup: "e0000000-0000-4000-8000-000000000001", mbRelease: "e0000000-0000-4000-8000-000000000002"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/d.flac", essence: "ed", content: "cd", title: "!!!",
 		titleSort: "Chk Chk Chk", artist: "Band", album: "Bangs"})
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		n := string(rune('e' + i))
 		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
 			title: "Beatles Cover " + n, artist: "Singer " + n, album: "Covers " + n})

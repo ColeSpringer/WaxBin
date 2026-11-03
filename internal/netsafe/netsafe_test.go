@@ -705,9 +705,8 @@ func TestUnansweredShowsNoURL(t *testing.T) {
 // blocked address, which no retry gets past, not as a transport failure.
 func TestAnUnreadableDialAddressIsBlocked(t *testing.T) {
 	t.Parallel()
-	var blocked *BlockedAddressError
 	err := guardDialAddr("not-an-address:80")
-	if !errors.As(err, &blocked) {
+	if _, ok := errors.AsType[*BlockedAddressError](err); !ok {
 		t.Fatalf("guard = %v, want a BlockedAddressError", err)
 	}
 	if got := waxerr.ReasonOf(unanswered("netsafe.Do", "https://feeds.example/", &url.Error{Op: "Get", Err: err})); got != ReasonBlockedAddress {

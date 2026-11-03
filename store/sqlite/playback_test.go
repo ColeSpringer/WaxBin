@@ -762,7 +762,7 @@ func TestPlayStateChangedAgreesWithDelta(t *testing.T) {
 	step("older un-mark @50", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, nil, ns(50)) })
 	step("un-mark @999", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, nil, ns(999)) })
 	// A count-only change is still a change.
-	step("reset count @1500", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, ptrInt(0), ns(1500)) })
+	step("reset count @1500", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, new(0), ns(1500)) })
 }
 
 // TestStampsUntouchedByProgressAndPlays pins the stamp scope: checkpoints, play
@@ -788,7 +788,7 @@ func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 	if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SetPlayed(ctx, "", item, false, false, ptrInt(0), nil); err != nil {
+	if _, err := st.SetPlayed(ctx, "", item, false, false, new(0), nil); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := st.PlayStateFor(ctx, "", item)

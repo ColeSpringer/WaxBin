@@ -744,8 +744,8 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 			role = ""
 		}
 	}
-	switch {
-	case role == "":
+	switch role {
+	case "":
 		enc, encRole, err := partEncodingTx(ctx, tx, bookItemID, fileID, position, f)
 		if err != nil {
 			return nil, err
@@ -767,7 +767,7 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 			return nil, err
 		}
 		role, link.demoted, link.replaced = encRole, true, true
-	case role == bookPrimaryRole || role == bookPartRole:
+	case bookPrimaryRole, bookPartRole:
 		better, err := outrankingAlternateTx(ctx, tx, bookItemID, libraryID, f, func(c altCandidate) bool {
 			return c.position == position && model.OtherEncoding(f, c.file())
 		})

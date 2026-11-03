@@ -63,7 +63,7 @@ func TestQueryUserStateFields(t *testing.T) {
 	if _, err := st.SetStar(ctx, "", ids["Alpha"], true, nil); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := st.MarkPlayed(ctx, "", ids["Alpha"], true, nil); err != nil {
 			t.Fatal(err)
 		}

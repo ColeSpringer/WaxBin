@@ -137,7 +137,7 @@ func TestProgressCoalesces(t *testing.T) {
 	const item model.PID = "item-1"
 
 	// A stream of ticks must not write at all until a flush.
-	for i := int64(0); i < 100; i++ {
+	for i := range int64(100) {
 		svc.Progress("", item, i*1000)
 	}
 	if fake.writes() != 0 {

@@ -135,8 +135,7 @@ func Classifyf(code Code, op string, err error, format string, args ...any) erro
 
 // classOr returns the class err already carries, or fallback when it carries none.
 func classOr(err error, fallback Code) Code {
-	var e *Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*Error](err); ok {
 		return e.Code
 	}
 	return fallback
@@ -145,8 +144,7 @@ func classOr(err error, fallback Code) Code {
 // ReasonOf returns the reason of the outermost Error in err's chain, which Wrap keeps
 // equal to the first one given, or "" when it has none.
 func ReasonOf(err error) Reason {
-	var e *Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*Error](err); ok {
 		return e.Reason
 	}
 	return ""

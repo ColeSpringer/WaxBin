@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -501,7 +502,7 @@ func TestStatsOnFacet(t *testing.T) {
 		t.Fatalf("want item A, got %d", len(items))
 	}
 	pb := lib.Playback()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := pb.MarkPlayed(ctx, "", items[0].PID, i == 2, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -2600,6 +2601,23 @@ func TestScanJobNamesItsLibrary(t *testing.T) {
 	}
 	if j := waitForJobDone(t, ctx, lib, jobPID); j.TargetType != "library" || j.TargetPID != pid {
 		t.Fatalf("background scan job = %+v, want library:%s", j, pid)
+	}
+}
+
+// TestStartJobRefusedOnceClosed: a job started after Close has begun is refused by the
+// library itself, so Close's drain cannot miss one that would then run on against a
+// closed store.
+func TestStartJobRefusedOnceClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), t.TempDir())
+	if err := lib.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// StartAnalyze reads nothing from the store before it starts its job.
+	_, err := lib.StartAnalyze(ctx, waxbin.AnalyzeOptions{})
+	if e, ok := errors.AsType[*waxerr.Error](err); !ok || e.Code != waxerr.CodeUnsupported || e.Op != "waxbin.startJob" {
+		t.Fatalf("start after close = %v, want the library's CodeUnsupported refusal", err)
 	}
 }
 

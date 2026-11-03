@@ -161,8 +161,7 @@ func toWireError(err error) *wireError {
 		return nil
 	}
 	we := &wireError{Code: string(waxerr.CodeOf(err)), Msg: err.Error(), Reason: string(waxerr.ReasonOf(err))}
-	var e *waxerr.Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*waxerr.Error](err); ok {
 		// The client puts the op back in front of the message, so the message is the
 		// error's own text after its op, cause included.
 		we.Op = e.Op

@@ -213,3 +213,20 @@ func TestFpcalcNoteIsItsClosingError(t *testing.T) {
 		t.Errorf("a long note is %d bytes (valid UTF-8 %v), want it cut short and whole", len(got), utf8.ValidString(got))
 	}
 }
+
+// TestTrimFpErrNamesASilentFailure: stderr holding only whitespace says no more than empty
+// stderr, so the error falls back to the exit rather than ending in "fpcalc: ".
+func TestTrimFpErrNamesASilentFailure(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"":                "exited non-zero",
+		"\n":              "exited non-zero",
+		" \r\n\t":         "exited non-zero",
+		"ERROR: bad\n\n":  "ERROR: bad",
+		"note\nERROR: x ": "ERROR: x",
+	} {
+		if got := trimFpErr(in); got != want {
+			t.Errorf("trimFpErr(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

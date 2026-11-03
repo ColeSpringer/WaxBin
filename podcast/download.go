@@ -640,16 +640,10 @@ func (s *Service) ApplyRetentionAll(ctx context.Context) (*RetentionResult, erro
 // checks only the reserve; an unsupported probe (non-Unix) skips the check.
 func (s *Service) preflightSpace(dir string, enclosureSize int64) error {
 	const op = "podcast.Download"
-	reserve := s.cfg.ReserveBytes
-	if reserve < 0 {
-		reserve = 0
-	}
+	reserve := max(s.cfg.ReserveBytes, 0)
 	// A hostile feed can declare a huge (or negative) enclosure length; clamp it and
 	// use a saturating add so an overflow never wraps negative and skips the check.
-	size := enclosureSize
-	if size < 0 {
-		size = 0
-	}
+	size := max(enclosureSize, 0)
 	need := reserve + size
 	if need < reserve { // int64 overflow: treat as "definitely too big"
 		return waxerr.New(waxerr.CodeIO, op, "declared enclosure size exceeds addressable space")
@@ -820,29 +814,7 @@ func sanitizeSegment(s string) string {
 	}
 	// Escape a Windows reserved device name (CON, NUL, COM1, ...) so a podcast whose
 	// title sanitizes to one can still be a directory cross-platform.
-	if isReservedName(out) {
-		out += "_"
-	}
-	return out
-}
-
-// reservedNames are the Windows device names that cannot be a path segment.
-var reservedNames = map[string]bool{
-	"con": true, "prn": true, "aux": true, "nul": true,
-	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
-	"com6": true, "com7": true, "com8": true, "com9": true,
-	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
-	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
-}
-
-// isReservedName reports whether s (case-insensitively, ignoring any extension) is a
-// Windows reserved device name.
-func isReservedName(s string) bool {
-	base := strings.ToLower(s)
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	return reservedNames[base]
+	return pathx.EscapeReserved(out)
 }
 
 // onDiskSize returns a file's size in bytes, or 0 when it cannot be stat'd.

@@ -27,8 +27,8 @@ import (
 func coverPNG(t *testing.T, seed int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
-	for y := 0; y < 8; y++ {
-		for x := 0; x < 8; x++ {
+	for y := range 8 {
+		for x := range 8 {
 			img.Set(x, y, color.RGBA{uint8(x * seed), uint8(y), uint8(seed), 255})
 		}
 	}
@@ -250,8 +250,8 @@ func sizedCoverPNG(t *testing.T, w, h int) []byte {
 func sizedCover(t *testing.T, format string, w, h int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			img.Set(x, y, color.RGBA{uint8(x % 256), uint8(y % 256), 96, 255})
 		}
 	}

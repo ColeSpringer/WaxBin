@@ -159,7 +159,7 @@ func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 	if !opts.WriteBack || entityType != model.ArtAlbum {
 		return nil
 	}
-	return l.writeBackEntityArt(ctx, entityType, entityPID, stored)
+	return l.writeBackAlbumArt(ctx, entityPID, stored)
 }
 
 // ArtLocked reports whether an entity's slot in one role is held against an automatic
@@ -207,17 +207,17 @@ func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, cover
 		meta.PictureEdit{Clear: len(cover) == 0, Data: cover}, model.OwedArt)
 }
 
-// writeBackEntityArt fans a committed album cover, the bytes its set handed back, across
+// writeBackAlbumArt fans a committed album cover, the bytes its set handed back, across
 // every member track's file. SetEntityArt calls it for an album alone: an artist, release
 // group, genre, podcast, or playlist cover stays durable in the catalog with no on-disk
 // target.
-func (l *Library) writeBackEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, cover []byte) error {
+func (l *Library) writeBackAlbumArt(ctx context.Context, albumPID model.PID, cover []byte) error {
 	edits := artEditDesc(cover)
-	files, err := l.store.EntityMemberFiles(ctx, model.MergeAlbum, entityPID)
+	files, err := l.store.EntityMemberFiles(ctx, model.MergeAlbum, albumPID)
 	if err != nil {
-		return writeBackSetupFailure(entityPID, edits, err)
+		return writeBackSetupFailure(albumPID, edits, err)
 	}
-	return l.writeBackPicture(ctx, "waxbin.SetEntityArt", entityPID, edits, files,
+	return l.writeBackPicture(ctx, "waxbin.SetEntityArt", albumPID, edits, files,
 		meta.PictureEdit{Clear: len(cover) == 0, Data: cover}, model.OwedAlbumArt)
 }
 

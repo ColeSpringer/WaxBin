@@ -343,8 +343,7 @@ func TestSetItemKindInAReadOnlyLibrary(t *testing.T) {
 
 	rep, err := lib.SetItemKind(ctx, []model.PID{pid}, model.KindBook, waxbin.KindOptions{WriteBack: true})
 	if err != nil {
-		var wb *waxbin.WriteBackError
-		if errors.As(err, &wb) {
+		if _, ok := errors.AsType[*waxbin.WriteBackError](err); ok {
 			t.Fatalf("set kind returned the write-back as an error (%v); the report carries it", err)
 		}
 		t.Fatalf("set kind: %v", err)

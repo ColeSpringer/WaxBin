@@ -150,7 +150,7 @@ func (f *foldFS) find(dir, name string) (string, bool) {
 // resolve maps a path to the stored spelling of each of its parts below "/".
 func (f *foldFS) resolve(p string) (string, bool) {
 	cur := "/"
-	for _, part := range strings.Split(strings.TrimPrefix(filepath.ToSlash(p), "/"), "/") {
+	for part := range strings.SplitSeq(strings.TrimPrefix(filepath.ToSlash(p), "/"), "/") {
 		if part == "" {
 			continue
 		}
@@ -375,8 +375,7 @@ func BenchmarkOccupantFlatFolder(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		ls := NewLister()
 		for i := range n {
 			if _, _, err := ls.Occupant(filepath.Join(dir, "track "+strconv.Itoa(i)+".mp3"), filepath.Join(dir, "Song "+strconv.Itoa(i)+".mp3")); err != nil {

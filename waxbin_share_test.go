@@ -416,10 +416,7 @@ func TestResolveRefWithAcceptsBooksSharingTheRefsISBN(t *testing.T) {
 	rawExec(t, db, "UPDATE book SET isbn = ?, isbn_key = ? WHERE item_id IN (SELECT id FROM playable_item WHERE pid IN (?, ?))",
 		isbn, identity.ISBNKey(isbn), string(one), string(two))
 	ref := model.PortableRef{Kind: model.KindBook, ISBN: "9780306406157"}
-	low := one
-	if two < low {
-		low = two
-	}
+	low := min(two, one)
 	m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{AcceptSameRecording: true})
 	if err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchStrongID || m.Candidates != 2 {
 		t.Fatalf("ResolveRefWith(two books with the ref's ISBN) = %+v (err %v), want %s by strong id of 2", m, err, low)
@@ -507,10 +504,7 @@ func TestResolveRefWithAcceptsAFingerprintTie(t *testing.T) {
 	if item, _, err := libB.ResolveRef(ctx, ref); err != nil || item != nil {
 		t.Fatalf("ResolveRef(fingerprint tie) = %v (err %v), want declined", item, err)
 	}
-	low := wave
-	if flac < low {
-		low = flac
-	}
+	low := min(flac, wave)
 	m, err := libB.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{AcceptSameRecording: true})
 	if err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchFingerprint || m.Candidates != 2 ||
 		len(m.Tied) != 2 || m.Tied[0].PID != low || m.Tied[1].PID == low {

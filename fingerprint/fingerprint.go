@@ -89,7 +89,7 @@ func Compute(pcm *decode.PCM) *Fingerprint {
 	im := make([]float64, frameSize)
 
 	for start := 0; start+frameSize <= len(mono); start += hopSize {
-		for i := 0; i < frameSize; i++ {
+		for i := range frameSize {
 			re[i] = float64(mono[start+i]) * window[i]
 			im[i] = 0
 		}
@@ -110,7 +110,7 @@ func Compute(pcm *decode.PCM) *Fingerprint {
 // between the previous and current frame.
 func subFingerprint(prev, cur *[numBands]float64) uint32 {
 	var v uint32
-	for f := 0; f < numBands-1; f++ {
+	for f := range numBands - 1 {
 		d := (cur[f] - cur[f+1]) - (prev[f] - prev[f+1])
 		if d > 0 {
 			v |= 1 << uint(f)
@@ -122,7 +122,7 @@ func subFingerprint(prev, cur *[numBands]float64) uint32 {
 // bandEnergies sums the magnitude spectrum into log-spaced bands (uses the
 // lower half of the spectrum; the upper half mirrors it for real input).
 func bandEnergies(re, im []float64, edges [numBands + 1]int, out *[numBands]float64) {
-	for b := 0; b < numBands; b++ {
+	for b := range numBands {
 		var sum float64
 		for k := edges[b]; k < edges[b+1]; k++ {
 			sum += math.Hypot(re[k], im[k])

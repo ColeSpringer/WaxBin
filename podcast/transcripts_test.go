@@ -16,7 +16,7 @@ func TestTranscriptToTextSRT(t *testing.T) {
 		t.Fatalf("cue text lost: %q", got)
 	}
 	// The bare cue numbers are dropped too.
-	for _, line := range strings.Split(got, "\n") {
+	for line := range strings.SplitSeq(got, "\n") {
 		if line == "1" || line == "2" {
 			t.Fatalf("cue number survived: %q", got)
 		}

@@ -2317,7 +2317,7 @@ func (s *Store) enrichmentWriteback(ctx context.Context, scope *model.EnrichScop
 			values = []string{asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description}
 		}
 		enriched := make(map[string]bool, 8)
-		for _, f := range strings.Split(written, ",") {
+		for f := range strings.SplitSeq(written, ",") {
 			enriched[f] = true
 		}
 		// A named field with an empty value means the provenance row outlived the value (a
@@ -2625,7 +2625,7 @@ func leadingYear(v string) string {
 	if len(v) < 4 {
 		return v
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if v[i] < '0' || v[i] > '9' {
 			return v
 		}

@@ -7,9 +7,6 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-func ptrInt(v int) *int    { return &v }
-func ptrNS(v int64) *int64 { return &v }
-
 // TestSetPlayedUndoesAPlay covers the verb's reason for existing, across all
 // three play-count modes: nil keeps the count, &0 resets it, &n sets it exactly.
 func TestSetPlayedUndoesAPlay(t *testing.T) {
@@ -21,8 +18,8 @@ func TestSetPlayedUndoesAPlay(t *testing.T) {
 		want      int
 	}{
 		{"count untouched", nil, 2},
-		{"count reset", ptrInt(0), 0},
-		{"count set exactly", ptrInt(7), 7},
+		{"count reset", new(0), 0},
+		{"count set exactly", new(7), 7},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, lib := entityFixture(t)
@@ -93,7 +90,7 @@ func TestSetPlayedKeepsCountConsistentWithPlayed(t *testing.T) {
 	t.Run("an explicit count still wins", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
-		if _, err := st.SetPlayed(ctx, "", item, true, false, ptrInt(9), nil); err != nil {
+		if _, err := st.SetPlayed(ctx, "", item, true, false, new(9), nil); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := st.PlayStateFor(ctx, "", item)
@@ -105,7 +102,7 @@ func TestSetPlayedKeepsCountConsistentWithPlayed(t *testing.T) {
 	t.Run("an existing count is untouched", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +123,7 @@ func TestSetPlayedRejectsInvalidInput(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if _, err := st.SetPlayed(ctx, "", item, true, false, ptrInt(-1), nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetPlayed(ctx, "", item, true, false, new(-1), nil); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("negative play count: want CodeInvalid, got %v (code %s)", err, waxerr.CodeOf(err))
 	}
 	// Unreachable through MarkPlayed, which hardcodes played=1; two independent
@@ -135,7 +132,7 @@ func TestSetPlayedRejectsInvalidInput(t *testing.T) {
 		t.Errorf("finished without played: want CodeInvalid, got %v (code %s)", err, waxerr.CodeOf(err))
 	}
 	// The other half of the same invariant: played means at least one play.
-	if _, err := st.SetPlayed(ctx, "", item, true, false, ptrInt(0), nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetPlayed(ctx, "", item, true, false, new(0), nil); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("played with a zero count: want CodeInvalid, got %v (code %s)", err, waxerr.CodeOf(err))
 	}
 	// Neither rejection wrote anything.
@@ -169,7 +166,7 @@ func TestSetPlayedNoOpIsSilent(t *testing.T) {
 	stamped, _ := st.PlayStateFor(ctx, "", item)
 	before = playStateDeltas(t, st)
 
-	changed, err = st.SetPlayed(ctx, "", item, true, true, ptrInt(1), nil)
+	changed, err = st.SetPlayed(ctx, "", item, true, true, new(1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +191,7 @@ func TestSetPlayedAsOfRecordedTime(t *testing.T) {
 
 	// A NULL prior stamp carries no ordering, so the first recorded-time change
 	// applies and lands in recorded time.
-	changed, err := st.SetPlayed(ctx, "", item, true, true, ptrInt(1), ptrNS(1000))
+	changed, err := st.SetPlayed(ctx, "", item, true, true, new(1), new(int64(1000)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +205,7 @@ func TestSetPlayedAsOfRecordedTime(t *testing.T) {
 
 	// An older replay loses, and so does a same-time one.
 	for _, at := range []int64{500, 1000} {
-		changed, err := st.SetPlayed(ctx, "", item, false, false, nil, ptrNS(at))
+		changed, err := st.SetPlayed(ctx, "", item, false, false, nil, new(at))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -222,7 +219,7 @@ func TestSetPlayedAsOfRecordedTime(t *testing.T) {
 	}
 
 	// A newer one wins.
-	if changed, err = st.SetPlayed(ctx, "", item, false, false, nil, ptrNS(2000)); err != nil || !changed {
+	if changed, err = st.SetPlayed(ctx, "", item, false, false, nil, new(int64(2000))); err != nil || !changed {
 		t.Fatalf("newer replay: changed=%v err=%v", changed, err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -242,10 +239,10 @@ func TestSetPlayedStampScope(t *testing.T) {
 	t.Run("a count-only change leaves the stamp", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
-		if _, err := st.SetPlayed(ctx, "", item, true, true, ptrInt(3), ptrNS(1000)); err != nil {
+		if _, err := st.SetPlayed(ctx, "", item, true, true, new(3), new(int64(1000))); err != nil {
 			t.Fatal(err)
 		}
-		changed, err := st.SetPlayed(ctx, "", item, true, true, ptrInt(5), ptrNS(2000))
+		changed, err := st.SetPlayed(ctx, "", item, true, true, new(5), new(int64(2000)))
 		if err != nil || !changed {
 			t.Fatalf("count-only change: changed=%v err=%v", changed, err)
 		}
@@ -257,7 +254,7 @@ func TestSetPlayedStampScope(t *testing.T) {
 			t.Errorf("stamp = %d, want the flag-change time 1000 left in place", got.PlayedChangedAt)
 		}
 		// So a flag change recorded between the two still applies.
-		if changed, err := st.SetPlayed(ctx, "", item, false, false, nil, ptrNS(1500)); err != nil || !changed {
+		if changed, err := st.SetPlayed(ctx, "", item, false, false, nil, new(int64(1500))); err != nil || !changed {
 			t.Errorf("a flag change at 1500 was refused: changed=%v err=%v", changed, err)
 		}
 	})
@@ -266,7 +263,7 @@ func TestSetPlayedStampScope(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
 		const future = int64(1) << 62
-		if _, err := st.SetPlayed(ctx, "", item, true, true, nil, ptrNS(future)); err != nil {
+		if _, err := st.SetPlayed(ctx, "", item, true, true, nil, new(future)); err != nil {
 			t.Fatal(err)
 		}
 		// An interactive un-mark stamps at server-now, far below the future stamp.
@@ -299,7 +296,7 @@ func TestMarkPlayedOrdersAgainstSetPlayed(t *testing.T) {
 		t.Fatal("MarkPlayed did not stamp played_changed_at on a row it created")
 	}
 
-	changed, err := st.SetPlayed(ctx, "", item, false, false, nil, ptrNS(played.PlayedChangedAt-1))
+	changed, err := st.SetPlayed(ctx, "", item, false, false, nil, new(played.PlayedChangedAt-1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +348,7 @@ func TestMarkPlayedStampIsMonotonic(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
 		const future = int64(1) << 62
-		if _, err := st.SetPlayed(ctx, "", item, true, false, nil, ptrNS(future)); err != nil {
+		if _, err := st.SetPlayed(ctx, "", item, true, false, nil, new(future)); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {

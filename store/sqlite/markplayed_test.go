@@ -14,7 +14,7 @@ func TestMarkPlayedAsOfRecordedTime(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.MarkPlayed(ctx, "", item, false, ptrNS(1000)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, new(int64(1000))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -23,7 +23,7 @@ func TestMarkPlayedAsOfRecordedTime(t *testing.T) {
 		t.Fatalf("first recorded play = %+v, want count 1, played, every stamp at 1000", got)
 	}
 
-	if err := st.MarkPlayed(ctx, "", item, true, ptrNS(3000)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, new(int64(3000))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -33,7 +33,7 @@ func TestMarkPlayedAsOfRecordedTime(t *testing.T) {
 	}
 
 	// An older play fills in history: it is counted, and no stamp moves backwards.
-	if err := st.MarkPlayed(ctx, "", item, false, ptrNS(2000)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, new(int64(2000))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -61,15 +61,15 @@ func TestMarkPlayedAsOfDoesNotResurrectAnUndo(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.MarkPlayed(ctx, "", item, true, ptrNS(1000)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, new(int64(1000))); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := st.SetPlayed(ctx, "", item, false, false, nil, ptrNS(2000)); err != nil || !changed {
+	if changed, err := st.SetPlayed(ctx, "", item, false, false, nil, new(int64(2000))); err != nil || !changed {
 		t.Fatalf("un-mark: changed=%v err=%v", changed, err)
 	}
 
 	before := playStateDeltas(t, st)
-	if err := st.MarkPlayed(ctx, "", item, true, ptrNS(1500)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, new(int64(1500))); err != nil {
 		t.Fatal(err)
 	}
 	if playStateDeltas(t, st) != before+1 {
@@ -84,7 +84,7 @@ func TestMarkPlayedAsOfDoesNotResurrectAnUndo(t *testing.T) {
 	}
 
 	// A play recorded after the un-mark is the newer change and sets the flags.
-	if err := st.MarkPlayed(ctx, "", item, true, ptrNS(2500)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, new(int64(2500))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -102,7 +102,7 @@ func TestMarkPlayedAsOfZeroIsServerNow(t *testing.T) {
 	item := seedItem(t, st, lib)
 	before := nowNS()
 
-	if err := st.MarkPlayed(ctx, "", item, false, ptrNS(0)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, new(int64(0))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -120,7 +120,7 @@ func TestSetProgressAsOfRecordedTime(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.SetProgress(ctx, "", item, 5000, ptrNS(1000)); err != nil {
+	if err := st.SetProgress(ctx, "", item, 5000, new(int64(1000))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -130,7 +130,7 @@ func TestSetProgressAsOfRecordedTime(t *testing.T) {
 
 	// An older checkpoint still lands its position (the engine does not order resume
 	// points), but must not move the stamp back.
-	if err := st.SetProgress(ctx, "", item, 9000, ptrNS(500)); err != nil {
+	if err := st.SetProgress(ctx, "", item, 9000, new(int64(500))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -157,13 +157,13 @@ func TestMarkPlayedSameTimeAsFlagChangeApplies(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.MarkPlayed(ctx, "", item, true, ptrNS(1000)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, new(int64(1000))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SetPlayed(ctx, "", item, false, false, ptrInt(0), ptrNS(2000)); err != nil {
+	if _, err := st.SetPlayed(ctx, "", item, false, false, new(0), new(int64(2000))); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkPlayed(ctx, "", item, false, ptrNS(2000)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, new(int64(2000))); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -184,7 +184,7 @@ func TestPlaybackRecencyClampsFutureStamp(t *testing.T) {
 	const future = int64(1) << 62
 	before := nowNS()
 
-	if err := st.MarkPlayed(ctx, "", item, false, ptrNS(future)); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, new(future)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -203,7 +203,7 @@ func TestPlaybackRecencyClampsFutureStamp(t *testing.T) {
 		t.Errorf("a live play after a future-stamped one did not advance recency: %+v -> %+v", got, after)
 	}
 
-	if err := st.SetProgress(ctx, "", item, 100, ptrNS(future)); err != nil {
+	if err := st.SetProgress(ctx, "", item, 100, new(future)); err != nil {
 		t.Fatal(err)
 	}
 	prog, _ := st.PlayStateFor(ctx, "", item)

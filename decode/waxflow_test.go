@@ -235,8 +235,8 @@ func TestMixMonoMatchesPCMMono(t *testing.T) {
 		for c := range chans {
 			chans[c] = make([]float32, frames)
 		}
-		for i := 0; i < frames; i++ {
-			for c := 0; c < nch; c++ {
+		for i := range frames {
+			for c := range nch {
 				v := float32(math.Sin(float64(i)*0.01*float64(c+1)) * 0.7)
 				inter[i*nch+c] = v
 				chans[c][i] = v

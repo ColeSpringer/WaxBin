@@ -26,6 +26,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -1220,12 +1221,7 @@ func (st *runState) live(t TargetType, c Capability) bool {
 // unasked. The provider that dropped out on this target's own failure is not among them:
 // it was asked.
 func skippedServing(skipped []Provider, serves func(Provider) bool) bool {
-	for _, p := range skipped {
-		if serves(p) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(skipped, serves)
 }
 
 // halvesNeed narrows an art backfill's capabilities to the halves one target has due.
@@ -2332,9 +2328,7 @@ func (s *Service) gatherArt(ctx context.Context, st *runState, req Request, aux 
 			fromGroup, frontProvider = true, p.Name()
 		}
 		offered := make(map[model.ArtRole]*model.ArtImage, len(cand.Art)+1)
-		for role, img := range cand.Art {
-			offered[role] = img
-		}
+		maps.Copy(offered, cand.Art)
 		// "Present" means usable: a role-map front carrying no bytes must not
 		// suppress the Cover alias and then be dropped by the empty-data skip below,
 		// which would lose a cover the provider did answer with. The alias belongs to a

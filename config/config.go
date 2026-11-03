@@ -123,10 +123,10 @@ type Config struct {
 	StampItemPID bool `json:"stamp_item_pid,omitempty"`
 
 	// Podcasts configures the podcast engine: download directory and network policy.
-	Podcasts PodcastConfig `json:"podcasts,omitempty"`
+	Podcasts PodcastConfig `json:"podcasts"`
 
 	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
-	Enrichment EnrichConfig `json:"enrichment,omitempty"`
+	Enrichment EnrichConfig `json:"enrichment"`
 
 	// FpcalcPath names the fpcalc binary (Chromaprint) when it is not on PATH; empty looks
 	// it up there.

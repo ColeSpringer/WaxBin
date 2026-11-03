@@ -1511,7 +1511,7 @@ func TestMaintenanceRefusedWhileJobRuns(t *testing.T) {
 	// Enough distinct files that the scan is unmistakably still running when we check
 	// (StartScan returns the moment the job row exists, before the work processes any
 	// file, so the scan has all of these still to do).
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		writeFile(t, filepath.Join(root, fmt.Sprintf("t%02d.mp3", i)),
 			testaudio.BuildMP3WithAudio(fmt.Sprintf("S%d", i), "Artist", "Album", i+1, testaudio.AudioWithSeed(byte(i+1))))
 	}
@@ -1711,7 +1711,7 @@ func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
 		_ = lib.Close()
 		t.Fatalf("scan a: %v", err)
 	}
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		if _, err := lib.CreateUser(ctx, fmt.Sprintf("FromA%d", i)); err != nil {
 			_ = lib.Close()
 			t.Fatalf("create user in a: %v", err)

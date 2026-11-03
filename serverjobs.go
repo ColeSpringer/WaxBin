@@ -43,11 +43,15 @@ func (l *Library) startJob(ctx context.Context, spec jobs.Spec, work jobFn) (mod
 	}
 	ch := make(chan outcome, 1)
 	// Track the goroutine so Close drains it: a shutdown must let the job finalize
-	// against the still-open store rather than close it out from under the job. Add
-	// before the goroutine starts so a concurrent Close cannot miss it.
-	l.jobsWG.Add(1)
-	go func() {
-		defer l.jobsWG.Done()
+	// against the still-open store rather than close it out from under the job. The
+	// count and the closed check share jobsMu, so a start that loses the race to Close
+	// is refused instead of running on after the drain.
+	l.jobsMu.Lock()
+	if l.jobsClosed {
+		l.jobsMu.Unlock()
+		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.startJob", "the library is closed")
+	}
+	l.jobsWG.Go(func() {
 		ran := false
 		_, err := l.jobs.Run(ctx, spec, func(jctx context.Context, h *jobs.Handle) error {
 			// The job row now exists: hand its PID back so the submit call can return
@@ -60,7 +64,8 @@ func (l *Library) startJob(ctx context.Context, spec jobs.Spec, work jobFn) (mod
 		if !ran {
 			ch <- outcome{err: err}
 		}
-	}()
+	})
+	l.jobsMu.Unlock()
 	res := <-ch
 	return res.pid, res.err
 }

@@ -858,10 +858,8 @@ func TestPIDAdoptionConflictMintsFresh(t *testing.T) {
 func hasEdit(edits []meta.TagEdit, key, val string) bool {
 	for _, e := range edits {
 		if e.Key == key {
-			for _, v := range e.Values {
-				if v == val {
-					return true
-				}
+			if slices.Contains(e.Values, val) {
+				return true
 			}
 		}
 	}

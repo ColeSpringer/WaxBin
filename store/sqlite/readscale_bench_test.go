@@ -107,9 +107,7 @@ func BenchmarkReadScaling(b *testing.B) {
 			if rc.writes {
 				stop := make(chan struct{})
 				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					tick := time.NewTicker(2 * time.Millisecond)
 					defer tick.Stop()
 					for n := int64(0); ; n++ {
@@ -123,7 +121,7 @@ func BenchmarkReadScaling(b *testing.B) {
 							}
 						}
 					}
-				}()
+				})
 				defer func() { close(stop); wg.Wait() }()
 			}
 			var next atomic.Int64

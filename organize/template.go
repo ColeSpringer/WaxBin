@@ -281,10 +281,7 @@ func renderField(tmpl string, i int, inGroup bool, fields map[string]fieldVal, b
 	if optional {
 		token = token[:len(token)-1]
 	}
-	name, spec := token, ""
-	if k := strings.IndexByte(token, ':'); k >= 0 {
-		name, spec = token[:k], token[k+1:]
-	}
+	name, spec, _ := strings.Cut(token, ":")
 	fv, ok := fields[name]
 	if !ok {
 		return "", false, 0, waxerr.New(waxerr.CodeInvalid, op, "unknown template field {"+name+"}")

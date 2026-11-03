@@ -295,7 +295,7 @@ func compileGroup(nodes []Node, joiner, empty string, fields Fields, sb *strings
 	sb.WriteString("(")
 	for i, child := range nodes {
 		if i > 0 {
-			sb.WriteString(" " + joiner + " ")
+			writeAll(sb, " ", joiner, " ")
 		}
 		if err := compileNode(child, fields, sb, args, nu, nowNS); err != nil {
 			return err
@@ -351,22 +351,22 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 
 	switch c.Op {
 	case OpIs:
-		sb.WriteString(col.Expr + " = ?")
+		writeAll(sb, col.Expr, " = ?")
 		*args = append(*args, c.Value)
 	case OpIsNot:
-		sb.WriteString(col.Expr + " <> ?")
+		writeAll(sb, col.Expr, " <> ?")
 		*args = append(*args, c.Value)
 	case OpGt, OpAfter:
-		sb.WriteString(col.Expr + " > ?")
+		writeAll(sb, col.Expr, " > ?")
 		*args = append(*args, c.Value)
 	case OpLt, OpBefore:
-		sb.WriteString(col.Expr + " < ?")
+		writeAll(sb, col.Expr, " < ?")
 		*args = append(*args, c.Value)
 	case OpGte:
-		sb.WriteString(col.Expr + " >= ?")
+		writeAll(sb, col.Expr, " >= ?")
 		*args = append(*args, c.Value)
 	case OpLte:
-		sb.WriteString(col.Expr + " <= ?")
+		writeAll(sb, col.Expr, " <= ?")
 		*args = append(*args, c.Value)
 	case OpContains, OpStartsWith, OpEndsWith:
 		p, err := likeArg(c)
@@ -380,27 +380,27 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 			return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 				fmt.Sprintf("inTheRange on %q needs exactly 2 values", c.Field))
 		}
-		sb.WriteString(col.Expr + " BETWEEN ? AND ?")
+		writeAll(sb, col.Expr, " BETWEEN ? AND ?")
 		*args = append(*args, c.Values[0], c.Values[1])
 	case OpIn, OpNotIn:
 		if c.Op == OpNotIn {
-			sb.WriteString(col.Expr + " NOT")
+			writeAll(sb, col.Expr, " NOT")
 		} else {
 			sb.WriteString(col.Expr)
 		}
-		sb.WriteString(" IN " + placeholderList(len(c.Values)))
+		writeAll(sb, " IN ", placeholderList(len(c.Values)))
 		*args = append(*args, c.Values...)
 	case OpIsPresent:
 		if col.Kind == KindText {
-			sb.WriteString("(" + col.Expr + " IS NOT NULL AND " + col.Expr + " <> '')")
+			writeAll(sb, "(", col.Expr, " IS NOT NULL AND ", col.Expr, " <> '')")
 		} else {
-			sb.WriteString(col.Expr + " IS NOT NULL")
+			writeAll(sb, col.Expr, " IS NOT NULL")
 		}
 	case OpIsMissing:
 		if col.Kind == KindText {
-			sb.WriteString("(" + col.Expr + " IS NULL OR " + col.Expr + " = '')")
+			writeAll(sb, "(", col.Expr, " IS NULL OR ", col.Expr, " = '')")
 		} else {
-			sb.WriteString(col.Expr + " IS NULL")
+			writeAll(sb, col.Expr, " IS NULL")
 		}
 	case OpInTheLast, OpNotInTheLast:
 		if col.Kind != KindTime {
@@ -412,11 +412,11 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 			return err
 		}
 		if c.Op == OpInTheLast {
-			sb.WriteString(col.Expr + " >= ?")
+			writeAll(sb, col.Expr, " >= ?")
 		} else {
 			// The complement includes NULL: "not played in the last 30 days"
 			// includes never-played (see the store field map's NULL contract).
-			sb.WriteString("(" + col.Expr + " IS NULL OR " + col.Expr + " < ?)")
+			writeAll(sb, "(", col.Expr, " IS NULL OR ", col.Expr, " < ?)")
 		}
 		*args = append(*args, nowNS-window)
 	default:
@@ -442,17 +442,17 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) error {
 	switch c.Op {
 	case OpIs:
-		sb.WriteString(col.Expr + " = " + col.ValueSub)
+		writeAll(sb, col.Expr, " = ", col.ValueSub)
 		*args = append(*args, c.Value)
 	case OpIsNot:
-		sb.WriteString(col.Expr + " <> " + col.ValueSub)
+		writeAll(sb, col.Expr, " <> ", col.ValueSub)
 		*args = append(*args, c.Value)
 	case OpIn:
 		if len(c.Values) == 1 {
 			// SQLite reads `x IN ((SELECT ...))` as the subquery form rather than a
 			// one-element list, and that plans as a scan. Arity 1 emits exactly what `is`
 			// emits, which is indexed and means the same thing.
-			sb.WriteString(col.Expr + " = " + col.ValueSub)
+			writeAll(sb, col.Expr, " = ", col.ValueSub)
 			*args = append(*args, c.Values[0])
 			return nil
 		}
@@ -465,7 +465,7 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 		for i := range subs {
 			subs[i] = col.ValueSub
 		}
-		sb.WriteString(col.Expr + " IN (" + strings.Join(subs, ", ") + ")")
+		writeAll(sb, col.Expr, " IN (", strings.Join(subs, ", "), ")")
 		*args = append(*args, c.Values...)
 	case OpNotIn:
 		// A deny-list (see Column.ValueSub). IS NOT is null-safe, so a stale pid lowers
@@ -473,12 +473,12 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 		// to UNKNOWN; the IS NULL disjunct then covers a valueless row meeting one. The
 		// outer parens are required: compileGroup joins children with a bare AND, so a
 		// fragment holding a top-level OR must parenthesize itself.
-		sb.WriteString("(" + col.Expr + " IS NULL OR (")
+		writeAll(sb, "(", col.Expr, " IS NULL OR (")
 		for i := range c.Values {
 			if i > 0 {
 				sb.WriteString(" AND ")
 			}
-			sb.WriteString(col.Expr + " IS NOT " + col.ValueSub)
+			writeAll(sb, col.Expr, " IS NOT ", col.ValueSub)
 		}
 		sb.WriteString("))")
 		*args = append(*args, c.Values...)
@@ -486,9 +486,9 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 		// No value to lower: the id column being non-NULL is the whole question, and
 		// it beats the unlowered form, which had to run a subquery per row to
 		// discover the same thing.
-		sb.WriteString(col.Expr + " IS NOT NULL")
+		writeAll(sb, col.Expr, " IS NOT NULL")
 	case OpIsMissing:
-		sb.WriteString(col.Expr + " IS NULL")
+		writeAll(sb, col.Expr, " IS NULL")
 	default:
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 			fmt.Sprintf("operator %q not supported on an identity field %q", c.Op, c.Field))
@@ -541,26 +541,26 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 	const nonEmpty = " <> ''"
 	switch c.Op {
 	case OpIsPresent:
-		sb.WriteString("EXISTS (" + set.Sub + " AND " + set.ValueExpr + nonEmpty + ")")
+		writeAll(sb, "EXISTS (", set.Sub, " AND ", set.ValueExpr, nonEmpty, ")")
 		*args = append(*args, set.Args...)
 	case OpIsMissing:
-		sb.WriteString("NOT EXISTS (" + set.Sub + " AND " + set.ValueExpr + nonEmpty + ")")
+		writeAll(sb, "NOT EXISTS (", set.Sub, " AND ", set.ValueExpr, nonEmpty, ")")
 		*args = append(*args, set.Args...)
 	case OpIs:
-		sb.WriteString("EXISTS (" + set.Sub + " AND " + set.ValueExpr + " = ?)")
+		writeAll(sb, "EXISTS (", set.Sub, " AND ", set.ValueExpr, " = ?)")
 		*args = append(*args, set.Args...)
 		*args = append(*args, c.Value)
 	case OpIsNot:
-		sb.WriteString("NOT EXISTS (" + set.Sub + " AND " + set.ValueExpr + " = ?)")
+		writeAll(sb, "NOT EXISTS (", set.Sub, " AND ", set.ValueExpr, " = ?)")
 		*args = append(*args, set.Args...)
 		*args = append(*args, c.Value)
 	case OpIn:
-		sb.WriteString("EXISTS (" + set.Sub + " AND " + set.ValueExpr + " IN " + placeholderList(len(c.Values)) + ")")
+		writeAll(sb, "EXISTS (", set.Sub, " AND ", set.ValueExpr, " IN ", placeholderList(len(c.Values)), ")")
 		*args = append(*args, set.Args...)
 		*args = append(*args, c.Values...)
 	case OpNotIn:
 		// Inherits isNot's deny-list semantics: an item carrying no such tag matches.
-		sb.WriteString("NOT EXISTS (" + set.Sub + " AND " + set.ValueExpr + " IN " + placeholderList(len(c.Values)) + ")")
+		writeAll(sb, "NOT EXISTS (", set.Sub, " AND ", set.ValueExpr, " IN ", placeholderList(len(c.Values)), ")")
 		*args = append(*args, set.Args...)
 		*args = append(*args, c.Values...)
 	case OpContains, OpStartsWith, OpEndsWith:
@@ -568,7 +568,7 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 		if err != nil {
 			return err
 		}
-		sb.WriteString("EXISTS (" + set.Sub + " AND " + likeExpr(set.ValueExpr) + ")")
+		writeAll(sb, "EXISTS (", set.Sub, " AND ", likeExpr(set.ValueExpr), ")")
 		*args = append(*args, set.Args...)
 		*args = append(*args, p)
 	default:
@@ -585,7 +585,7 @@ func compileMemberCond(c Cond, m *MemberColumn, sb *strings.Builder, args *[]any
 		if not {
 			op = " NOT IN ("
 		}
-		sb.WriteString(m.IDExpr + op + m.Sub + cond + ")")
+		writeAll(sb, m.IDExpr, op, m.Sub, cond, ")")
 	}
 	switch c.Op {
 	case OpIs, OpIsNot:
@@ -627,6 +627,13 @@ func checkSetValues(c Cond) error {
 		}
 	}
 	return nil
+}
+
+// writeAll writes parts to sb in order, without joining them into one string first.
+func writeAll(sb *strings.Builder, parts ...string) {
+	for _, p := range parts {
+		sb.WriteString(p)
+	}
 }
 
 // placeholderList renders "(?, ?, ?)" for n values; n is always >= 1, since an empty

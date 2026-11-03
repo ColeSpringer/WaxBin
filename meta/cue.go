@@ -352,8 +352,7 @@ func cueTrackDesc(ct CueTrack, reason string) string {
 // cueRefusal renders upstream's refusal without the "cue: " it opens with, which
 // says nothing here.
 func cueRefusal(err error) string {
-	var fe *flowerr.Error
-	if errors.As(err, &fe) {
+	if fe, ok := errors.AsType[*flowerr.Error](err); ok {
 		return strings.TrimPrefix(fe.Error(), "cue: ")
 	}
 	return err.Error()

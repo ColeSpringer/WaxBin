@@ -91,7 +91,7 @@ func (a *Accumulator) Frames() int64 { return a.frames }
 // this only arises if oversample ever stops being.)
 func (a *Accumulator) halve() {
 	half := (len(a.coarse) + 1) / 2
-	for i := 0; i < half; i++ {
+	for i := range half {
 		v := a.coarse[2*i]
 		if j := 2*i + 1; j < len(a.coarse) && a.coarse[j] > v {
 			v = a.coarse[j]

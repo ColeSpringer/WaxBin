@@ -519,21 +519,10 @@ func fitDimensions(w, h, maxDim int) (int, int) {
 	if w <= 0 || h <= 0 {
 		return 1, 1
 	}
-	long := w
-	if h > w {
-		long = h
-	}
+	long := max(h, w)
 	if long <= maxDim {
 		return w, h // already within the box: do not upscale
 	}
 	scale := float64(maxDim) / float64(long)
-	nw := int(float64(w)*scale + 0.5)
-	nh := int(float64(h)*scale + 0.5)
-	if nw < 1 {
-		nw = 1
-	}
-	if nh < 1 {
-		nh = 1
-	}
-	return nw, nh
+	return max(int(float64(w)*scale+0.5), 1), max(int(float64(h)*scale+0.5), 1)
 }

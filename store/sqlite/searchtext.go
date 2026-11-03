@@ -25,7 +25,7 @@ func SearchAltForms(text string) string {
 // nothing, where a title such as "4:44" keeps it.
 func altForms(text string, prose bool) string {
 	var alts []string
-	for _, word := range strings.Fields(text) {
+	for word := range strings.FieldsSeq(text) {
 		alts = appendWordAlts(alts, word, prose)
 	}
 	return strings.Join(alts, " ")

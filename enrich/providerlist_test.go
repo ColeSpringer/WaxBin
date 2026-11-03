@@ -259,6 +259,9 @@ func TestProviderListOrdersAndDropsTheBuiltIns(t *testing.T) {
 			}
 			attached = append(attached, n)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("item genres: %v", err)
+		}
 		return display, genreProvenanceProvider(t, dbPath, item), attached
 	}
 

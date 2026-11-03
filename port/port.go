@@ -678,6 +678,9 @@ func ReadCensus(ctx context.Context, path string) (*Census, error) {
 		}
 		c.Roots = append(c.Roots, root)
 	}
+	if rows.Err() != nil {
+		c.Partial = true
+	}
 	return c, nil
 }
 

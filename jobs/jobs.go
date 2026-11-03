@@ -153,7 +153,7 @@ func (m *Manager) RunLeased(ctx context.Context, scope string, fn func(context.C
 	return fn(ctx)
 }
 
-// leaseWaitStep and leaseWaitTries bound RunLeasedWait's retry, at 30s total. Sized
+// leaseWaitStep and leaseWaitTries bound RunLeasedWait's retry, at about 30s. Sized
 // against the podcast scope's slowest holders, which are bulk unlink passes over a
 // subscription set rather than the brief per-episode verbs; a pass larger than the
 // budget still loses, which RunLeasedWait's doc states rather than pretending away.
@@ -174,15 +174,14 @@ const (
 // It is unsuitable for a scope whose holders run for minutes, such as fs-mutate, where
 // the backoff would only add latency before the same CodeConflict.
 func (m *Manager) RunLeasedWait(ctx context.Context, scope string, fn func(context.Context) error) error {
-	var err error
-	for try := 0; try < leaseWaitTries; try++ {
-		var release func()
-		release, err = m.acquire(ctx, scope, "jobs.RunLeasedWait")
+	for try := 1; ; try++ {
+		release, err := m.acquire(ctx, scope, "jobs.RunLeasedWait")
 		if err == nil {
 			defer release()
 			return fn(ctx)
 		}
-		if !IsLeaseHeld(err) {
+		// The last try's conflict is the answer, with no wait after it.
+		if !IsLeaseHeld(err) || try == leaseWaitTries {
 			return err
 		}
 		select {
@@ -191,7 +190,6 @@ func (m *Manager) RunLeasedWait(ctx context.Context, scope string, fn func(conte
 		case <-time.After(leaseWaitStep):
 		}
 	}
-	return err
 }
 
 // ReasonLeaseHeld is the reason on the CodeConflict a runner returns when another job

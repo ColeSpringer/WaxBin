@@ -49,6 +49,9 @@ func cacheKeys(t *testing.T, db *sql.DB) []string {
 		}
 		out = append(out, k)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list cache keys: %v", err)
+	}
 	return out
 }
 

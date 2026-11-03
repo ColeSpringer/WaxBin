@@ -338,8 +338,7 @@ func renameDurabilityWarning(writeBack bool, err error) string {
 		return "warning: the member files still carry the old values, so the rename is undone " +
 			"on their next retag, move, or content change; pass --write-back to make it stick"
 	}
-	var wbErr *waxbin.WriteBackError
-	if errors.As(err, &wbErr) {
+	if _, ok := errors.AsType[*waxbin.WriteBackError](err); ok {
 		return "warning: the write-back did not reach every member, so those files still carry " +
 			"the old values and re-split the entity on their next retag, move, or content change"
 	}
@@ -364,8 +363,7 @@ func entityClearDurabilityWarning(et model.MergeEntity, edits map[string]string,
 	}
 	// A refused or failed strip is reported as a warning and leaves a nil error behind,
 	// so without this the caveat would be silent in the one case it matters most.
-	var wbErr *waxbin.WriteBackError
-	if errors.As(err, &wbErr) {
+	if _, ok := errors.AsType[*waxbin.WriteBackError](err); ok {
 		return "warning: the strip did not reach every member, so those files still name the " +
 			"id and re-fork the identity on their next retag, move, or content change. A file " +
 			"shared by several items or carrying offset windows is refused every time, so an " +

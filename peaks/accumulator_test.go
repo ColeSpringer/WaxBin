@@ -21,10 +21,7 @@ func signal(n int, seed int64) []float32 {
 func addChunked(mono []float32, n, chunk int) Peaks {
 	a := NewAccumulator(n)
 	for i := 0; i < len(mono); i += chunk {
-		end := i + chunk
-		if end > len(mono) {
-			end = len(mono)
-		}
+		end := min(i+chunk, len(mono))
 		a.Add(mono[i:end])
 	}
 	return a.Peaks()
@@ -150,7 +147,7 @@ func TestAccumulatorLongSignal(t *testing.T) {
 	a := NewAccumulator(DefaultBuckets)
 	chunk := signal(65536, 3)
 	// ~100M samples: ~17 halvings past the first fill.
-	for i := 0; i < 1600; i++ {
+	for range 1600 {
 		a.Add(chunk)
 	}
 	p := a.Peaks()

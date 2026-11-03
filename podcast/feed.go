@@ -352,16 +352,14 @@ func normalizeSoundbites(sbs []pcSoundbite) []model.FeedSoundbite {
 	if len(sbs) == 0 {
 		return nil
 	}
-	// ParseFloat accepts "inf" and "nan" without error; the bound rejects inf (and
-	// any value whose ms conversion could overflow int64) and the IsNaN checks
-	// reject nan, which passes every ordered comparison.
-	const maxClipSec = float64(1 << 40)
+	// ParseFloat accepts "inf" and "nan" without error; the bound rejects inf and the
+	// IsNaN checks reject nan, which passes every ordered comparison.
 	out := make([]model.FeedSoundbite, 0, len(sbs))
 	for i := range sbs {
 		start, serr := strconv.ParseFloat(strings.TrimSpace(sbs[i].StartTime), 64)
 		dur, derr := strconv.ParseFloat(strings.TrimSpace(sbs[i].Duration), 64)
 		if serr != nil || derr != nil || math.IsNaN(start) || math.IsNaN(dur) ||
-			start < 0 || dur <= 0 || start > maxClipSec || dur > maxClipSec {
+			start < 0 || dur <= 0 || start > maxFeedSeconds || dur > maxFeedSeconds {
 			continue
 		}
 		out = append(out, model.FeedSoundbite{
@@ -449,32 +447,41 @@ func yearOf(ns int64) int {
 	return time.Unix(0, ns).UTC().Year()
 }
 
+// maxFeedSeconds bounds a time a feed states in seconds: far past any real episode, and
+// far enough inside int64 that the millisecond conversion cannot overflow.
+const maxFeedSeconds = 1 << 40
+
 // parseDurationMS parses an itunes:duration: plain seconds ("3600"), or a colon
 // form H:MM:SS / MM:SS. Whole-second precision (a feed value) is enough, so each
-// colon-separated field is floored to whole seconds before the base-60 fold.
+// colon-separated field is floored to whole seconds before the base-60 fold. A
+// negative, infinite or out-of-range value reads as unknown (0), like a malformed one.
 func parseDurationMS(s string) int64 {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0
 	}
 	if !strings.Contains(s, ":") {
-		if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 {
+		// NaN fails f > 0, and inf fails the bound.
+		if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 && f <= maxFeedSeconds {
 			return int64(f * 1000)
 		}
 		return 0
 	}
 	var secs int64
-	for _, p := range strings.Split(s, ":") {
+	for p := range strings.SplitSeq(s, ":") {
 		// Floor a fractional seconds field ("05.5" -> "05") before parsing.
 		field := strings.TrimSpace(p)
 		if dot := strings.IndexByte(field, '.'); dot >= 0 {
 			field = field[:dot]
 		}
-		n, err := strconv.Atoi(field)
-		if err != nil {
+		n, err := strconv.ParseInt(field, 10, 64)
+		if err != nil || n < 0 || n > maxFeedSeconds {
 			return 0
 		}
-		secs = secs*60 + int64(n)
+		// Checked at every step, so a long chain of fields cannot overflow the fold.
+		if secs = secs*60 + n; secs > maxFeedSeconds {
+			return 0
+		}
 	}
 	return secs * 1000
 }

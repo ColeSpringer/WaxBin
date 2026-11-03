@@ -144,7 +144,6 @@ func TestCreatePlaylistValidation(t *testing.T) {
 		"files entity":    query.New(query.EntityFiles).Build(),
 		"random no limit": query.New(query.EntityItems).LimitBy(query.LimitRandom).Build(),
 	} {
-		bad := bad
 		if _, err := st.CreatePlaylist(ctx, "x", "", "", model.PlaylistSmart, "", &bad); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("create with %s err = %v, want CodeInvalid", name, err)
 		}

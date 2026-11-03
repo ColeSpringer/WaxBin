@@ -345,7 +345,7 @@ func MixMono(dst []float32, chans [][]float32) []float32 {
 	// Accumulate in float32 and divide by the channel count, in channel order:
 	// PCM.Mono's arithmetic exactly, so the two agree bit for bit.
 	nch := float32(len(chans))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var sum float32
 		for c := range chans {
 			sum += chans[c][i]

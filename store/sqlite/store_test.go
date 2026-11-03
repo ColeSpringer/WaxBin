@@ -175,7 +175,7 @@ func TestQueryItemsOffsetWithoutLimit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		s := strconv.Itoa(i)
 		if _, err := st.PutScannedTrack(ctx,
 			input(lib.ID, "/lib/"+s+".mp3", "sha256:E"+s, "sha256:C"+s, fmt.Sprintf("T%d", i))); err != nil {
@@ -208,15 +208,13 @@ func TestConcurrentCloseAndReads(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+	for range 4 {
+		wg.Go(func() {
+			for range 50 {
 				// May error once the store is closed; must never panic or race.
 				_, _ = st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
 			}
-		}()
+		})
 	}
 	_ = st.Close() // racing the readers
 	wg.Wait()

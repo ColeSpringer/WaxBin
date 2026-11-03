@@ -553,6 +553,26 @@ func TestMergeEntitiesAtomicOnBadLoser(t *testing.T) {
 	}
 }
 
+// TestMergeEntitiesRefusesALoserNamedTwice: a repeated loser is a bad argument, refused
+// before anything merges, not a not-found error about an entity that still exists.
+func TestMergeEntitiesRefusesALoserNamedTwice(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Surv", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "Los1", album: "B"})
+	survivor := entityPID(t, st, "artist", "Surv")
+	los1 := entityPID(t, st, "artist", "Los1")
+
+	_, err := st.MergeEntities(ctx, model.MergeArtist, survivor, []model.PID{los1, los1})
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("loser named twice: got %v, want CodeInvalid", err)
+	}
+	if !entityExists(t, st, "artist", "Los1") {
+		t.Error("the loser was merged even though the request was refused")
+	}
+}
+
 func TestMergeEmitsPerItemChangeLog(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)

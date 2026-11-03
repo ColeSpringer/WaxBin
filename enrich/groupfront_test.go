@@ -23,8 +23,8 @@ import (
 func otherPNG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 6, 6))
-	for x := 0; x < 6; x++ {
-		for y := 0; y < 6; y++ {
+	for x := range 6 {
+		for y := range 6 {
 			img.Set(x, y, color.RGBA{R: 10, G: uint8(x * 20), B: uint8(y * 20), A: 255})
 		}
 	}

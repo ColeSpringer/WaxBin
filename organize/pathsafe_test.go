@@ -45,10 +45,17 @@ func TestSanitizeSegmentReservedDeviceNames(t *testing.T) {
 		"lpt9.flac": "lpt9_.flac",
 		"console":   "console", // only exact device names are reserved
 		"NULL":      "NULL",
+		// Windows ignores spaces before the dot and counts a superscript as a digit.
+		"Aux .mp3":    "Aux_ .mp3",
+		"COM\u00b9":   "COM\u00b9_",
+		"conout$.log": "conout$_.log",
 	}
 	for in, want := range cases {
 		if got := sanitizeSegment(in); got != want {
 			t.Errorf("sanitizeSegment(%q) = %q, want %q", in, got, want)
+		}
+		if in != want && UnsafeSegmentReason(in) == "" {
+			t.Errorf("UnsafeSegmentReason(%q) passes a name sanitizeSegment escapes", in)
 		}
 	}
 }

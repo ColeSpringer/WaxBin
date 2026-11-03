@@ -1,6 +1,8 @@
 package organize
 
 import (
+	"slices"
+
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 )
@@ -47,8 +49,7 @@ func UndoPlan(moves []model.OrganizeMove) *Plan {
 		last[m.FilePID] = i
 	}
 	plan := &Plan{Undo: true}
-	for i := len(moves) - 1; i >= 0; i-- {
-		m := moves[i]
+	for i, m := range slices.Backward(moves) {
 		if companion(m.Kind) {
 			plan.Companions = append(plan.Companions, inverseStep(m))
 			continue

@@ -134,7 +134,7 @@ func TestActiveTrashForItemsChunkBoundary(t *testing.T) {
 	entry := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "cf1")
 
 	req := make([]model.PID, 0, 501)
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		req = append(req, model.NewPID())
 	}
 	req = append(req, entry.ItemPID, "")

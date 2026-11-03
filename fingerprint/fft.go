@@ -28,7 +28,7 @@ func fft(re, im []float64) {
 		half := length >> 1
 		for i := 0; i < n; i += length {
 			cr, ci := 1.0, 0.0
-			for k := 0; k < half; k++ {
+			for k := range half {
 				jr := re[i+k+half]*cr - im[i+k+half]*ci
 				ji := re[i+k+half]*ci + im[i+k+half]*cr
 				re[i+k+half] = re[i+k] - jr

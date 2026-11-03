@@ -78,8 +78,7 @@ func detachDurabilityWarning(writeBack bool, err error) string {
 	}
 	// A refused or failed strip is reported as a warning and leaves a nil error behind,
 	// so without this the caveat would be silent in the one case it matters most.
-	var wbErr *waxbin.WriteBackError
-	if errors.As(err, &wbErr) {
+	if _, ok := errors.AsType[*waxbin.WriteBackError](err); ok {
 		return "warning: the strip did not land, so the file still names the release and " +
 			"the detach reverts on its next retag, move, or content change"
 	}

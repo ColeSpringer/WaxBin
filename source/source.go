@@ -167,8 +167,7 @@ func NewProviderError(st model.SourceType, op string, err error) *ProviderError 
 			if se.Status == http.StatusNotFound {
 				code = waxerr.CodeNotFound
 			}
-			var we *waxerr.Error
-			if errors.As(err, &we) {
+			if we, ok := errors.AsType[*waxerr.Error](err); ok {
 				code = we.Code
 			}
 			pe.Err = &waxerr.Error{Code: code, Op: "source." + string(st), Err: err, Reason: ReasonHTTPStatus}

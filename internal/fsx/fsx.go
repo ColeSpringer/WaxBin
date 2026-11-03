@@ -191,7 +191,7 @@ func (l *Lister) Spelled(root, path string) bool {
 	} else {
 		rel = r
 	}
-	for _, name := range strings.Split(rel, sep) {
+	for name := range strings.SplitSeq(rel, sep) {
 		lst, ok := l.list(cur)
 		if !ok || !lst.names[name] {
 			return false
@@ -350,7 +350,7 @@ func (sp *Speller) Respell(dir string) error {
 		return nil
 	}
 	cur := sp.root
-	for _, name := range strings.Split(rel, string(filepath.Separator)) {
+	for name := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		next := filepath.Join(cur, name)
 		if !sp.checked[next] {
 			if sp.fs.Lstat(next) != nil {

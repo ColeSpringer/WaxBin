@@ -3,8 +3,9 @@ package waxbin
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -630,12 +631,7 @@ func (l *Library) settleEnrichmentWrite(ctx context.Context, filePID model.PID, 
 // rides the item path as DATE.
 func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, w *meta.Writer, leftover map[model.PID]model.EntityFieldFile, c *enrichWriteCounts) error {
 	// Sorted, so one pass writes the leftovers in a stable order.
-	pids := make([]model.PID, 0, len(leftover))
-	for pid := range leftover {
-		pids = append(pids, pid)
-	}
-	sort.Slice(pids, func(i, j int) bool { return pids[i] < pids[j] })
-	for _, pid := range pids {
+	for _, pid := range slices.Sorted(maps.Keys(leftover)) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

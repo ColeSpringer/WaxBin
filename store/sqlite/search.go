@@ -32,14 +32,7 @@ const (
 
 // searchFetchCap returns the ranked-row scan cap for a per-group limit.
 func searchFetchCap(limit int) int {
-	cap := limit * searchFetchPerLimit
-	if cap < searchFetchMin {
-		cap = searchFetchMin
-	}
-	if cap > searchFetchMax {
-		cap = searchFetchMax
-	}
-	return cap
+	return min(max(limit*searchFetchPerLimit, searchFetchMin), searchFetchMax)
 }
 
 // searchDisplayCols and searchDisplayJoins render one matched item row (its own
@@ -457,7 +450,7 @@ func searchTier(name, q nameKeys) int {
 	case strings.Contains(" "+name.key, " "+q.key):
 		return 1
 	}
-	for _, w := range strings.Fields(q.key) {
+	for w := range strings.FieldsSeq(q.key) {
 		if !strings.Contains(name.joined, w) {
 			return 3
 		}
@@ -699,7 +692,7 @@ func transcriptsStmt(narrow string, maxCandidates, fetch int) string {
 // or digit is dropped, and "" means nothing is left to match.
 func ftsMatchQuery(input string) string {
 	var groups []string
-	for _, word := range strings.Fields(norm.NFC.String(input)) {
+	for word := range strings.FieldsSeq(norm.NFC.String(input)) {
 		if g := wordMatch(word); g != "" {
 			groups = append(groups, g)
 		}

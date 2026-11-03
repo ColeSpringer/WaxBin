@@ -14,8 +14,7 @@ import (
 // commands (edit, credit, art set, entity edit) so a partial on-disk sync reads as a
 // warning, not a failed command.
 func surfaceWriteBack(cmd *cobra.Command, err error) error {
-	var wbErr *waxbin.WriteBackError
-	if errors.As(err, &wbErr) {
+	if wbErr, ok := errors.AsType[*waxbin.WriteBackError](err); ok {
 		for _, f := range wbErr.Failures {
 			switch {
 			case f.Lost && f.Key != "":

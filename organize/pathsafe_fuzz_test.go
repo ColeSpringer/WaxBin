@@ -14,7 +14,7 @@ func FuzzSanitizeSegment(f *testing.F) {
 	for _, s := range []string{
 		"normal.mp3", "CON.mp3", "aux", "a/b\\c", "  trailing . ", "..", ".", "",
 		"\x00\x01\x1f", "日本語のタイトル", "café", "é", strings.Repeat("x", 400),
-		"nul", "com9.flac", "<>:\"|?*",
+		"nul", "com9.flac", "<>:\"|?*", "nul .mp3", "COM\u00b9", "CONIN$",
 	} {
 		f.Add(s)
 	}

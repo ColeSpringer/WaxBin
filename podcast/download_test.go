@@ -27,6 +27,22 @@ func TestDownloadFilenameNoCollision(t *testing.T) {
 	}
 }
 
+// TestSanitizeSegmentEscapesAReservedStem: a show folder whose name begins with a device
+// name gets its '_' on the stem, where Windows looks, not at the end of the name.
+func TestSanitizeSegmentEscapesAReservedStem(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"Aux. Radio":  "Aux_. Radio",
+		"CON":         "CON_",
+		"nul .stream": "nul_ .stream",
+		"Console FM":  "Console FM",
+	} {
+		if got := sanitizeSegment(in); got != want {
+			t.Errorf("sanitizeSegment(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestDownloadFilenameGuaranteesExtension(t *testing.T) {
 	t.Parallel()
 	e := &model.Episode{PID: "01CCCC", EnclosureURL: "https://h/stream?id=9", EnclosureType: "audio/mp4"}

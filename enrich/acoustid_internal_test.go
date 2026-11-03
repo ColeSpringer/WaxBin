@@ -128,7 +128,9 @@ func TestAcoustIDErrorResponse(t *testing.T) {
 func rawVector(duration string, n int) (string, []uint32) {
 	vec := make([]uint32, n)
 	var b strings.Builder
-	b.WriteString(`{"duration": ` + duration + `, "fingerprint": [`)
+	b.WriteString(`{"duration": `)
+	b.WriteString(duration)
+	b.WriteString(`, "fingerprint": [`)
 	for i := range vec {
 		vec[i] = uint32(i*2654435761) & 0x7fffffff
 		if i > 0 {

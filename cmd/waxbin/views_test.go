@@ -100,7 +100,7 @@ func TestPrintItemTableEpisodeColumn(t *testing.T) {
 	// columns it leaves blank. Checking only the track line missed it, since a track
 	// populates both.
 	for name, table := range map[string]string{"music-only": musicOnly.String(), "mixed": out} {
-		for _, line := range strings.Split(strings.TrimRight(table, "\n"), "\n") {
+		for line := range strings.SplitSeq(strings.TrimRight(table, "\n"), "\n") {
 			if line != strings.TrimRight(line, " \t") {
 				t.Errorf("%s table has a row ending in whitespace: %q", name, line)
 			}
@@ -176,7 +176,7 @@ func TestRenderEnrichResultGroupArtLine(t *testing.T) {
 func lineWith(t *testing.T, out, want string) string {
 	t.Helper()
 	var found string
-	for _, l := range strings.Split(out, "\n") {
+	for l := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(l, want) {
 			if found != "" {
 				t.Fatalf("more than one line contains %q", want)

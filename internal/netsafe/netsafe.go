@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -491,10 +492,10 @@ func bodyErr(ctx context.Context, op string, err error) error {
 func copyBody(ctx context.Context, op string, dst io.Writer, body io.Reader, max int64, quiet *watchdog) (int64, error) {
 	src := &failedRead{r: io.LimitReader(body, max+1), quiet: quiet}
 	n, err := io.Copy(&quietWrite{w: dst, quiet: quiet}, src)
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		return n, nil
-	case err == src.err:
+	case src.err:
 		return n, bodyErr(ctx, op, err)
 	default:
 		return n, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -671,11 +672,10 @@ func mediaTypeErr(op, got string) error {
 // checkScheme allows only http(s); it blocks file://, ftp://, gopher://, and the
 // like, which an SSRF or a malicious feed could otherwise use.
 func checkScheme(rawURL, op string) error {
-	i := strings.Index(rawURL, "://")
-	if i < 0 {
+	scheme, _, ok := strings.Cut(rawURL, "://")
+	if !ok {
 		return waxerr.New(waxerr.CodeInvalid, op, "url has no scheme")
 	}
-	scheme := rawURL[:i]
 	switch {
 	case strings.EqualFold(scheme, "http"), strings.EqualFold(scheme, "https"):
 		return nil
@@ -750,12 +750,7 @@ func isBlockedIP(addr netip.Addr) bool {
 	if blockedAddr(addr) {
 		return true
 	}
-	for _, v4 := range embeddedIPv4(addr) {
-		if blockedAddr(v4) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(embeddedIPv4(addr), blockedAddr)
 }
 
 func blockedAddr(a netip.Addr) bool {

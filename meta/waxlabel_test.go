@@ -1503,7 +1503,7 @@ func TestNormalizeFormatLabels(t *testing.T) {
 // the Vorbis comment ceiling, so '~' is out on both sides.
 func TestCanonicalTagKeyMatchesTagLibrary(t *testing.T) {
 	t.Parallel()
-	for b := 0; b < 256; b++ {
+	for b := range 256 {
 		key := "K" + string([]byte{byte(b)}) + "Y"
 		got, ok := model.CanonicalTagKey(key)
 		if ok && !tag.Key(got).Valid() {

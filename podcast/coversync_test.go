@@ -30,8 +30,8 @@ import (
 func testPNGBytes(t *testing.T, w, h int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			img.Set(x, y, color.RGBA{uint8(x * 8), uint8(y * 8), 90, 255})
 		}
 	}
@@ -173,7 +173,7 @@ func TestSyncSkipsFetchWhileCoverLocked(t *testing.T) {
 	}
 	locked := f.coverHash(t, pid)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := f.svc.Sync(ctx, pid); err != nil {
 			t.Fatalf("sync %d: %v", i+1, err)
 		}

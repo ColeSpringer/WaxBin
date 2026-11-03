@@ -324,7 +324,7 @@ func TestChangesSinceBehindThePrunedFeedIsNotFound(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/" + strconv.Itoa(i) + ".flac", essence: "e" + strconv.Itoa(i),
 			content: "c" + strconv.Itoa(i), title: "S", artist: "X", album: "A"})
 	}

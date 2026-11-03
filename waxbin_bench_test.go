@@ -42,7 +42,7 @@ func BenchmarkScan(b *testing.B) {
 	ctx := context.Background()
 	root := b.TempDir()
 	const n = 200
-	for i := 0; i < n; i++ {
+	for i := range n {
 		dir := filepath.Join(root, fmt.Sprintf("album%d", i%20))
 		name := filepath.Join(dir, fmt.Sprintf("track%d.mp3", i))
 		// Distinct audio per file (unique seed) so items do not dedup by essence.
@@ -51,8 +51,7 @@ func BenchmarkScan(b *testing.B) {
 			fmt.Sprintf("Album %d", i%20), i%20+1, testaudio.AudioWithSeed(byte(i))))
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		b.StopTimer()
 		db := filepath.Join(b.TempDir(), "c.db")
 		lib := openBench(b, ctx, db, root)
@@ -82,15 +81,14 @@ func BenchmarkAnalyze(b *testing.B) {
 		rate = 22050
 	)
 	formats := []string{"wav", "flac", "mp3", "opus"}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sig := testaudio.RichSignal(rate, 4, testaudio.MusicalPartials, int64(i+1))
 		f := formats[i%len(formats)]
 		writeBench(b, filepath.Join(root, fmt.Sprintf("t%d.%s", i, f)),
 			testaudio.EncodeAs(b, f, "", rate, sig))
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		b.StopTimer()
 		db := filepath.Join(b.TempDir(), "c.db")
 		lib := openBench(b, ctx, db, root)
@@ -122,12 +120,12 @@ func BenchmarkAnalyzeTwoPass(b *testing.B) {
 		rate = 44100
 	)
 	layouts := []int{1, 2, 6}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ch := layouts[i%len(layouts)]
 		sig := testaudio.RichSignal(rate, 4, testaudio.MusicalPartials, int64(i+1))
 		inter := make([]float32, len(sig)*ch)
 		for s, v := range sig {
-			for c := 0; c < ch; c++ {
+			for c := range ch {
 				inter[s*ch+c] = v
 			}
 		}
@@ -135,8 +133,7 @@ func BenchmarkAnalyzeTwoPass(b *testing.B) {
 			testaudio.EncodeWAV16Multi(rate, ch, inter))
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		b.StopTimer()
 		db := filepath.Join(b.TempDir(), "c.db")
 		lib := openBench(b, ctx, db, root)

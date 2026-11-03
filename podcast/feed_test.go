@@ -275,6 +275,17 @@ func TestParseDurationForms(t *testing.T) {
 		"1:00:00":    3600000,
 		"00:00:05.5": 5000, // fractional seconds floored
 		"bogus":      0,
+		"100:00:00":  360000000,
+		// Unknown rather than a wrapped or negative value.
+		"inf":                            0,
+		"+Inf":                           0,
+		"NaN":                            0,
+		"1e300":                          0,
+		"-90":                            0,
+		"-1:30":                          0,
+		"1:-30":                          0,
+		"9999999999999:00:00":            0,
+		strings.Repeat("59:", 20) + "59": 0,
 	}
 	for in, want := range cases {
 		if got := parseDurationMS(in); got != want {

@@ -146,9 +146,7 @@ func TestStmtCacheUnderConcurrentReaders(t *testing.T) {
 	c := &stmtCache{limit: 3}
 	var wg sync.WaitGroup
 	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 200 {
 				k := (g + i) % 6
 				var got int
@@ -157,7 +155,7 @@ func TestStmtCacheUnderConcurrentReaders(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

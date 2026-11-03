@@ -159,7 +159,7 @@ func TestEnrichPagesAWholeGroup(t *testing.T) {
 
 	// 120 releases: 100 US CDs on page one, 19 more plus the one Japanese CD on page two.
 	first := make([]string, 0, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		first = append(first, browseDoc(fillerMBID(i), []string{"CD"}, "US", ""))
 	}
 	second := make([]string, 0, 20)

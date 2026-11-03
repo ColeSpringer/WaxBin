@@ -216,8 +216,7 @@ func wireLock(op, lock string) (model.LockChange, error) {
 // made, which is what keeps a partial on-disk sync from reading as a failed call at one
 // method and a clean one at the next.
 func writeBackResponse[T any](err error, build func([]proxy.WriteBackFailure) T) (any, error) {
-	var wbErr *WriteBackError
-	if errors.As(err, &wbErr) {
+	if wbErr, ok := errors.AsType[*WriteBackError](err); ok {
 		return build(toProxyFailures(wbErr.Failures)), nil
 	}
 	if err != nil {

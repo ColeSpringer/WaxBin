@@ -385,7 +385,7 @@ func TestMeasureMultichannel(t *testing.T) {
 	mono := testaudio.ReferenceSignal(rate, 3*time.Second)
 	inter := make([]float32, len(mono)*6)
 	for i, v := range mono {
-		for c := 0; c < 6; c++ {
+		for c := range 6 {
 			inter[i*6+c] = v
 		}
 	}

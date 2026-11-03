@@ -21,8 +21,8 @@ import (
 func testPNG(t *testing.T, w, h int) *model.ArtImage {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			img.Set(x, y, color.RGBA{uint8(x), uint8(y), 100, 255})
 		}
 	}
@@ -452,20 +452,16 @@ func TestThumbnailFlightSurvivesOneCallerLeaving(t *testing.T) {
 	var wg sync.WaitGroup
 	var leadBlob *model.ArtBlob
 	var leadErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		leadBlob, leadErr = st.thumbnail(leadCtx, prov, 192, source)
-	}()
+	})
 	<-entered
 
 	var followBlob *model.ArtBlob
 	var followErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		followBlob, followErr = st.thumbnail(context.Background(), prov, 192, source)
-	}()
+	})
 
 	cancelLead()
 	close(release)

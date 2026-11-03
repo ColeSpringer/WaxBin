@@ -1,5 +1,7 @@
 package model
 
+import "slices"
+
 // AuditCheck names a category of audit finding. Consumers filter and group by it.
 type AuditCheck string
 
@@ -60,12 +62,7 @@ func AuditChecks() []AuditCheck {
 
 // Valid reports whether c is a known audit check.
 func (c AuditCheck) Valid() bool {
-	for _, k := range AuditChecks() {
-		if c == k {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(AuditChecks(), c)
 }
 
 // AuditSeverity ranks a finding. error = broken/data loss; warn = should fix;

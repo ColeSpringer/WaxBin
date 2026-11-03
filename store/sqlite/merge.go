@@ -55,10 +55,17 @@ func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivo
 	if len(loserPIDs) == 0 {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "no loser entities to merge")
 	}
-	for _, l := range loserPIDs {
-		if l == survivorPID {
+	// A loser named twice would fail its second merge as not found and roll the batch
+	// back with an error naming an entity that still exists, so it is refused up front.
+	seen := make(map[model.PID]bool, len(loserPIDs))
+	for _, loser := range loserPIDs {
+		if loser == survivorPID {
 			return nil, waxerr.New(waxerr.CodeInvalid, op, "survivor and loser are the same entity")
 		}
+		if seen[loser] {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "a loser is named twice: "+string(loser))
+		}
+		seen[loser] = true
 	}
 	// artist|release_group|album|genre|series, each the name of its own table. The four
 	// that hold art also use it as their art_map slot; series has no art of its own, so

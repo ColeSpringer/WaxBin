@@ -103,7 +103,7 @@ func TestMergeFoldsAndUnfold(t *testing.T) {
 		t.Fatalf("entity folds album: %v", err)
 	}
 	var quoted string
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if f := strings.Fields(line); len(f) > 0 && strings.HasPrefix(f[0], `"`) {
 			quoted = line[:strings.Index(line, `" `)+1]
 		}

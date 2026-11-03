@@ -58,10 +58,10 @@ func TestParseOPMLDepthBoundRejects(t *testing.T) {
 	var b strings.Builder
 	b.WriteString(`<opml version="2.0"><body>`)
 	depth := maxOPMLDepth + 50
-	for i := 0; i < depth; i++ {
+	for range depth {
 		b.WriteString("<outline>")
 	}
-	for i := 0; i < depth; i++ {
+	for range depth {
 		b.WriteString("</outline>")
 	}
 	b.WriteString(`</body></opml>`)

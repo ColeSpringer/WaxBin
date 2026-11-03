@@ -462,12 +462,12 @@ func TestBrowseMostPlayedAndStarred(t *testing.T) {
 		ids[title] = res.ItemPID
 	}
 	// Two plays for Two, three for Three, none for One.
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := st.MarkPlayed(ctx, "", ids["Two"], false, nil); err != nil {
 			t.Fatalf("mark played: %v", err)
 		}
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := st.MarkPlayed(ctx, "", ids["Three"], false, nil); err != nil {
 			t.Fatalf("mark played: %v", err)
 		}
@@ -538,7 +538,7 @@ func TestBrowseRecentlyPlayedOrdersByRecordedTime(t *testing.T) {
 		title string
 		at    int64
 	}{{"Three", 3000}, {"One", 1000}, {"Two", 2000}} {
-		if err := st.MarkPlayed(ctx, "", ids[p.title], false, ptrNS(p.at)); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids[p.title], false, new(p.at)); err != nil {
 			t.Fatalf("mark played %s: %v", p.title, err)
 		}
 	}
@@ -563,7 +563,7 @@ func TestBrowseInProgressOrdersByRecordedTime(t *testing.T) {
 		title string
 		at    int64
 	}{{"Three", 3000}, {"One", 1000}, {"Two", 2000}} {
-		if err := st.SetProgress(ctx, "", ids[p.title], 60_000, ptrNS(p.at)); err != nil {
+		if err := st.SetProgress(ctx, "", ids[p.title], 60_000, new(p.at)); err != nil {
 			t.Fatalf("set progress %s: %v", p.title, err)
 		}
 	}

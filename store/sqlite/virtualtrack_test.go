@@ -616,6 +616,9 @@ func TestVirtualTrackRipCopyAddsAlternates(t *testing.T) {
 			}
 			out[pid] = e
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
 		return out
 	}
 	want := edgesOf(r1.FilePID)

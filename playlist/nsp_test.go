@@ -300,7 +300,7 @@ func TestNSPRelativeDates(t *testing.T) {
 	// The largest representable whole-day window (MaxInt64/nspDayNS days) still
 	// imports: the overflow bound is exclusive, not a shrunken range.
 	maxDays := int64(9223372036854775807) / nspDayNS
-	big, err := importRule([]byte(fmt.Sprintf(`{"all":[{"inTheLast":{"lastPlayed":%d}}]}`, maxDays)))
+	big, err := importRule(fmt.Appendf(nil, `{"all":[{"inTheLast":{"lastPlayed":%d}}]}`, maxDays))
 	if err != nil {
 		t.Fatalf("import max-day window (%d days): %v", maxDays, err)
 	}

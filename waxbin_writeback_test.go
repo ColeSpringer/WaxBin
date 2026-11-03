@@ -709,8 +709,7 @@ func TestSetCreditsBookWriteBack(t *testing.T) {
 	// edit still stands.
 	_, _, err = lib.SetCredits(ctx, pid, model.RoleTranslator, []string{"A. Translator"},
 		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOn})
-	var wbErr *waxbin.WriteBackError
-	if !errors.As(err, &wbErr) {
+	if _, ok := errors.AsType[*waxbin.WriteBackError](err); !ok {
 		t.Fatalf("book translator write-back: want *WriteBackError, got %v", err)
 	}
 	d, _ := lib.Book(ctx, pid)

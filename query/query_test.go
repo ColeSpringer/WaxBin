@@ -403,11 +403,11 @@ func TestRelativeOpRejectedOnTagField(t *testing.T) {
 type fieldsWithTag struct{}
 
 func (fieldsWithTag) Column(f string) (query.Column, bool) {
-	if strings.HasPrefix(f, "tag.") {
+	if key, ok := strings.CutPrefix(f, "tag."); ok {
 		return query.Column{Set: &query.SetColumn{
 			Sub:       "SELECT 1 FROM item_tag itq WHERE itq.item_id = pi.id AND itq.key = ?",
 			ValueExpr: "itq.value",
-			Args:      []any{strings.TrimPrefix(f, "tag.")},
+			Args:      []any{key},
 		}}, true
 	}
 	c, ok := testFields[f]
@@ -507,7 +507,7 @@ func TestCompileSetValuesCaps(t *testing.T) {
 
 	// The per-condition cap does not bound the statement total.
 	b := query.New(query.EntityItems)
-	for i := 0; i < 66; i++ { // 66 * 500 = 33000, past the 32766 limit
+	for range 66 { // 66 * 500 = 33000, past the 32766 limit
 		b.WhereValues("year", query.OpIn, atCap...)
 	}
 	if _, err := query.Compile(b.Build(), testFields); !waxerr.Is(err, waxerr.CodeInvalid) {

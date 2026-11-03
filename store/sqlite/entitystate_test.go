@@ -272,7 +272,7 @@ func TestEntityStarIdempotentReimportNoDelta(t *testing.T) {
 	afterFirst := entityStateDeltas(t, st, album)
 
 	// Re-send the identical star and rating twice: no new deltas.
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
 			t.Fatal(err)
 		}

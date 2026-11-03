@@ -411,10 +411,7 @@ func chunkSlice[T any](s []T, size int, fn func([]T) error) error {
 		size = idBatchSize
 	}
 	for i := 0; i < len(s); i += size {
-		end := i + size
-		if end > len(s) {
-			end = len(s)
-		}
+		end := min(i+size, len(s))
 		if err := fn(s[i:end]); err != nil {
 			return err
 		}

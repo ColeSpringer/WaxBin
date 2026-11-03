@@ -814,7 +814,7 @@ func TestClearAcquisitionIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutScannedTrack: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockUnchanged, false); err != nil {
 			t.Fatalf("clear %d: %v", i, err)
 		}

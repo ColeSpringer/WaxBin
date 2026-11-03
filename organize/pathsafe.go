@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/colespringer/waxbin/internal/pathx"
 )
 
 // maxSegmentBytes caps one path component. 255 is the NAME_MAX of ext4, APFS,
@@ -11,17 +13,6 @@ import (
 // them rather than letting one filesystem's longer limit produce names another
 // cannot store.
 const maxSegmentBytes = 255
-
-// reservedDeviceNames are Windows reserved device names. A file named CON or NUL
-// (with or without an extension) is unusable on Windows, so WaxBin avoids
-// producing one on every platform to keep a managed tree portable.
-var reservedDeviceNames = map[string]bool{
-	"con": true, "prn": true, "aux": true, "nul": true,
-	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
-	"com6": true, "com7": true, "com8": true, "com9": true,
-	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
-	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
-}
 
 // illegalSegmentChars is the cross-platform-illegal character set for a single
 // path segment: path separators, the drive colon, and the Windows wildcard/
@@ -43,20 +34,6 @@ func illegalToUnderscore(r rune) rune {
 	}
 }
 
-// segmentStem returns the part of a segment before its first dot, the portion the
-// Windows reserved-device-name rule applies to ("con.mp3" -> "con").
-func segmentStem(seg string) string {
-	if dot := strings.IndexByte(seg, '.'); dot >= 0 {
-		return seg[:dot]
-	}
-	return seg
-}
-
-// isReservedName reports whether a segment's stem is a Windows reserved device name.
-func isReservedName(seg string) bool {
-	return reservedDeviceNames[strings.ToLower(segmentStem(seg))]
-}
-
 // UnsafeSegmentReason reports why a single on-disk path segment is not portable,
 // or "" when it is safe. It applies the same portability rules sanitizeSegment
 // enforces when organizing (control and illegal characters, Windows reserved
@@ -76,7 +53,7 @@ func UnsafeSegmentReason(seg string) string {
 			return "illegal character " + string(r)
 		}
 	}
-	if isReservedName(seg) {
+	if pathx.ReservedName(seg) {
 		return "Windows reserved device name"
 	}
 	// sanitizeSegment trims leading and trailing spaces and trailing dots, so flag
@@ -113,7 +90,9 @@ func sanitizeSegment(seg string) string {
 	if seg == "" {
 		return "_"
 	}
-	seg = escapeReservedName(seg)
+	// A reserved device name is escaped on every platform, so a managed tree stays
+	// portable to Windows.
+	seg = pathx.EscapeReserved(seg)
 	return capSegmentBytes(seg)
 }
 
@@ -131,18 +110,6 @@ func foldField(s string) string {
 	s = norm.NFC.String(s)
 	s = strings.Trim(s, " ")
 	return strings.TrimRight(s, " .")
-}
-
-// escapeReservedName disarms a Windows reserved device name by appending '_' to
-// the stem (the part before the first dot, matched case-insensitively), keeping
-// any extension intact: "con.mp3" -> "con_.mp3", "NUL" -> "NUL_". Every other name
-// is returned unchanged.
-func escapeReservedName(seg string) string {
-	if !isReservedName(seg) {
-		return seg
-	}
-	stem := segmentStem(seg)
-	return stem + "_" + seg[len(stem):]
 }
 
 // capSegmentBytes truncates seg to maxSegmentBytes, preferring to keep the file

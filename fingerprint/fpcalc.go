@@ -213,11 +213,13 @@ func runFpcalc(ctx context.Context, bin, path string, maxDur time.Duration) (*fp
 	return run, nil
 }
 
+// trimFpErr is fpcalcNote for an error message, which needs words even when fpcalc
+// printed nothing but blank lines.
 func trimFpErr(s string) string {
-	if s == "" {
-		return "exited non-zero"
+	if note := fpcalcNote(s); note != "" {
+		return note
 	}
-	return fpcalcNote(s)
+	return "exited non-zero"
 }
 
 // fpcalcNote is what fpcalc said, shortened: the line that names its error, which it
@@ -225,9 +227,9 @@ func trimFpErr(s string) string {
 func fpcalcNote(stderr string) string {
 	lines := strings.Split(strings.TrimSpace(stderr), "\n")
 	note := lines[len(lines)-1]
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.HasPrefix(lines[i], "ERROR:") {
-			note = lines[i]
+	for _, line := range slices.Backward(lines) {
+		if strings.HasPrefix(line, "ERROR:") {
+			note = line
 			break
 		}
 	}

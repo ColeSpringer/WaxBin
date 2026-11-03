@@ -255,7 +255,7 @@ func TestCountEvaluatedPlaylistChunkBoundary(t *testing.T) {
 	const n = idBatchSize + 7
 	// The puts defer their rollups and settle once, as a scan does: recounted per put,
 	// one artist and one album over this many tracks cost the test most of a minute.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		genre := "Rock"
 		if i%2 == 1 {
 			genre = "Jazz"

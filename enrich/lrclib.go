@@ -129,7 +129,7 @@ func parseLRC(text string) []model.SyncedLine {
 		return nil
 	}
 	var out []model.SyncedLine
-	for _, raw := range strings.Split(text, "\n") {
+	for raw := range strings.SplitSeq(text, "\n") {
 		line := strings.TrimRight(raw, "\r")
 		var times []int64
 		rest := line

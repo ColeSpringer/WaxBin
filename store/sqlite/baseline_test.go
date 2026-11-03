@@ -130,7 +130,7 @@ func TestFreshCatalogStampsBaseline(t *testing.T) {
 	}
 
 	// Reopening is clean and does not re-stamp anything.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		st, err := Open(ctx, OpenOptions{Path: path, Owner: "test"})
 		if err != nil {
 			t.Fatalf("reopen %d: %v", i, err)

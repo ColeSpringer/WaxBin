@@ -14,7 +14,7 @@ func putItems(t *testing.T, ctx context.Context, st interface {
 }, libID int64, n int) []model.PID {
 	t.Helper()
 	pids := make([]model.PID, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := fmt.Sprintf("%04d", i)
 		r, err := st.PutScannedTrack(ctx,
 			input(libID, "/lib/"+s+".mp3", "sha256:E"+s, "sha256:C"+s, "T"+s))
@@ -104,7 +104,7 @@ func TestItemsByPIDsChunkBoundary(t *testing.T) {
 	// three: chunk 0 (index 3), chunk 1 (501, 700, 900), chunk 2 (1150, 1250).
 	req := make([]model.PID, 0, 1300)
 	realAt := map[int]int{3: 0, 501: 1, 700: 2, 900: 3, 1150: 4, 1250: 5}
-	for i := 0; i < 1300; i++ {
+	for i := range 1300 {
 		if ri, ok := realAt[i]; ok {
 			req = append(req, real[ri])
 			continue

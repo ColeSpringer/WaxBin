@@ -27,7 +27,7 @@ func mp3Frame(fill byte) []byte {
 // distinct seed yields distinct (but deterministic) audio essence.
 func frames(n int, seed byte) []byte {
 	out := make([]byte, 0, n*mp3FrameLen)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out = append(out, mp3Frame(seed+byte(i*7+3))...)
 	}
 	return out

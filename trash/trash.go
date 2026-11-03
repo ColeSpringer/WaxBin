@@ -513,12 +513,11 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Skips = append(rep.Skips, Skip{FilePID: a.FilePID, Src: a.Src, Code: a.Code, Reason: a.Reason})
 			continue
 		}
-		size, promoted, err := s.apply(ctx, a, plan, sib)
+		size, promoted, err := s.apply(ctx, a, plan)
 		rep.Promoted = append(rep.Promoted, promoted...)
 		if err != nil {
 			f := Failure{FilePID: a.FilePID, Src: a.Src, Disk: DiskInPlace, Err: err.Error()}
-			var ae *applyError
-			if errors.As(err, &ae) {
+			if ae, ok := errors.AsType[*applyError](err); ok {
 				f.Disk, f.TrashPath = ae.disk, ae.trashPath
 			}
 			if f.Disk == DiskRemoved {
@@ -658,7 +657,7 @@ func moveUnder(root, dir string) (dispose, undo func(string) error) {
 // pending row dropped; when the move back fails too, the row stays as the file's only
 // record. For a bypass mode it removes the file and then detaches it. It returns the
 // alternates promoted in the file's place.
-func (s *Service) apply(ctx context.Context, a *Action, plan *Plan, sib *organize.Siblings) (int64, []model.PromotedFile, error) {
+func (s *Service) apply(ctx context.Context, a *Action, plan *Plan) (int64, []model.PromotedFile, error) {
 	size := onDiskSize(a.Src)
 	settle := context.WithoutCancel(ctx)
 	if plan.Mode.BypassesTrash() {

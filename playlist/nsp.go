@@ -2,6 +2,7 @@ package playlist
 
 import (
 	"encoding/json"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -358,9 +359,7 @@ func widenAliases(m map[string]string) map[string]string {
 			add[spelling] = nspName
 		}
 	}
-	for field, nspName := range add {
-		m[field] = nspName
-	}
+	maps.Copy(m, add)
 	return m
 }
 

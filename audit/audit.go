@@ -240,12 +240,7 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 // runs reports whether check c should run under cfg.
 func (a *Auditor) runs(cfg Config, c model.AuditCheck) bool {
 	if len(cfg.Only) > 0 {
-		for _, x := range cfg.Only {
-			if x == c {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(cfg.Only, c)
 	}
 	// With no explicit selection, run everything except the heavy file-read checks,
 	// which only run when Integrity is requested.
