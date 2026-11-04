@@ -118,7 +118,7 @@ jobs:
         # Per OS, so the Windows-only files are checked too. Installed first, since
         # go run under another GOOS would build staticcheck itself for that OS.
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           for goos in linux darwin windows; do
             echo "$goos"
             GOOS="$goos" staticcheck ./...
@@ -178,7 +178,7 @@ jobs:
       - name: govulncheck
         # What is reachable differs by OS, so scan each one that ships.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           for goos in linux darwin windows; do
             echo "$goos"
             GOOS="$goos" govulncheck ./...

@@ -12,7 +12,7 @@ import (
 // members state: the spelling the most of them state, a tie going to the one the earliest
 // member states and then to the lesser spelling, or none when no member states one. The
 // entity's key folds its curated sort, else that spelling, else its name, which is the
-// rule sortKeySources checks.
+// rule sortKeyEntities checks.
 //
 // A member spells an album and its release group in its ALBUMSORT. It spells an artist
 // only where its credit names that artist alone, since the spelling of a joint credit

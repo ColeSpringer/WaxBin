@@ -1680,9 +1680,9 @@ func (l *Library) RefreshRollups(ctx context.Context) (*model.RefreshReport, err
 
 // RefreshSortKeys rewrites every stored sort key that model.SortKey no longer
 // generates, the repair for the sort-key drift VerifyDerived reports, and returns
-// the number of rows rewritten. A rescan cannot heal one. Page cursors encode a
-// sort key, so a consumer holding one should re-page from the start after a run
-// that rewrote rows.
+// the number of keys rewritten, counted as that drift is (a row can hold several).
+// A rescan cannot heal one. Page cursors encode a sort key, so a consumer holding
+// one should re-page from the start after a run that rewrote any.
 func (l *Library) RefreshSortKeys(ctx context.Context) (int, error) {
 	return l.store.RefreshSortKeys(ctx)
 }

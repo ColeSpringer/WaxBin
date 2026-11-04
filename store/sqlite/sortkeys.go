@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"strings"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -13,75 +14,96 @@ import (
 // catalog drifted, and no normal write path can heal it: resolveArtist and
 // resolveReleaseGroup return as soon as match_key finds a row, and the rollup upkeep
 // rewrites an entity's key only when its derived spelling moves, so a rescan leaves an
-// existing entity's key as it was. verify.go's drift check walks the same source list,
+// existing entity's key as it was. verify.go's drift check walks the same entity list,
 // so the check and the repair cannot disagree about what a key should be. An item's key
 // folds its title spelling, else its title; a curatable entity's folds its curated sort,
 // else its derived spelling (entityspelling.go), else its name.
 
-// sortKeyBatch is how many rewritten rows one transaction carries. Wrapping the
-// catalog in one transaction would hold the write lock for the whole run and hand
-// publishSince every changed row at once. Atomicity buys nothing against that:
-// the operation is idempotent and purely derived, so an interrupted run just
-// leaves the rest drifted for a second --fix.
+// sortKeyBatch is about how many rows one transaction rewrites, since an entity's rows
+// always share one. Wrapping the catalog in one transaction would hold the write lock for
+// the whole run and hand publishSince every changed row at once. Atomicity buys nothing
+// against that: the operation is idempotent and purely derived, so an interrupted run
+// just leaves the rest drifted for a second --fix.
 const sortKeyBatch = 2000
 
-// sortKeySource is a table whose sort key is recomputed exactly, by replacing the
-// stored key with model.SortKey of the display text the catalog still holds.
-type sortKeySource struct {
-	table   string // table holding the key
-	keyCol  string // the generated key column
-	textCol string // the display column it derives from
-	// textSQL, when set, is the expression over the row the key derives from in place
-	// of textCol: a sort spelling, else the name it sorts in place of.
-	textSQL string
-	// spellCol is the derived sort spelling a curatable entity falls back to before its
-	// name (entityspelling.go).
-	spellCol string
-	idCol    string // primary key, the UPDATE target
-	pidExpr  string // SQL for the pid a rewritten row's delta names
-	// pidJoin reaches pidExpr for a table with no pid of its own. Both joins below
-	// are on non-null foreign keys, so the row set is unchanged and the drift check
-	// can share the query.
-	pidJoin string
-	// entityType is set where a user sort override can live in entity_curation.
-	entityType string
-	// deltaType is the change_log entity_type: "item" for a playable_item row, else
-	// the entity's table name, matching EditEntityFields.
-	deltaType string
+// sortKey is a generated key column and the SQL text over its table's row that
+// model.SortKey folds into it.
+type sortKey struct{ col, text string }
+
+// sortKeyTable is a table whose generated keys a row rewrites in one statement. as is its
+// alias in the walk and on joins its row to the entity's own; the own table is aliased t
+// and has no on.
+type sortKeyTable struct {
+	table, as, idCol, on string
+	keys                 []sortKey
 }
 
-var sortKeySources = []sortKeySource{
-	{table: "playable_item", keyCol: "sort_key", textSQL: "COALESCE(NULLIF(t.title_sort, ''), t.title)", idCol: "id",
-		pidExpr: "t.pid", deltaType: "item"},
-	{table: "artist", keyCol: "sort_key", textCol: "name", spellCol: "name_sort", idCol: "id",
-		pidExpr: "t.pid", entityType: string(model.MergeArtist), deltaType: "artist"},
-	// An alias has no pid of its own, so a rewritten one emits its artist's delta.
-	{table: "artist_alias", keyCol: "sort_key", textCol: "name", idCol: "id",
-		pidExpr: "a.pid", pidJoin: " JOIN artist a ON a.id = t.artist_id", deltaType: "artist"},
-	{table: "genre", keyCol: "sort_key", textCol: "name", idCol: "id",
-		pidExpr: "t.pid", deltaType: "genre"},
-	{table: "release_group", keyCol: "sort_key", textCol: "title", spellCol: "title_sort", idCol: "id",
-		pidExpr: "t.pid", entityType: string(model.MergeReleaseGroup), deltaType: "release_group"},
-	{table: "album", keyCol: "sort_key", textCol: "title", spellCol: "title_sort", idCol: "id",
-		pidExpr: "t.pid", entityType: string(model.MergeAlbum), deltaType: "album"},
-	{table: "series", keyCol: "sort_key", textCol: "name", idCol: "id",
-		pidExpr: "t.pid", deltaType: "series"},
-	{table: "podcast", keyCol: "sort_key", textCol: "title", idCol: "id",
-		pidExpr: "t.pid", deltaType: "podcast"},
-	// The same plain derivation, over the series sequence rather than a name.
-	{table: "book", keyCol: "series_seq_sort", textCol: "series_seq", idCol: "item_id",
-		pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
-	// The keys beside the sort spellings, in the SQL form of artistSortKey and friends.
-	{table: "track", keyCol: "artist_sort_key", textSQL: "COALESCE(NULLIF(t.artist_sort, ''), NULLIF(t.artist, ''), t.album_artist)",
-		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
-	{table: "track", keyCol: "composer_sort_key", textSQL: "COALESCE(NULLIF(t.composer_sort, ''), t.composer)",
-		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
-	{table: "book", keyCol: "author_sort_key", textSQL: "COALESCE(NULLIF(t.author_sort, ''), t.author)",
-		idCol: "item_id", pidExpr: "pi.pid", pidJoin: " JOIN playable_item pi ON pi.id = t.item_id", deltaType: "item"},
-	// The names alone folded, which a lookup by name compares while sort_key orders.
-	{table: "playable_item", keyCol: "title_key", textCol: "title", idCol: "id", pidExpr: "t.pid", deltaType: "item"},
-	{table: "artist", keyCol: "name_key", textCol: "name", idCol: "id", pidExpr: "t.pid", deltaType: "artist"},
-	{table: "album", keyCol: "title_key", textCol: "title", idCol: "id", pidExpr: "t.pid", deltaType: "album"},
+// sortKeyEntity is a kind of entity whose stale keys are rewritten in one transaction
+// under one delta. tables[0] is its own table, holding the pid the delta names. At most
+// one of the others may join several rows to an entity (an artist's aliases), since two
+// would come back as their cross product.
+type sortKeyEntity struct {
+	deltaType string // the change_log entity_type, matching EditEntityFields
+	curated   string // the entity_curation entity_type its sort override is stored under
+	tables    []sortKeyTable
+}
+
+// sortKeyEntities is every generated key. A name's own key (title_key, name_key) folds
+// the name alone, which a lookup by name compares while sort_key orders.
+var sortKeyEntities = []sortKeyEntity{
+	{deltaType: "item", tables: []sortKeyTable{
+		{table: "playable_item", as: "t", idCol: "id", keys: []sortKey{
+			{"sort_key", "COALESCE(NULLIF(t.title_sort, ''), t.title)"},
+			{"title_key", "t.title"},
+		}},
+		// The keys beside the sort spellings, in the SQL form of artistSortKey and friends.
+		{table: "track", as: "tr", idCol: "item_id", on: "tr.item_id = t.id", keys: []sortKey{
+			{"artist_sort_key", "COALESCE(NULLIF(tr.artist_sort, ''), NULLIF(tr.artist, ''), tr.album_artist)"},
+			{"composer_sort_key", "COALESCE(NULLIF(tr.composer_sort, ''), tr.composer)"},
+		}},
+		{table: "book", as: "bk", idCol: "item_id", on: "bk.item_id = t.id", keys: []sortKey{
+			{"series_seq_sort", "bk.series_seq"},
+			{"author_sort_key", "COALESCE(NULLIF(bk.author_sort, ''), bk.author)"},
+		}},
+	}},
+	{deltaType: "artist", curated: string(model.MergeArtist), tables: []sortKeyTable{
+		{table: "artist", as: "t", idCol: "id", keys: []sortKey{
+			{"sort_key", curatedSort("name_sort", "name")},
+			{"name_key", "t.name"},
+		}},
+		// An alias has no pid of its own, so a rewritten one is its artist's delta.
+		{table: "artist_alias", as: "al", idCol: "id", on: "al.artist_id = t.id", keys: []sortKey{
+			{"sort_key", "al.name"},
+		}},
+	}},
+	{deltaType: "genre", tables: []sortKeyTable{
+		{table: "genre", as: "t", idCol: "id", keys: []sortKey{{"sort_key", "t.name"}}},
+	}},
+	{deltaType: "release_group", curated: string(model.MergeReleaseGroup), tables: []sortKeyTable{
+		{table: "release_group", as: "t", idCol: "id", keys: []sortKey{{"sort_key", curatedSort("title_sort", "title")}}},
+	}},
+	{deltaType: "album", curated: string(model.MergeAlbum), tables: []sortKeyTable{
+		{table: "album", as: "t", idCol: "id", keys: []sortKey{
+			{"sort_key", curatedSort("title_sort", "title")},
+			{"title_key", "t.title"},
+		}},
+	}},
+	{deltaType: "series", tables: []sortKeyTable{
+		{table: "series", as: "t", idCol: "id", keys: []sortKey{{"sort_key", "t.name"}}},
+	}},
+	{deltaType: "podcast", tables: []sortKeyTable{
+		{table: "podcast", as: "t", idCol: "id", keys: []sortKey{{"sort_key", "t.title"}}},
+	}},
+}
+
+// curatedSort is the text a curatable entity's sort_key folds. That is the sort override
+// when one is set, because applyEntityFieldTx stores model.SortKey(override) in the
+// column and the raw override in entity_curation.value; recomputing from the display
+// name would leave a curated entity as the one thing that never folds. Clearing an
+// override stores an empty value rather than deleting the row, hence the NULLIF. Without
+// one the entity's derived spelling comes before its name.
+func curatedSort(spellCol, nameCol string) string {
+	return "COALESCE(NULLIF(TRIM(ec.value), ''), NULLIF(t." + spellCol + ", ''), t." + nameCol + ")"
 }
 
 // itemTitle is an item's title and its stated sort spelling as the row holds them.
@@ -92,7 +114,7 @@ func titleOf(item model.PlayableItem) itemTitle { return itemTitle{item.Title, i
 
 // itemSortKey, artistSortKey, composerSortKey and authorSortKey are the keys a stated sort
 // spelling orders by: the spelling folded, or with none the name it sorts in place of.
-// Every writer of a spelling or of that name stores the key beside it, and sortKeySources
+// Every writer of a spelling or of that name stores the key beside it, and sortKeyEntities
 // states the same rule in SQL for the check and the repair.
 func itemSortKey(title, titleSort string) string {
 	return model.SortKey(cmp.Or(titleSort, title))
@@ -138,47 +160,135 @@ func refreshSortSpellingKeysTx(ctx context.Context, tx *sql.Tx, itemID int64, ki
 	return nil
 }
 
-// textExpr is the SQL a row's sort key is regenerated from. For a curatable
-// entity that is the sort override when one is set, because applyEntityFieldTx
-// stores model.SortKey(override) in the column and the raw override in
-// entity_curation.value; recomputing from the display name would leave a curated
-// entity as the one thing that never folds. Clearing an override stores an empty
-// value rather than deleting the row, hence the NULLIF. Without one the entity's
-// derived spelling comes before its name.
-func (src sortKeySource) textExpr() string {
-	if src.textSQL != "" {
-		return src.textSQL
+// query is the walk over e's entities in id order: the pid, then each table's row id
+// (NULL where a joined table has no row) followed by each key's text and stored value.
+// An entity with several rows in a joined table comes back once per row. Names are
+// internal constants, so they are interpolated; entity_type is bound, like everywhere
+// else in the store.
+func (e sortKeyEntity) query() (string, []any) {
+	cols := []string{"t.pid"}
+	from := []string{e.tables[0].table + " t"}
+	var args []any
+	if e.curated != "" {
+		from = append(from, "LEFT JOIN entity_curation ec ON ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort'")
+		args = append(args, e.curated)
 	}
-	if src.entityType == "" {
-		return "t." + src.textCol
+	for _, tb := range e.tables {
+		if tb.on != "" {
+			from = append(from, "LEFT JOIN "+tb.table+" "+tb.as+" ON "+tb.on)
+		}
+		cols = append(cols, tb.as+"."+tb.idCol)
+		for _, k := range tb.keys {
+			cols = append(cols, k.text, tb.as+"."+k.col)
+		}
 	}
-	return "COALESCE(NULLIF(TRIM(ec.value), ''), NULLIF(t." + src.spellCol + ", ''), t." + src.textCol + ")"
+	return "SELECT " + strings.Join(cols, ", ") + " FROM " + strings.Join(from, " ") + " ORDER BY t." + e.tables[0].idCol, args
 }
 
-// query builds the streaming read for one source. lead is any extra leading
-// column list (the drift check needs none); the recompute text and the stored key
-// always come last. Table and column names are internal constants, so they are
-// interpolated; entity_type is bound, like everywhere else in the store.
-func (src sortKeySource) query(lead string) (string, []any) {
-	q := "SELECT " + lead + src.textExpr() + ", t." + src.keyCol +
-		" FROM " + src.table + " t" + src.pidJoin
-	var args []any
-	if src.entityType != "" {
-		q += " LEFT JOIN entity_curation ec ON ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort'"
-		args = append(args, src.entityType)
+// sortKeyRow is one row's stale keys: the columns to rewrite, the value each was read
+// with, and the one it folds to.
+type sortKeyRow struct {
+	table, idCol string
+	id           int64
+	cols         []string
+	was, want    []string
+}
+
+// sortKeyFix is one entity's stale keys.
+type sortKeyFix struct {
+	deltaType string
+	pid       model.PID
+	rows      []sortKeyRow
+}
+
+// keys is how many keys the fix rewrites.
+func (f sortKeyFix) keys() int {
+	n := 0
+	for _, r := range f.rows {
+		n += len(r.cols)
 	}
-	return q, args
+	return n
+}
+
+// walkSortKeys streams e's entities and hands fn each one holding a key that no longer
+// folds from its text. Its own errors are wrapped under op, and fn's come back as they
+// are. The read pool and the write connection are separate handles, so rows stream from
+// one while fn's updates commit on the other.
+func (s *Store) walkSortKeys(ctx context.Context, op string, e sortKeyEntity, fn func(sortKeyFix) error) error {
+	q, args := e.query()
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var pid string
+	ids := make([]sql.NullInt64, len(e.tables))
+	vals := make([][]sql.NullString, len(e.tables)) // each key's text, then its stored value
+	dest := []any{&pid}
+	for i, tb := range e.tables {
+		vals[i] = make([]sql.NullString, 2*len(tb.keys))
+		dest = append(dest, &ids[i])
+		for j := range vals[i] {
+			dest = append(dest, &vals[i][j])
+		}
+	}
+	// prev is the previous result row's ids. Past an entity's first row, a table whose id
+	// has not changed was only repeated by the join of several rows, and is already read.
+	prev := make([]int64, len(e.tables))
+	var fix sortKeyFix
+	for n := 0; rows.Next(); n++ {
+		if err := rows.Scan(dest...); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		first := n == 0 || ids[0].Int64 != prev[0]
+		if first {
+			if len(fix.rows) > 0 {
+				if err := fn(fix); err != nil {
+					return err
+				}
+			}
+			fix = sortKeyFix{deltaType: e.deltaType, pid: model.PID(pid)}
+		}
+		for i, tb := range e.tables {
+			if !ids[i].Valid || (!first && ids[i].Int64 == prev[i]) {
+				continue
+			}
+			row := sortKeyRow{table: tb.table, idCol: tb.idCol, id: ids[i].Int64}
+			for j, k := range tb.keys {
+				if want, was := model.SortKey(vals[i][2*j].String), vals[i][2*j+1].String; want != was {
+					row.cols = append(row.cols, k.col)
+					row.was = append(row.was, was)
+					row.want = append(row.want, want)
+				}
+			}
+			if len(row.cols) > 0 {
+				fix.rows = append(fix.rows, row)
+			}
+		}
+		for i := range ids {
+			prev[i] = ids[i].Int64
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if len(fix.rows) > 0 {
+		return fn(fix)
+	}
+	return nil
 }
 
 // RefreshSortKeys rewrites every stored sort key that model.SortKey no longer
-// generates and returns the number of rows rewritten. It is the repair for the
-// sort-key drift VerifyDerived reports. Only rows whose key actually moves are
-// written, and only those emit a delta, so a catalog already in step does no work
-// and floods no change log.
+// generates and returns how many keys it rewrote. It is the repair for the sort-key
+// drift VerifyDerived reports, which counts keys the same way. Only rows whose keys
+// actually move are written, so a catalog already in step does no work and floods no
+// change log.
 //
-// A rewritten entity emits its own delta and not one per member item, unlike
-// EditEntityFields: fanning out during a bulk refold would multiply the delta
-// count by the catalog's items without adding information.
+// A row's stale keys are rewritten in one statement, and an entity's rows (an item's
+// track or book row, an artist's aliases) in one transaction under one delta. That is
+// the entity's own delta and not one per member item, unlike EditEntityFields: fanning
+// out during a bulk refold would multiply the delta count by the catalog's items without
+// adding information, and so would a delta per key.
 //
 // Outstanding page cursors are silently invalidated. read.Cursor encodes the
 // row's sort key and QueryPage/EntityPage resume by comparing against it, so a
@@ -188,8 +298,8 @@ func (src sortKeySource) query(lead string) (string, []any) {
 func (s *Store) RefreshSortKeys(ctx context.Context) (int, error) {
 	const op = "store.RefreshSortKeys"
 	p := &sortKeyPatch{store: s, op: op}
-	for _, src := range sortKeySources {
-		if err := s.recomputeSortKeys(ctx, p, src); err != nil {
+	for _, e := range sortKeyEntities {
+		if err := s.walkSortKeys(ctx, op, e, func(f sortKeyFix) error { return p.add(ctx, f) }); err != nil {
 			return p.written, err
 		}
 	}
@@ -199,73 +309,31 @@ func (s *Store) RefreshSortKeys(ctx context.Context) (int, error) {
 	return p.written, nil
 }
 
-// recomputeSortKeys streams one source table and queues the rows whose key moved.
-// The read pool and the write connection are separate handles, so rows stream from one
-// while updates commit on the other and only a bounded batch is ever buffered.
-func (s *Store) recomputeSortKeys(ctx context.Context, p *sortKeyPatch, src sortKeySource) error {
-	q, args := src.query("t." + src.idCol + ", " + src.pidExpr + ", ")
-	rows, err := s.rdb().QueryContext(ctx, q, args...)
-	if err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int64
-		var pid, text, stored string
-		if err := rows.Scan(&id, &pid, &text, &stored); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-		}
-		want := model.SortKey(text)
-		if want == stored {
-			continue
-		}
-		if err := p.add(ctx, sortKeyUpdate{
-			table: src.table, col: src.keyCol, idCol: src.idCol, id: id,
-			was: stored, key: want, deltaType: src.deltaType, pid: model.PID(pid),
-		}); err != nil {
-			return err
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-	}
-	return nil
-}
-
-type sortKeyUpdate struct {
-	table     string
-	col       string
-	idCol     string
-	id        int64
-	was       string // the key read, bound as an optimistic guard
-	key       string
-	deltaType string
-	pid       model.PID
-}
-
-// sortKeyPatch buffers rewritten rows and commits them in bounded batches.
+// sortKeyPatch buffers stale entities and rewrites them in bounded batches.
 type sortKeyPatch struct {
 	store   *Store
 	op      string
-	pending []sortKeyUpdate
-	written int
+	pending []sortKeyFix
+	rows    int // rows pending
+	written int // keys rewritten
 }
 
-func (p *sortKeyPatch) add(ctx context.Context, u sortKeyUpdate) error {
-	p.pending = append(p.pending, u)
-	if len(p.pending) < sortKeyBatch {
+func (p *sortKeyPatch) add(ctx context.Context, f sortKeyFix) error {
+	p.pending = append(p.pending, f)
+	if p.rows += len(f.rows); p.rows < sortKeyBatch {
 		return nil
 	}
 	return p.flush(ctx)
 }
 
 // flush commits one batch. Statements are prepared per transaction and reused,
-// because the driver otherwise re-parses each one for every row; a batch spans at
-// most a couple of distinct updates, since rows arrive grouped by source.
+// because the driver otherwise re-parses each one for every row; a batch spans a
+// handful of distinct updates, one per table and set of stale keys.
 //
-// Each update is guarded on the key that was read. The rows are read outside the
-// write transaction, so a concurrent writer can land a fresh key in between, and
-// without the guard this would put the stale one back.
+// Each update is guarded on the keys that were read. The rows are read outside the
+// write transaction, so a concurrent writer can land fresh keys in between, and
+// without the guard this would put stale ones back. An entity emits its delta once,
+// when any of its rows was rewritten.
 func (p *sortKeyPatch) flush(ctx context.Context) error {
 	if len(p.pending) == 0 {
 		return nil
@@ -285,28 +353,44 @@ func (p *sortKeyPatch) flush(ctx context.Context) error {
 			}
 		}()
 
-		for _, u := range p.pending {
-			q := "UPDATE " + u.table + " SET " + u.col + " = ? WHERE " + u.idCol + " = ? AND " + u.col + " = ?"
-			st, ok := updates[q]
-			if !ok {
-				if st, err = tx.PrepareContext(ctx, q); err != nil {
+		for _, f := range p.pending {
+			changed := false
+			for _, r := range f.rows {
+				q := "UPDATE " + r.table + " SET " + strings.Join(r.cols, " = ?, ") + " = ? WHERE " +
+					r.idCol + " = ? AND " + strings.Join(r.cols, " = ? AND ") + " = ?"
+				st, ok := updates[q]
+				if !ok {
+					if st, err = tx.PrepareContext(ctx, q); err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, p.op, err)
+					}
+					updates[q] = st
+				}
+				args := make([]any, 0, 2*len(r.cols)+1)
+				for _, k := range r.want {
+					args = append(args, k)
+				}
+				args = append(args, r.id)
+				for _, k := range r.was {
+					args = append(args, k)
+				}
+				res, err := st.ExecContext(ctx, args...)
+				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, p.op, err)
 				}
-				updates[q] = st
+				// Someone rewrote the row after it was read; leave their keys and say nothing.
+				if n, err := res.RowsAffected(); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, p.op, err)
+				} else if n == 0 {
+					continue
+				}
+				applied += len(r.cols)
+				changed = true
 			}
-			res, err := st.ExecContext(ctx, u.key, u.id, u.was)
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-			}
-			// Someone rewrote the row after it was read; leave their key and say nothing.
-			if n, err := res.RowsAffected(); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, p.op, err)
-			} else if n == 0 {
+			if !changed {
 				continue
 			}
-			applied++
 			if _, err := changes.ExecContext(ctx,
-				nowNS(), u.deltaType, string(u.pid), string(model.OpUpdate)); err != nil {
+				nowNS(), f.deltaType, string(f.pid), string(model.OpUpdate)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, p.op, err)
 			}
 		}
@@ -317,5 +401,6 @@ func (p *sortKeyPatch) flush(ctx context.Context) error {
 	}
 	p.written += applied
 	p.pending = p.pending[:0]
+	p.rows = 0
 	return nil
 }

@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"maps"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -75,7 +77,7 @@ func TestRefreshSortKeysClearsDrift(t *testing.T) {
 		t.Fatalf("refresh: %v", err)
 	}
 	if n != 6 {
-		t.Errorf("rewrote %d rows, want 6", n)
+		t.Errorf("rewrote %d keys, want 6", n)
 	}
 	rep, err = st.VerifyDerived(ctx)
 	if err != nil {
@@ -90,7 +92,7 @@ func TestRefreshSortKeysClearsDrift(t *testing.T) {
 
 	// Idempotent: nothing moved, so nothing is rewritten.
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 0 {
-		t.Errorf("second refresh rewrote %d rows (err %v), want 0", n, err)
+		t.Errorf("second refresh rewrote %d keys (err %v), want 0", n, err)
 	}
 }
 
@@ -253,7 +255,7 @@ func TestRefreshSortKeysCoversAliasAndSeriesSeq(t *testing.T) {
 
 	before, _ := st.LatestChangeSeq(ctx)
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 2 {
-		t.Fatalf("refresh rewrote %d rows (err %v), want 2", n, err)
+		t.Fatalf("refresh rewrote %d keys (err %v), want 2", n, err)
 	}
 	if rep, _ := st.VerifyDerived(ctx); rep.SortKeyDrift != 0 {
 		t.Errorf("repair left drift: %d", rep.SortKeyDrift)
@@ -290,7 +292,7 @@ func TestRefreshSortKeysEmitsDeltas(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 1 {
-		t.Fatalf("refresh rewrote %d rows (err %v), want 1", n, err)
+		t.Fatalf("refresh rewrote %d keys (err %v), want 1", n, err)
 	}
 	got := changesSince(t, st, before)
 	artistPID := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Radiohead'")
@@ -315,35 +317,108 @@ func TestRefreshSortKeysSpansBatches(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	// Each artist's sort key and name key are both seeded wrong, so the run rewrites two
-	// rows per artist.
-	const artists = sortKeyBatch/2 + 25
-	const n = 2 * artists
-	if _, err := st.wdb().ExecContext(ctx, `
-		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
-		INSERT INTO artist(pid, name, sort_key, name_key, match_key)
-		SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'WRONG', 'edith ' || i FROM seq`, artists); err != nil {
-		t.Fatalf("seed %d artists: %v", artists, err)
-	}
+	// An artist's keys sit in one row, so this many artists cross the batch size.
+	const artists = sortKeyBatch + 25
+	keys := staleArtists(t, st, artists)
 
 	before, _ := st.LatestChangeSeq(ctx)
 	rewritten, err := st.RefreshSortKeys(ctx)
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	if rewritten != n {
-		t.Errorf("rewrote %d rows, want all %d (the run crosses %d, the batch size)", rewritten, n, sortKeyBatch)
+	if rewritten != keys {
+		t.Errorf("rewrote %d keys, want all %d (the run crosses %d rows, the batch size)", rewritten, keys, sortKeyBatch)
 	}
-	var stale int
-	if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM artist WHERE sort_key = 'WRONG'").Scan(&stale); err != nil {
-		t.Fatal(err)
+	if drift, err := st.sortKeyDrift(ctx); err != nil || drift != 0 {
+		t.Errorf("%d keys stayed stale (err %v), so a batch was dropped", drift, err)
 	}
-	if stale != 0 {
-		t.Errorf("%d rows kept their stale key, so a batch was dropped", stale)
+	if after, _ := st.LatestChangeSeq(ctx); after-before != artists {
+		t.Errorf("emitted %d deltas across the batches, want one per artist, %d", after-before, artists)
 	}
-	if after, _ := st.LatestChangeSeq(ctx); after-before != int64(n) {
-		t.Errorf("emitted %d deltas across the batches, want %d", after-before, n)
+}
+
+// TestRefreshSortKeysRewritesAnEntityOnce: the stale keys of an entity's own row and of
+// the rows hanging off it are rewritten under one delta, and the count is of keys, as
+// the drift check counts them.
+func TestRefreshSortKeysRewritesAnEntityOnce(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	tr := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/e/1.flac", essence: "e1", content: "c1", title: "Hymne",
+		artist: "Édith Piaf", album: "Éternelle", composer: "Marguerite Monnot",
+	}).ItemPID
+	bk := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/bk/1.m4b", essence: "be1", content: "bc1", title: "The Hobbit",
+		author: "Tolkien", series: "Middle-earth", seq: "2",
+	}).ItemPID
+	artist := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Édith Piaf'")
+	album := storedKey(t, st, "SELECT pid FROM album WHERE title = 'Éternelle'")
+	for _, q := range []string{
+		"UPDATE playable_item SET sort_key = 'stale', title_key = 'stale'",
+		"UPDATE track SET artist_sort_key = 'stale', composer_sort_key = 'stale'",
+		"UPDATE book SET series_seq_sort = 'stale', author_sort_key = 'stale'",
+		"UPDATE artist SET sort_key = 'stale', name_key = 'stale' WHERE name = 'Édith Piaf'",
+		"UPDATE album SET sort_key = 'stale', title_key = 'stale' WHERE title = 'Éternelle'",
+	} {
+		if _, err := st.wdb().ExecContext(ctx, q); err != nil {
+			t.Fatalf("corrupt (%s): %v", q, err)
+		}
 	}
+	// Two aliases, so the artist's own row comes back twice and must count once.
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO artist_alias(artist_id, name, sort_key, is_primary)
+		SELECT id, 'Piaf, Édith', 'stale', 0 FROM artist WHERE pid = ?1
+		UNION ALL SELECT id, 'La Môme Piaf', 'stale', 0 FROM artist WHERE pid = ?1`, artist); err != nil {
+		t.Fatalf("seed aliases: %v", err)
+	}
+	// Two on each item, two on the track and two on the book, two on the artist and one
+	// on each alias, two on the album.
+	const keys = 14
+	if drift, err := st.sortKeyDrift(ctx); err != nil || drift != keys {
+		t.Fatalf("sort-key drift = %d (err %v), want %d", drift, err, keys)
+	}
+
+	before, _ := st.LatestChangeSeq(ctx)
+	if n, err := st.RefreshSortKeys(ctx); err != nil || n != keys {
+		t.Fatalf("refresh rewrote %d keys (err %v), want %d", n, err, keys)
+	}
+	got := map[[2]string]int{}
+	for _, c := range changesSince(t, st, before) {
+		got[c]++
+	}
+	want := map[[2]string]int{{"item", string(tr)}: 1, {"item", string(bk)}: 1, {"artist", artist}: 1, {"album", album}: 1}
+	if !maps.Equal(got, want) {
+		t.Errorf("deltas = %v, want one per entity: %v", got, want)
+	}
+	if drift, err := st.sortKeyDrift(ctx); err != nil || drift != 0 {
+		t.Errorf("repair left %d keys stale (err %v)", drift, err)
+	}
+}
+
+// staleArtists inserts n artists whose every generated key is stale, the worst case for
+// a refold, and returns how many keys a refold of them rewrites. The benchmark seeds
+// through it too, so the suite keeps that seed in step with the schema and the key list.
+func staleArtists(tb testing.TB, st *Store, n int) int {
+	tb.Helper()
+	cols := []string{"pid", "name", "match_key"}
+	vals := []string{"'pid' || i", "'Édith ' || i", "'edith ' || i"}
+	keys := 0
+	for _, e := range sortKeyEntities {
+		if e.deltaType != "artist" {
+			continue
+		}
+		for _, k := range e.tables[0].keys {
+			cols = append(cols, k.col)
+			vals = append(vals, "'stale'")
+			keys++
+		}
+	}
+	if _, err := st.wdb().ExecContext(context.Background(), `
+		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
+		INSERT INTO artist(`+strings.Join(cols, ", ")+`) SELECT `+strings.Join(vals, ", ")+` FROM seq`, n); err != nil {
+		tb.Fatalf("seed %d artists: %v", n, err)
+	}
+	return n * keys
 }
 
 // TestMergeAppliesInheritedSortOverride guards the invariant against the one other
@@ -378,6 +453,6 @@ func TestMergeAppliesInheritedSortOverride(t *testing.T) {
 		t.Errorf("merge left %d sort-key drift", rep.SortKeyDrift)
 	}
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 0 {
-		t.Errorf("refresh rewrote %d rows (err %v) after a merge, want 0", n, err)
+		t.Errorf("refresh rewrote %d keys (err %v) after a merge, want 0", n, err)
 	}
 }

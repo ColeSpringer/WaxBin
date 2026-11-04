@@ -430,7 +430,7 @@ func TestRefreshSortKeysAgreesWithTheWriters(t *testing.T) {
 		t.Fatalf("verify = %+v (err %v), want one sort key drifted", rep, err)
 	}
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 1 {
-		t.Fatalf("RefreshSortKeys = %d (err %v), want the one row", n, err)
+		t.Fatalf("RefreshSortKeys = %d (err %v), want the one key", n, err)
 	}
 	if _, k := itemSortCols(t, st, tr.ItemPID); k != model.SortKey("Tokyo") {
 		t.Errorf("repaired key = %q, want the spelling's", k)
@@ -446,7 +446,7 @@ func TestRefreshSortKeysAgreesWithTheWriters(t *testing.T) {
 		t.Fatalf("verify = %+v (err %v), want the five name keys drifted", rep, err)
 	}
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 5 {
-		t.Fatalf("RefreshSortKeys = %d (err %v), want the five rows", n, err)
+		t.Fatalf("RefreshSortKeys = %d (err %v), want the five keys", n, err)
 	}
 	if got := scalarStr(t, st, "SELECT title_key FROM playable_item WHERE pid = ?", string(tr.ItemPID)); got != model.SortKey("東京") {
 		t.Errorf("repaired title key = %q, want the title's", got)

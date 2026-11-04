@@ -400,7 +400,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			"source rows. Reports drift; --fix recomputes the maintained rollups, sort spellings, book " +
 			"durations and ISBN keys, and album and release years, renumbers playlist " +
 			"positions, refolds stale sort keys and rebuilds stale search rows first, reporting " +
-			"how many rows each rewrote. Rollups a running scan has yet to settle are reported " +
+			"how much each rewrote. Rollups a running scan has yet to settle are reported " +
 			"as pending, not as drift, since the scan settles them as it goes. With no scan " +
 			"running they read as drift too: a settle that failed, which --fix recomputes, or " +
 			"a crashed scan's, which the next read-write open settles. A damaged thumbnail " +

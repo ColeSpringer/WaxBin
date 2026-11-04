@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -19,7 +18,7 @@ type DerivedReport struct {
 	ArtistRollupDrift       int // artists whose stored rollup != recompute
 	GenreRollupDrift        int
 	ReleaseGroupRollupDrift int
-	SortKeyDrift            int // entities whose stored sort_key != regenerated
+	SortKeyDrift            int // stored sort keys != regenerated; a row can hold several
 	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
 	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
 	AlbumYearDrift          int // albums whose year != their members' most common year
@@ -185,47 +184,27 @@ func (s *Store) bookISBNKeyDrift(ctx context.Context) (int, error) {
 	return len(moves), nil
 }
 
-// sortKeyDrift counts rows whose stored sort key differs from regenerating it. It
-// walks sortKeySources (sortkeys.go) and uses that source's own recompute
-// expression, so the check and the repair cannot disagree; a divergence would
-// present as permanent unfixable drift. A curated entity is checked against its
-// sort override, which is what applyEntityFieldTx stored the key from.
+// sortKeyDrift counts the stored sort keys that differ from regenerating them, so a row
+// holding two stale keys counts twice. It is the repair's own walk (walkSortKeys), so
+// the check and the repair cannot disagree; a divergence would present as permanent
+// unfixable drift. A curated entity is checked against its sort override, which is
+// what applyEntityFieldTx stored the key from.
 //
 // Sort keys are generated in Go, so this streams every row (O(n) time, O(1)
 // memory) and recomputes model.SortKey per row. That is acceptable for `db
 // verify`; if it ever needs to run hot, model.SortKey can be registered as a
 // deterministic SQLite scalar function so the comparison runs in SQL.
 func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
-	const op = "store.VerifyDerived"
 	total := 0
-	for _, src := range sortKeySources {
-		q, args := src.query("")
-		rows, err := s.rdb().QueryContext(ctx, q, args...)
-		if err != nil {
-			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		drift, err := countSortKeyDrift(rows)
-		if err != nil {
-			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		total += drift
-	}
-	return total, nil
-}
-
-func countSortKeyDrift(rows *sql.Rows) (int, error) {
-	defer rows.Close()
-	drift := 0
-	for rows.Next() {
-		var text, stored string
-		if err := rows.Scan(&text, &stored); err != nil {
+	for _, e := range sortKeyEntities {
+		if err := s.walkSortKeys(ctx, "store.VerifyDerived", e, func(f sortKeyFix) error {
+			total += f.keys()
+			return nil
+		}); err != nil {
 			return 0, err
 		}
-		if model.SortKey(text) != stored {
-			drift++
-		}
 	}
-	return drift, rows.Err()
+	return total, nil
 }
 
 // bookDurationDriftQ counts the books whose denormalized total duration is not the sum of

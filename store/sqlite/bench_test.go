@@ -207,8 +207,8 @@ func BenchmarkSearchAtScale(b *testing.B) {
 }
 
 // BenchmarkRefreshSortKeys measures the whole-catalog sort-key refold, the bulk
-// write path behind `db verify --fix`. Every seeded row drifts, so it is the
-// worst case: one rewrite and one delta each.
+// write path behind `db verify --fix`. Every key of every seeded artist is stale,
+// so it is the worst case: one update and one delta per artist, rewriting all its keys.
 func BenchmarkRefreshSortKeys(b *testing.B) {
 	const n = 20000
 	ctx := context.Background()
@@ -220,17 +220,12 @@ func BenchmarkRefreshSortKeys(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := st.wdb().ExecContext(ctx, `
-			WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
-			INSERT INTO artist(pid, name, sort_key, match_key)
-			SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'edith ' || i FROM seq`, n); err != nil {
-			b.Fatal(err)
-		}
+		keys := staleArtists(b, st, n)
 		b.StartTimer()
 		got, err := st.RefreshSortKeys(ctx)
 		b.StopTimer()
-		if err != nil || got != n {
-			b.Fatalf("rewrote %d (err %v), want %d", got, err, n)
+		if err != nil || got != keys {
+			b.Fatalf("rewrote %d keys (err %v), want %d", got, err, keys)
 		}
 		_ = st.Close()
 		b.StartTimer()
