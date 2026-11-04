@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -115,11 +116,11 @@ func TestOpenRefusesAConfiguredRootOverlappingAStoredOne(t *testing.T) {
 		}
 		return err
 	}
-	if err := open(a, filepath.Join(b, "sub")); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), b) {
+	if err := open(a, filepath.Join(b, "sub")); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), strconv.Quote(b)) {
 		t.Errorf("open with a configured root inside a stored one = %v, want CodeInvalid naming the stored root", err)
 	}
-	if err := open(a, link); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-		t.Errorf("open with a configured link to a stored root's folder = %v, want CodeInvalid naming the link", err)
+	if err := open(a, link); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("open with a configured link to a stored root's folder = %v, want CodeInvalid naming what they reach", err)
 	}
 	if err := open(a, b); err != nil {
 		t.Errorf("open with the stored root configured = %v, want it to be the same row", err)
@@ -144,8 +145,46 @@ func TestOpenRefusesAConfiguredRootOverlappingAStoredOne(t *testing.T) {
 	if err := rw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := open(a, b); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-		t.Errorf("open configuring the folder a relocated library reaches through its link = %v, want CodeInvalid naming the link", err)
+	if err := open(a, b); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("open configuring the folder a relocated library reaches through its link = %v, want CodeInvalid naming what they reach", err)
+	}
+}
+
+// TestOpenRefusesAStoredRootSpelledShort: a configured root naming a stored library's
+// folder by its 8.3 short name is refused at a read-write open, as a link to it is: the
+// catalog matches a root by its spelling, so the open would register the folder twice.
+func TestOpenRefusesAStoredRootSpelledShort(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir()) // spelled long, so a short name above counts too
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, music := filepath.Join(base, "a"), filepath.Join(base, "Music Library")
+	writeFile(t, filepath.Join(a, ".keep"), nil)
+	writeFile(t, filepath.Join(music, ".keep"), nil)
+	short := testpath.ShortPath(t, music)
+	if short == music {
+		t.Skip("no 8.3 short names here")
+	}
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib := openManaged(t, ctx, db, a)
+	if _, err := lib.AddRoot(ctx, config.Root{Path: music, Mode: model.ModeManaged}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Not seeded: reopens the catalog openManaged seeded above.
+	l, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Roots: []config.Root{
+		{Path: a, Mode: model.ModeManaged, Profile: "waxbin-native"},
+		{Path: short, Mode: model.ModeManaged, Profile: "waxbin-native"},
+	}})
+	if err == nil {
+		_ = l.Close()
+	}
+	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("open with a stored root's folder configured by its short name = %v, want CodeInvalid naming what they reach", err)
 	}
 }
 
@@ -165,14 +204,14 @@ func TestLinkOverlapIsSeenBeforeTheFolderExists(t *testing.T) {
 	if err == nil {
 		_ = l.Close()
 	}
-	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-		t.Errorf("open with a podcast dir not made yet under a link to a root = %v, want CodeInvalid naming the link", err)
+	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("open with a podcast dir not made yet under a link to a root = %v, want CodeInvalid naming what they reach", err)
 	}
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), real)
 	dangling := filepath.Join(base, "later")
 	testpath.Symlink(t, filepath.Join(real, "later"), dangling)
 	_, err = lib.AddRoot(ctx, config.Root{Path: dangling, Mode: model.ModeManaged}, waxbin.AllowAbsent())
-	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-		t.Errorf("AddRoot of a dangling link whose text reaches a root = %v, want CodeInvalid naming the link", err)
+	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("AddRoot of a dangling link whose text reaches a root = %v, want CodeInvalid naming what they reach", err)
 	}
 }

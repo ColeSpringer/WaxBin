@@ -9,6 +9,7 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/internal/testpath"
 )
 
@@ -73,12 +74,39 @@ func TestResolveLinksCarriesWhatIsNotThere(t *testing.T) {
 		{"a path through a file", filepath.Join(real, "sub", "a.mp3", "x"), filepath.Join(realNow, "sub", "a.mp3", "x")},
 	} {
 		got, err := ResolveLinks(tc.path)
-		if err != nil || got != tc.want {
+		if err != nil || !pathx.SamePath(got, tc.want) {
 			t.Errorf("%s: ResolveLinks(%s) = %q, %v; want %q", tc.name, tc.path, got, err, tc.want)
 		}
 	}
 	if got, err := ResolveLinks(filepath.Join(dir, "loop-a")); err == nil {
 		t.Errorf("a loop resolved to %q, want an error", got)
+	}
+}
+
+// TestPlainPathReadsExtendedLengthSpellings: an extended-length or device spelling of a
+// path on a drive or a share is read as the plain path, and any other path is left as it
+// is.
+func TestPlainPathReadsExtendedLengthSpellings(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		`\\?\C:\Music`:           `C:\Music`,
+		`\\.\c:\Music`:           `c:\Music`,
+		`\\?\C:`:                 `C:`,
+		`\\?\UNC\host\share\x`:   `\\host\share\x`,
+		`\\.\unc\host\share`:     `\\host\share`,
+		`\\?\Volume{1}\Music`:    `\\?\Volume{1}\Music`,
+		`\\host\share\x`:         `\\host\share\x`,
+		`C:\Music`:               `C:\Music`,
+		`/music`:                 `/music`,
+		`\\?\`:                   `\\?\`,
+		`\\?\UNC`:                `\\?\UNC`,
+		`\\?\C`:                  `\\?\C`,
+		`\\?x\C:\Music`:          `\\?x\C:\Music`,
+		`\\?\C:\Music\..\Books.`: `C:\Music\..\Books.`,
+	} {
+		if got := plainPath(in); got != want {
+			t.Errorf("plainPath(%s) = %s, want %s", in, got, want)
+		}
 	}
 }
 

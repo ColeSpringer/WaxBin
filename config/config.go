@@ -360,9 +360,9 @@ func (c *Config) OverlapThroughLinks(resolved map[string]string, candidate strin
 }
 
 // LinkedOverlap refuses two paths that do not overlap as spelled (Validate's finding)
-// but reach overlapping folders through a link, with format, Validate's message for the
-// pair, extended by what they reach. resolved maps a path to the folder it reaches; a
-// path it lacks is compared as spelled.
+// but reach overlapping folders on disk, through a link or, on Windows, another spelling
+// of a name, with format, Validate's message for the pair, extended by what they reach.
+// resolved maps a path to the folder it reaches; a path it lacks is compared as spelled.
 func LinkedOverlap(resolved map[string]string, format, a, b string) error {
 	reach := func(p string) string {
 		if r, ok := resolved[p]; ok {
@@ -374,7 +374,7 @@ func LinkedOverlap(resolved map[string]string, format, a, b string) error {
 		return nil
 	}
 	return waxerr.New(waxerr.CodeInvalid, "config.OverlapThroughLinks",
-		fmt.Sprintf(format+" through a link: they reach %q and %q", a, b, reach(a), reach(b)))
+		fmt.Sprintf(format+": on disk they reach %q and %q", a, b, reach(a), reach(b)))
 }
 
 // CheckFolder refuses a root a scan could never walk: a path that is not a folder (a link

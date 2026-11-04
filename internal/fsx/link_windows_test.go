@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxbin/internal/testpath"
 )
 
 // junction makes a junction at link to target with mklink /J, which needs no privilege,
@@ -71,4 +73,36 @@ func TestJunctionsAreLinks(t *testing.T) {
 	if got, err := ResolveLinks(filepath.Join(jroot, "a", "new")); err != nil || !strings.EqualFold(got, filepath.Join(realNow, "a", "new")) {
 		t.Errorf("ResolveLinks through a junction = %q, %v; want %q", got, err, filepath.Join(realNow, "a", "new"))
 	}
+}
+
+// TestResolveLinksReadsWindowsSpellings: a folder named by its 8.3 short name, with a
+// trailing dot, or by its extended-length path resolves to the name its folder lists, as
+// does a link whose text spells it so or roots it on the link's own volume (\Users\...).
+// The links come last, since making one skips the test where links cannot be made.
+func TestResolveLinksReadsWindowsSpellings(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	long := filepath.Join(dir, "A Long Folder Name")
+	writeFile(t, filepath.Join(long, "sub", "a.mp3"), "audio")
+	want, err := filepath.EvalSymlinks(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := testpath.ShortPath(t, long) // the long name itself where short names are off
+	check := func(path, want string) {
+		t.Helper()
+		if got, err := ResolveLinks(path); err != nil || !strings.EqualFold(got, want) {
+			t.Errorf("ResolveLinks(%s) = %q, %v; want %q", path, got, err, want)
+		}
+	}
+	check(short, want)
+	check(filepath.Join(short, "New~1"), filepath.Join(want, "New~1"))
+	check(long+".", want)
+	check(`\\?\`+long, want)
+	link := filepath.Join(dir, "short")
+	testpath.Symlink(t, short, link)
+	check(link, want)
+	rooted := filepath.Join(dir, "rooted")
+	testpath.Symlink(t, long[len(filepath.VolumeName(long)):], rooted)
+	check(filepath.Join(rooted, "sub"), filepath.Join(want, "sub"))
 }

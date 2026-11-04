@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/fsnotify/fsnotify"
 )
@@ -125,5 +126,20 @@ func TestFollowReArmsARetargetedLinkRoot(t *testing.T) {
 	}
 	if lw.watched(filepath.Join(link, "a")) || !lw.watched(filepath.Join(link, "b")) {
 		t.Errorf("watched after the retarget: a %t, b %t; want the folder it reaches now", lw.watched(filepath.Join(link, "a")), lw.watched(filepath.Join(link, "b")))
+	}
+}
+
+// TestRetargetedTellsCaseApart: a root that resolves now to a name differing in case
+// alone from the one it was armed at is retargeted, since a case-sensitive folder (NTFS
+// allows them) holds the two as two folders.
+func TestRetargetedTellsCaseApart(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lw := &liveWatch{src: newFakeSource(), log: quietLog, check: fsx.RootChecker{
+		Eval: func(string) (string, error) { return filepath.Join(root, "music"), nil },
+	}}
+	lw.reaches = map[string]string{root: filepath.Join(root, "Music")}
+	if !lw.retargeted(context.Background(), root) {
+		t.Error("a root that resolves to a name differing in case alone was not retargeted")
 	}
 }

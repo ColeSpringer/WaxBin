@@ -3,6 +3,7 @@
 package watch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -220,4 +221,29 @@ func TestRecursiveSourceReportsALinkedRootRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitEvent(t, src, link, fsnotify.Remove)
+}
+
+// TestFollowLeavesARootRenamedByCase: a root whose folder is renamed in case alone
+// resolves as it did, since a resolution keeps the names as the root spells them, so a
+// tick neither releases nor arms it again.
+func TestFollowLeavesARootRenamedByCase(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	src := newFakeSource()
+	lw := &liveWatch{src: src, log: quietLog}
+	if _, ex := lw.armRoot(ctx, root); ex {
+		t.Fatal("arming hit a ceiling")
+	}
+	if err := os.Rename(root, filepath.Join(dir, "music")); err != nil {
+		t.Fatal(err)
+	}
+	lw.follow(ctx, []Root{{LibraryPID: "L1", Path: root}})
+	if src.told(root, true) != 0 || src.told(root, false) != 1 {
+		t.Errorf("a tick after a case-only rename told the source %v / dropped %v, want the root left alone", src.adds, src.drops)
+	}
 }

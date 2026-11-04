@@ -1139,8 +1139,8 @@ func TestRootsOverlappingThroughALinkAreRefused(t *testing.T) {
 		{"a link into the podcast dir", mustLink(podReal, "pod-link")},
 	} {
 		_, err := lib.AddRoot(ctx, config.Root{Path: tc.path, Mode: model.ModeManaged})
-		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-			t.Errorf("AddRoot(%s) = %v, want CodeInvalid naming the link", tc.name, err)
+		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+			t.Errorf("AddRoot(%s) = %v, want CodeInvalid naming what they reach", tc.name, err)
 		}
 	}
 	libs, err := lib.Libraries(ctx)
@@ -1159,15 +1159,15 @@ func TestRootsOverlappingThroughALinkAreRefused(t *testing.T) {
 	if realLib == nil || otherLib == nil {
 		t.Fatalf("libraries = %+v, want the two configured roots", libs)
 	}
-	if err := lib.RelocateRoot(ctx, otherLib.PID, link); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-		t.Errorf("RelocateRoot onto a link to another library's folder = %v, want CodeInvalid naming the link", err)
+	if err := lib.RelocateRoot(ctx, otherLib.PID, link); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("RelocateRoot onto a link to another library's folder = %v, want CodeInvalid naming what they reach", err)
 	}
 	if err := lib.RelocateRoot(ctx, realLib.PID, link); err != nil {
 		t.Errorf("RelocateRoot onto a link to the library's own folder = %v, want it allowed", err)
 	}
 	// The other order: the link registered first, the folder it reaches added after.
-	if _, err := lib.AddRoot(ctx, config.Root{Path: real, Mode: model.ModeManaged}); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-		t.Errorf("AddRoot of the folder a registered link reaches = %v, want CodeInvalid naming the link", err)
+	if _, err := lib.AddRoot(ctx, config.Root{Path: real, Mode: model.ModeManaged}); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+		t.Errorf("AddRoot of the folder a registered link reaches = %v, want CodeInvalid naming what they reach", err)
 	}
 
 	for _, tc := range []struct {
@@ -1183,8 +1183,8 @@ func TestRootsOverlappingThroughALinkAreRefused(t *testing.T) {
 		if err == nil {
 			_ = l.Close()
 		}
-		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
-			t.Errorf("Open with %s = %v, want CodeInvalid naming the link", tc.name, err)
+		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "on disk they reach") {
+			t.Errorf("Open with %s = %v, want CodeInvalid naming what they reach", tc.name, err)
 		}
 	}
 }

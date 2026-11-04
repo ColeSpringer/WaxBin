@@ -12,6 +12,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/internal/testpath"
 )
 
@@ -208,10 +209,11 @@ func TestResolveAllAnswersWhatResolved(t *testing.T) {
 	}
 	gone := filepath.Join(dir, "gone")
 	got := RootChecker{}.ResolveAll(context.Background(), []string{real, link, filepath.Join(link, "gone"), gone})
-	if got[real] != wantReal || got[link] != wantReal || got[filepath.Join(link, "gone")] != filepath.Join(wantReal, "gone") {
+	same := pathx.SamePath
+	if !same(got[real], wantReal) || !same(got[link], wantReal) || !same(got[filepath.Join(link, "gone")], filepath.Join(wantReal, "gone")) {
 		t.Errorf("resolved = %v, want %q for the folder and the link to it, and a path not there yet carried under it", got, wantReal)
 	}
-	if got[gone] != filepath.Join(filepath.Dir(wantReal), "gone") || len(got) != 4 {
+	if !same(got[gone], filepath.Join(filepath.Dir(wantReal), "gone")) || len(got) != 4 {
 		t.Errorf("resolved = %v, want the path that is not there resolved as far as its folder", got)
 	}
 }

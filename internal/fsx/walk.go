@@ -88,9 +88,16 @@ func LinkBelow(root, sub string) (string, bool) {
 
 var errTooManyLinks = errors.New("too many links")
 
+// windowsPaths is whether paths follow Windows' rules, under which one folder can be
+// spelled more than one way (plainPath, aliasable).
+const windowsPaths = filepath.Separator == '\\'
+
 // ResolveLinks is the folder path reaches with every link in it followed (IsLink), for
-// comparing two paths by the folders they reach. A path not all there is resolved as far
-// as the disk holds it, a dangling link followed by what it says, and the rest carried as
+// comparing two paths by the folders they reach. Names keep their spelling, except that
+// on Windows a name that is another spelling of an entry (an 8.3 short name, or one
+// ending in a dot or a space) takes the name its folder lists, and an extended-length
+// path (\\?\C:\) is read as the plain one. A path not all there is resolved as far as
+// the disk holds it, a dangling link followed by what it says, and the rest carried as
 // spelled, so a folder not made yet (an inbox, a podcast dir, a root mounted later) is
 // compared where it will be. A component that cannot be read for another reason, or a
 // loop, is an error.
@@ -99,6 +106,9 @@ func ResolveLinks(path string) (string, error) {
 	for hops := 0; ; hops++ {
 		if hops > 40 {
 			return "", &fs.PathError{Op: "resolve", Path: path, Err: errTooManyLinks}
+		}
+		if windowsPaths {
+			path = plainPath(path)
 		}
 		vol := filepath.VolumeName(path)
 		cur := vol + string(filepath.Separator)
@@ -120,11 +130,14 @@ func ResolveLinks(path string) (string, error) {
 				if err != nil {
 					return "", err
 				}
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(cur, target)
-				}
-				path = filepath.Join(append([]string{target}, parts[i+1:]...)...)
+				path = filepath.Join(append([]string{linkTarget(vol, cur, target)}, parts[i+1:]...)...)
 				relinked = true
+			case windowsPaths && aliasable(part):
+				listed, err := filepath.EvalSymlinks(next)
+				if err != nil {
+					return "", err
+				}
+				cur = filepath.Join(cur, filepath.Base(listed))
 			default:
 				cur = next
 			}
@@ -136,4 +149,40 @@ func ResolveLinks(path string) (string, error) {
 			return cur, nil
 		}
 	}
+}
+
+// linkTarget is where a link's text leads from cur, the folder holding the link on the
+// volume vol: an absolute text, or one naming a drive, as written, a rooted one (\Music)
+// on the link's own volume, as Windows reads it, and any other below cur.
+func linkTarget(vol, cur, target string) string {
+	switch {
+	case filepath.IsAbs(target) || filepath.VolumeName(target) != "":
+		return target
+	case target != "" && os.IsPathSeparator(target[0]):
+		return vol + target
+	}
+	return filepath.Join(cur, target)
+}
+
+// plainPath reads an extended-length or device spelling of a path on a drive or a share
+// (\\?\C:\Music, \\.\UNC\host\share) as the plain path it names. Any other path, a
+// volume GUID path included, is returned as it is.
+func plainPath(p string) string {
+	if len(p) < 4 || p[0] != '\\' || p[1] != '\\' || (p[2] != '?' && p[2] != '.') || p[3] != '\\' {
+		return p
+	}
+	switch rest := p[4:]; {
+	case len(rest) >= 2 && rest[1] == ':':
+		return rest
+	case len(rest) >= 4 && strings.EqualFold(rest[:4], `UNC\`):
+		return `\\` + rest[4:]
+	}
+	return p
+}
+
+// aliasable reports whether Windows can reach an entry listed under another name by this
+// one: an 8.3 short name, which Windows makes with a tilde, or a name ending in a dot or
+// a space, which Windows trims.
+func aliasable(name string) bool {
+	return strings.Contains(name, "~") || strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ")
 }

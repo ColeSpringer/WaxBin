@@ -329,6 +329,7 @@ func (lw *liveWatch) retargeted(ctx context.Context, root string) bool {
 		return false
 	}
 	now, err := lw.check.Resolve(ctx, root)
+	// Exact, not folded: a case-sensitive folder (NTFS allows them) holds both spellings.
 	return err == nil && now != was
 }
 
