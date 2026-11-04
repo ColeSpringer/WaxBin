@@ -128,7 +128,8 @@ func newLibraryAddCmd(g *globals) *cobra.Command {
 		Short: "Register a new library root at runtime",
 		Long: "Registers a library root in the running catalog without an init or restart. The " +
 			"spec is validated against the registered roots, inbox folders, and podcast dir " +
-			"(non-overlapping, like init). The path must be a folder; pass --allow-absent for " +
+			"(non-overlapping, like init). The path must be a folder, or a link to one, which is " +
+			"stored as typed and scanned as the folder it reaches; pass --allow-absent for " +
 			"one mounted later. Re-adding an existing path updates its policy under " +
 			"the same pid. Scan, organize, and import pick the root up immediately. `waxbin watch` " +
 			"holds the catalog while it runs, so stop it to add a root; started again, it " +

@@ -118,7 +118,7 @@ func New(cat model.Catalog, reader meta.Reader, log *slog.Logger) *Scanner {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Scanner{cat: cat, reader: reader, log: log, now: time.Now, walk: filepath.WalkDir, stat: os.Stat}
+	return &Scanner{cat: cat, reader: reader, log: log, now: time.Now, walk: fsx.WalkRoot, stat: os.Stat}
 }
 
 // Request describes one scan.
@@ -171,9 +171,10 @@ type Request struct {
 //
 // Relinked and Reread ride alongside whichever outcome a file took. Missing counts
 // items, Promoted and Dropped count files reconciliation and the scan's writes settled
-// outside the walk, and WalkErrors counts entries the walk could not read at all, which
-// are in none of the others. Converted, Absorbed and Created sit outside the partition
-// too: they say what the scan's writes did to items' pids.
+// outside the walk, and WalkErrors and Links count entries the walk could not read at
+// all or did not follow, which are in none of the others. Converted, Absorbed and
+// Created sit outside the partition too: they say what the scan's writes did to items'
+// pids.
 type Result struct {
 	FilesSeen int
 	// AudioFiles is every audio file the scan visited, an errored one included.
@@ -215,9 +216,15 @@ type Result struct {
 	Dropped    int
 	Skipped    int // non-audio files
 	WalkErrors int // entries the walk could not read
+	// Links is the symbolic links the walk met below the root, none of them followed: a
+	// linked folder's files are not cataloged, and neither is a linked file.
+	Links int
 	// SubPathGone says the sub-path asked for was not there, so the scan walked nothing
-	// and reconciled what the catalog held under it.
-	SubPathGone bool
+	// and reconciled what the catalog held under it. SubPathLinked says it is reached
+	// through a link below the root, which the whole-library walk never follows, so the
+	// scan walked nothing and reconciled what the catalog held under it the same way.
+	SubPathGone   bool
+	SubPathLinked bool
 	// RootUnreachable says the library root was not there, not a folder, or not
 	// readable, which may only be a drive that is not mounted, so nothing under it was
 	// marked missing. An absent root is one walk error and is not walked at all.
@@ -252,8 +259,13 @@ const (
 	heartbeatFloor = 250 * time.Millisecond
 )
 
-// Scan walks the request's root (or sub-path) and persists every audio file.
-// Symlinks are not followed (no-follow + no loops). hb may be nil.
+// Scan walks the request's root (or sub-path) and persists every audio file. A root
+// that is itself a link to a folder is walked as that folder, every file spelled under
+// the root as registered; a link below the root is counted (Result.Links) and not
+// followed, so no loop is walked and no file is cataloged twice through two paths. A
+// sub-path reached through one walks nothing and says so (Result.SubPathLinked), and
+// what the catalog held under it is reconciled missing, as the next whole-library scan
+// would do. hb may be nil.
 func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result, error) {
 	const op = "scan.Scan"
 	if req.Library == nil {
@@ -270,7 +282,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		}
 		walkRoot = filepath.Clean(walkRoot)
 		if !pathx.UnderRoot(root, walkRoot) {
-			return nil, waxerr.New(waxerr.CodeInvalid, op, "sub-path is outside the library root")
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "sub-path is outside the library root (a sub-path is spelled under the root as registered)")
 		}
 		// Re-anchor on the stored root's spelling. UnderRoot folds case, so on Windows
 		// a sub-path may pass the guard while carrying a different casing of the root
@@ -283,10 +295,8 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		// see the note beside fileByPathDB for why that is left alone.
 		if rel, err := filepath.Rel(root, walkRoot); err == nil {
 			walkRoot = filepath.Join(root, rel)
-			// A walk starting below the trash folder would never meet the skip below. The
-			// sub-path is judged as typed and as the disk spells it, since Windows reaches
-			// the folder through a short or trailing-dot spelling of its name too.
-			if model.InTrash(rel) || model.InTrash(spelledRel(root, walkRoot)) {
+			// A walk starting below the trash folder would never meet the skip below.
+			if model.InTrash(rel) {
 				return nil, waxerr.New(waxerr.CodeInvalid, op, "sub-path is inside the library trash")
 			}
 		}
@@ -303,6 +313,21 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 			_ = hb(1, "library root is not reachable")
 		}
 		return res, nil
+	}
+	// Judged once the root answered, since both stat the sub-path and a mount that does
+	// not answer would hold them as it would the root check. The trash is judged as the
+	// disk spells the sub-path too, since Windows reaches the folder through a short or
+	// trailing-dot spelling of its name. A sub-path reached through a link below the root
+	// is what the whole-library walk never meets, so it is walked as that walk would
+	// walk it, not at all, and what the catalog holds under it is reconciled.
+	if walkRoot != root {
+		if model.InTrash(spelledRel(root, walkRoot)) {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "sub-path is inside the library trash")
+		}
+		if link, ok := fsx.LinkBelow(root, walkRoot); ok {
+			s.log.Debug("scan sub-path is behind a link, which a scan does not follow", "path", walkRoot, "link", link)
+			res.SubPathLinked = true
+		}
 	}
 	sc := &scanCtx{cache: artCacheAt(root), force: req.Force || req.ReResolve, reResolve: req.ReResolve, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
 		folders: map[string]*folderState{}, adoption: req.Adoption, ids: &identities{}}
@@ -354,9 +379,11 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	// removed by hand) is nothing to walk and no walk error: the reconcile below marks what
 	// the catalog held under it missing.
 	walk := s.walk
-	if walkRoot != root && subPathGone(walkRoot) {
+	if walkRoot != root && !res.SubPathLinked && subPathGone(walkRoot) {
 		s.log.Debug("scan sub-path is gone", "path", walkRoot)
 		res.SubPathGone = true
+	}
+	if res.SubPathGone || res.SubPathLinked {
 		walk = func(string, fs.WalkDirFunc) error { return nil }
 	}
 	walkErr := walk(walkRoot, func(path string, d fs.DirEntry, err error) error {
@@ -382,8 +409,9 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 			}
 			return nil
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil // no-follow symlink policy
+		if fsx.EntryIsLink(d) {
+			res.Links++
+			return nil
 		}
 		if !d.Type().IsRegular() {
 			return nil
@@ -488,6 +516,10 @@ func (s *Scanner) reconcileMissing(ctx context.Context, root, walkRoot string, s
 	info, statErr := os.Stat(walkRoot)
 	unread := sc.unreadable
 	switch {
+	case walkRoot != root && res.SubPathLinked:
+		// The sub-path is behind a link the library never follows: what it held is gone
+		// from the library's point of view, the root having answered already.
+		unread = nil
 	case errors.Is(statErr, fs.ErrNotExist) && walkRoot != root && (res.SubPathGone || fsx.RootUnreachableCtx(ctx, root, fsx.RootCheckTimeout) == nil):
 		// The sub-path is genuinely gone from a root that is there: reconcile what it held.
 		unread = nil
@@ -635,7 +667,9 @@ type FileOptions struct {
 	ReResolve bool
 }
 
-// ScanFileWith is ScanFileAs with the options an import passes.
+// ScanFileWith is ScanFileAs with the options an import passes. A file whose folder is
+// reached through a link below the library root is refused, since the whole-library walk
+// would never meet it and the next scan would mark it missing.
 func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path string, opts FileOptions) (*Result, *model.ScanItemResult, error) {
 	if lib == nil {
 		return nil, nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "scan request has no library")
@@ -643,6 +677,9 @@ func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path str
 	res := &Result{}
 	if !isAudio(path) {
 		return res, nil, nil
+	}
+	if link, ok := fsx.LinkBelow(string(lib.Root), path); ok {
+		return nil, nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "the file is reached through a link below the library root, which a scan does not follow: "+link)
 	}
 	res.FilesSeen++
 	res.AudioFiles++
@@ -1059,7 +1096,7 @@ func countOutcome(res *Result, out *model.ScanItemResult) *int {
 // rules, for a first scan's progress denominator.
 func countAudio(ctx context.Context, root string) int {
 	n := 0
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	_ = fsx.WalkRoot(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}

@@ -340,7 +340,7 @@ func (s *recursiveSource) drop(r *rootWatch) {
 // rescans carry it from here.
 func (s *recursiveSource) refused(r *rootWatch, err error) {
 	s.drop(r)
-	if _, serr := os.Lstat(r.path); serr != nil {
+	if _, serr := os.Stat(r.path); serr != nil {
 		s.send(fsnotify.Event{Name: r.path, Op: fsnotify.Remove})
 		return
 	}

@@ -4,6 +4,7 @@ package testpath
 import (
 	"os"
 	"path/filepath"
+	"testing"
 )
 
 // Vol is the volume of the working directory: a drive such as "C:" on Windows, empty
@@ -16,4 +17,13 @@ func Vol() string {
 		panic("testpath: getwd: " + err.Error())
 	}
 	return filepath.VolumeName(wd)
+}
+
+// Symlink makes link point at target, skipping the test where links cannot be made
+// (Windows without the privilege or developer mode).
+func Symlink(tb testing.TB, target, link string) {
+	tb.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		tb.Skipf("no symlinks here: %v", err)
+	}
 }

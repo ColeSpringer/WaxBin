@@ -170,7 +170,10 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	// get the same isolation as the CLI. Overlapping roots could otherwise let organize
 	// move files from an in-place library, a root inside the podcast dir would scan the
 	// downloads as music, and two spellings of one podcast dir would make two libraries.
-	// Validate cleans in place, so it works on copies of the caller's slices.
+	// A path that reaches another's folder through a link, or a configured root that
+	// overlaps a library stored at runtime, is the same overlap, judged once the catalog
+	// is open (checkConfiguredRoots). Validate cleans in place, so it works on copies of
+	// the caller's slices.
 	cfg := &config.Config{DBPath: opts.DBPath, Roots: slices.Clone(opts.Roots), Inbox: slices.Clone(opts.Inbox),
 		Podcasts: opts.Podcasts}
 	if err := cfg.Validate(); err != nil {
@@ -256,6 +259,10 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	l.auditor = audit.New(st, identity.ContentHash, auditProbe(meta.NewReader(), decoder), log)
 
 	if !opts.ReadOnly {
+		if err := l.checkConfiguredRoots(ctx); err != nil {
+			_ = st.Close()
+			return nil, err
+		}
 		if err := l.ensureRoots(ctx); err != nil {
 			_ = st.Close()
 			return nil, err
@@ -401,6 +408,58 @@ func (l *Library) Close() error {
 // ReadOnly reports whether the library was opened read-only.
 func (l *Library) ReadOnly() bool { return l.store.ReadOnly() }
 
+// checkConfiguredRoots refuses, at a read-write open, a configured root, inbox folder or
+// podcast dir that reaches another's folder through a link, and a configured root that
+// overlaps a library registered at runtime and stored, as spelled or through a link,
+// naming both: the configuration or the stored library has to change. A configured root
+// that is a stored row is that row. The paths are resolved together, bounded like a root
+// check, so a mount that does not answer in time is compared as spelled; a read-only open
+// registers no root and can neither scan nor organize, so it skips this and pays no stat
+// of the roots, as does an open with one path, which overlaps nothing.
+func (l *Library) checkConfiguredRoots(ctx context.Context) error {
+	const op = "waxbin.Open"
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	cfg := &config.Config{Roots: l.opts.Roots, Inbox: l.opts.Inbox, Podcasts: l.opts.Podcasts}
+	paths := cfg.Paths()
+	var stored []*model.Library
+	for _, lib := range libs {
+		if lib.Mode != model.ModePodcast {
+			stored = append(stored, lib)
+			paths = append(paths, string(lib.Root))
+		}
+	}
+	if len(paths) < 2 {
+		return nil
+	}
+	resolved := fillResolved(map[string]string{}, paths, l.roots.ResolveAll(ctx, paths))
+	if err := ctx.Err(); err != nil {
+		return waxerr.FromContext(op, err, waxerr.CodeIO)
+	}
+	if err := cfg.OverlapThroughLinks(resolved, ""); err != nil {
+		return err
+	}
+	for _, r := range l.opts.Roots {
+		for _, lib := range stored {
+			root := string(lib.Root)
+			if pathx.SamePath(root, r.Path) {
+				continue
+			}
+			format := "configured root %q overlaps library " + string(lib.PID) + " at %q"
+			if pathx.Overlap(root, r.Path) {
+				return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(format, r.Path, root)+
+					"; take it out of the configuration, or relocate or remove the library")
+			}
+			if err := config.LinkedOverlap(resolved, format, r.Path, root); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ensureRoots registers the configured roots, under rootMu since RemoveRoot and
 // RelocateRoot change them.
 func (l *Library) ensureRoots(ctx context.Context) error {
@@ -517,9 +576,13 @@ func AllowAbsent() RootOption { return func(o *rootOptions) { o.allowAbsent = tr
 // Spec defaults match config loading (in-place, mixed, waxbin-native).
 //
 // Unlike a configured root, which Open resolves against the working directory, the path
-// must be absolute, and it must be a folder a scan can walk: a file is refused, and so
-// is a path that does not exist unless AllowAbsent is passed. The stat is bounded, and
-// one that does not answer in 5 s is CodeIO unless AllowAbsent is passed.
+// must be absolute, and it must be a folder a scan can walk, or a link to one, which is
+// stored as typed and walked as the folder it reaches: a file is refused, and so is a
+// path that does not exist unless AllowAbsent is passed. The stat is bounded, and one
+// that does not answer in 5 s is CodeIO unless AllowAbsent is passed. A root that reaches
+// another root's folder, an inbox folder or the podcast dir through a link is refused as
+// the folder itself would be; that resolution is bounded the same way, and a path that
+// does not answer in time is compared as spelled.
 //
 // The store is the single source of truth for roots, so scan, organize, and import
 // pick the new root up immediately and the row survives a restart even if the embedder
@@ -538,12 +601,12 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...RootOpt
 	}
 	// Stat the folder before taking rootMu, so a hung mount blocks no other root
 	// mutation; its refusal is reported after the overlap checks, which say more.
-	walkable := l.checkFolder(ctx, spec.Path, o.allowAbsent)
+	resolved, walkable := l.checkAndResolve(ctx, spec.Path, o.allowAbsent)
 	// Hold rootMu across validate + upsert so a concurrent root mutation cannot
 	// slip an overlapping row in between the two.
 	l.rootMu.Lock()
 	defer l.rootMu.Unlock()
-	normalized, err := l.validateRootSet(ctx, "", spec)
+	normalized, err := l.validateRootSet(ctx, "", spec, resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -726,7 +789,7 @@ func (l *Library) removableRoot(ctx context.Context, op string, libPID model.PID
 // check against the podcast library row's stored root. The row is authoritative and
 // covers what the configured dir does not, a process opened with Podcasts.Dir unset
 // while a podcast row persists from a prior run.
-func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, candidate config.Root) (config.Root, error) {
+func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, candidate config.Root, resolved map[string]string) (config.Root, error) {
 	const op = "Library.validateRootSet"
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -772,13 +835,71 @@ func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, 
 		return config.Root{}, err
 	}
 	normalized := cfg.Roots[len(cfg.Roots)-1]
+	// A path the caller's resolution (resolveRoots, off rootMu) did not cover, a root
+	// registered since or the candidate spelled another way, is resolved here, bounded.
+	var missing []string
+	for _, p := range append(cfg.Paths(), podcastRoots...) {
+		if _, ok := resolved[p]; !ok {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) > 0 {
+		resolved = fillResolved(resolved, missing, l.roots.ResolveAll(ctx, missing))
+	}
+	if err := cfg.OverlapThroughLinks(resolved, normalized.Path); err != nil {
+		return config.Root{}, err
+	}
 	for _, pr := range podcastRoots {
 		if pathx.Overlap(pr, normalized.Path) {
 			return config.Root{}, waxerr.New(waxerr.CodeInvalid, op,
 				"root "+normalized.Path+" overlaps the internal podcast library at "+pr)
 		}
+		podcast := &config.Config{Roots: []config.Root{normalized}, Podcasts: config.PodcastConfig{Dir: pr}}
+		if err := podcast.OverlapThroughLinks(resolved, ""); err != nil {
+			return config.Root{}, err
+		}
 	}
 	return normalized, nil
+}
+
+// resolveRoots resolves, bounded, the paths validateRootSet compares through links:
+// every registered root, the configured inbox folders and podcast dir, and extra. It
+// runs off rootMu, so a mount that does not answer holds up no other root mutation. A
+// path that does not resolve is mapped to itself and so compared as spelled.
+func (l *Library) resolveRoots(ctx context.Context, extra ...string) map[string]string {
+	var paths []string
+	for _, p := range extra {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		paths = append(paths, filepath.Clean(p))
+	}
+	if libs, err := l.store.Libraries(ctx); err == nil {
+		for _, lib := range libs {
+			paths = append(paths, string(lib.Root))
+		}
+	}
+	paths = append(paths, l.opts.Inbox...)
+	if l.opts.Podcasts.Dir != "" {
+		paths = append(paths, l.opts.Podcasts.Dir)
+	}
+	return fillResolved(map[string]string{}, paths, l.roots.ResolveAll(ctx, paths))
+}
+
+// fillResolved adds answers to resolved and maps each of paths it did not answer to
+// itself.
+func fillResolved(resolved map[string]string, paths []string, answers map[string]string) map[string]string {
+	if resolved == nil {
+		resolved = map[string]string{}
+	}
+	for _, p := range paths {
+		if r, ok := answers[p]; ok {
+			resolved[p] = r
+		} else {
+			resolved[p] = p
+		}
+	}
+	return resolved
 }
 
 // Query runs a compiled selection and returns matching item views. A query that
@@ -3603,6 +3724,13 @@ func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 					"cannot restore trash entry "+string(trashPID)+": library "+string(cand.PID)+" is read-only")
 			}
 		}
+		// The rescan below refuses a sub-path reached through a link below the root, so a
+		// folder that became one since the delete is refused before the file moves and
+		// the entry stays restorable.
+		if link, ok := fsx.LinkBelow(lib.RootPath(), filepath.Dir(entry.OrigDisplay)); ok {
+			return waxerr.New(waxerr.CodeInvalid, "Library.RestoreTrash",
+				"cannot restore "+entry.OrigDisplay+": its folder is reached through a link below the root, which a scan does not follow: "+link)
+		}
 		// Move the file back (idempotent: a retry after a failed re-scan is a no-op).
 		if err := l.trasher.Restore(*entry); err != nil {
 			return err
@@ -4533,8 +4661,9 @@ func (l *Library) Manifest(ctx context.Context) (*port.Manifest, error) {
 // RelocateRoot re-points a library, every file under it and its trash journal at a new
 // root path, for a portable restore onto a different machine or mount. The new path is
 // validated with the moved library's entry substituted, so a relocation cannot create the
-// overlap Open would refuse, and like AddRoot's it must be an absolute folder a scan can
-// walk, one not there yet only with AllowAbsent. It stats the new root, bounded as AddRoot
+// overlap Open would refuse, through a link included (a link to the library's own folder
+// is allowed), and like AddRoot's it must be an absolute folder a scan can walk, one not
+// there yet only with AllowAbsent. It stats the new root, bounded as AddRoot
 // does, before it takes the filesystem lease, and then holds the lease, so it is
 // CodeConflict while a scan, organize, import or delete runs. The internal podcast
 // library is not relocatable: its root follows the podcasts dir config.
@@ -4548,12 +4677,12 @@ func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot st
 	}
 	// Stat before the lease and rootMu, as AddRoot does, so a hung mount holds up no scan
 	// or other root mutation; the refusal is reported after the overlap checks.
-	walkable := l.checkFolder(ctx, newRoot, o.allowAbsent)
-	if ctx.Err() != nil {
-		return walkable
+	resolved, walkable := l.checkAndResolve(ctx, newRoot, o.allowAbsent)
+	if err := ctx.Err(); err != nil {
+		return waxerr.FromContext("Library.RelocateRoot", err, waxerr.CodeIO)
 	}
 	return l.jobs.RunLeased(ctx, fsMutateScope, func(ctx context.Context) error {
-		return l.relocateRoot(ctx, libPID, newRoot, walkable)
+		return l.relocateRoot(ctx, libPID, newRoot, walkable, resolved)
 	})
 }
 
@@ -4563,7 +4692,16 @@ func (l *Library) checkFolder(ctx context.Context, path string, absent bool) err
 	return config.FolderVerdict(path, absent, l.roots.Check(ctx, path))
 }
 
-func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot string, walkable error) error {
+// checkAndResolve runs checkFolder on a candidate root and resolveRoots over the set it
+// joins at once, both bounded, so a candidate that does not answer costs one timeout.
+func (l *Library) checkAndResolve(ctx context.Context, path string, absent bool) (resolved map[string]string, walkable error) {
+	done := make(chan map[string]string, 1)
+	go func() { done <- l.resolveRoots(ctx, path) }()
+	walkable = l.checkFolder(ctx, path, absent)
+	return <-done, walkable
+}
+
+func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot string, walkable error, resolved map[string]string) error {
 	const op = "Library.RelocateRoot"
 	// Serialize with AddRoot (and other relocations) so the read-validate-write is
 	// atomic against a concurrent root mutation; see rootMu.
@@ -4589,7 +4727,7 @@ func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot st
 	}
 	normalized, err := l.validateRootSet(ctx, libPID, config.Root{
 		Path: newRoot, Mode: moved.Mode, Media: moved.Media, Profile: moved.Profile,
-	})
+	}, resolved)
 	if err != nil {
 		return err
 	}
@@ -4599,8 +4737,9 @@ func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot st
 	if err := l.store.RelocateLibraryRoot(ctx, libPID, normalized.Path); err != nil {
 		return err
 	}
-	// A configured root moves with its library, or a reopen of this handle would register
-	// the old path again as an empty library.
+	// A configured root moves with its library in this handle. A later open still
+	// configuring the old path registers it as a library of its own, or is refused where
+	// it reaches the moved library's folder (checkConfiguredRoots).
 	roots := slices.Clone(l.opts.Roots)
 	for i := range roots {
 		if pathx.SamePath(string(moved.Root), roots[i].Path) {
@@ -4834,7 +4973,9 @@ func addResult(dst *scan.Result, src *scan.Result) {
 	dst.Promoted += src.Promoted
 	dst.Dropped += src.Dropped
 	dst.WalkErrors += src.WalkErrors
+	dst.Links += src.Links
 	dst.SubPathGone = dst.SubPathGone || src.SubPathGone
+	dst.SubPathLinked = dst.SubPathLinked || src.SubPathLinked
 	dst.RootUnreachable = dst.RootUnreachable || src.RootUnreachable
 	dst.MergeIdentities(src)
 }

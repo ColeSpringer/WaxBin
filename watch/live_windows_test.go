@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -199,4 +200,24 @@ func TestRecursiveSourceCloseEndsTheStreams(t *testing.T) {
 	if err := src.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+}
+
+// TestRecursiveSourceReportsALinkedRootRemoved: a root that is a link to a folder is
+// reported gone when that folder is removed under its watch, as a plain root is, so the
+// watcher re-arms it once the folder is back rather than keeping a dead watch.
+func TestRecursiveSourceReportsALinkedRootRemoved(t *testing.T) {
+	dir := t.TempDir()
+	real, link := filepath.Join(dir, "real"), filepath.Join(dir, "link")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testpath.Symlink(t, real, link)
+	src := testSource(t)
+	if err := src.Add(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(real); err != nil {
+		t.Fatal(err)
+	}
+	awaitEvent(t, src, link, fsnotify.Remove)
 }

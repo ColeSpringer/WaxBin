@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/internal/testpath"
 )
 
 func writeFile(t *testing.T, path, content string) {
@@ -30,9 +31,7 @@ func writeFile(t *testing.T, path, content string) {
 func TestMoveOntoAnotherSpellingOfItself(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "real", "A.mp3"), "audio")
-	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
-		t.Skipf("symlink: %v", err)
-	}
+	testpath.Symlink(t, filepath.Join(dir, "real"), filepath.Join(dir, "link"))
 	if err := Move(filepath.Join(dir, "link", "A.mp3"), filepath.Join(dir, "real", "A.mp3")); err != nil {
 		t.Fatalf("Move: %v", err)
 	}

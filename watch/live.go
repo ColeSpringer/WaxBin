@@ -191,16 +191,17 @@ loop:
 
 // handleEvent coalesces an event to its containing directory and schedules a
 // debounced rescan. A newly created directory is also added to the watch set (and
-// itself rescanned) so a moved-in subtree stays covered. It runs on the event worker
-// goroutine, off the read loop, so its os.Stat / addTree walk cannot stall event
-// reading.
+// itself rescanned) so a moved-in subtree stays covered; a created link is not, since
+// the scan follows no link below a root, and its parent's rescan counts it. It runs on
+// the event worker goroutine, off the read loop, so its os.Lstat / addTree walk cannot
+// stall event reading.
 func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) {
 	if lw.settle(deb, ev) {
 		return
 	}
 	if ev.Has(fsnotify.Create) {
-		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-			if _, ex := lw.addTree(ev.Name); ex {
+		if info, err := os.Lstat(ev.Name); err == nil && info.IsDir() {
+			if _, ex := lw.addTree(ev.Name, false); ex {
 				w.degraded.Store(true)
 			}
 			deb.schedule(ev.Name)
@@ -256,17 +257,21 @@ type liveWatch struct {
 	// takes the folders below it without a walk over the whole set.
 	below map[string]map[string]bool
 	// roots is the root paths it was asked to arm, which a set without one releases, and
-	// unreachable the ones among them that were not there when it tried.
+	// unreachable the ones among them that were not there when it tried. reaches is the
+	// folder each armed root reached when armed, so a root that is a link pointed
+	// elsewhere since is armed again.
 	roots       map[string]bool
 	unreachable map[string]bool
+	reaches     map[string]string
 	check       fsx.RootChecker
 }
 
 // armRoot arms a root's tree unless the root is still armed, and remembers it as a root.
 // It reports how many folders it armed and whether it hit a ceiling, as addTree does. A
-// root that is not there, or is not a folder, or does not answer a stat in time, is a
-// library out of reach (a drive not mounted, say), said once until it is back rather than
-// taken for a failed watch.
+// root that is a link to a folder is armed as that folder, each watch spelled under the
+// root, as the scan files its paths. A root that is not there, or is not a folder, or
+// does not answer a stat in time, is a library out of reach (a drive not mounted, say),
+// said once until it is back rather than taken for a failed watch.
 func (lw *liveWatch) armRoot(ctx context.Context, root string) (int, bool) {
 	root = filepath.Clean(root)
 	lw.mu.Lock()
@@ -302,7 +307,29 @@ func (lw *liveWatch) armRoot(ctx context.Context, root string) (int, bool) {
 	case was:
 		lw.log.Info("watch: library root is reachable again", "root", root)
 	}
-	return lw.addTree(root)
+	added, exhausted := lw.addTree(root, true)
+	if reached, err := lw.check.Resolve(ctx, root); err == nil {
+		lw.mu.Lock()
+		if lw.reaches == nil {
+			lw.reaches = map[string]string{}
+		}
+		lw.reaches[root] = reached
+		lw.mu.Unlock()
+	}
+	return added, exhausted
+}
+
+// retargeted reports whether an armed root reaches another folder than it did when
+// armed, as a link pointed elsewhere does, whose watches stay on the folder it left.
+func (lw *liveWatch) retargeted(ctx context.Context, root string) bool {
+	lw.mu.Lock()
+	was, known := lw.reaches[root]
+	lw.mu.Unlock()
+	if !known {
+		return false
+	}
+	now, err := lw.check.Resolve(ctx, root)
+	return err == nil && now != was
 }
 
 // outOfReach reports whether every root it was asked to arm was out of reach.
@@ -313,7 +340,8 @@ func (lw *liveWatch) outOfReach() bool {
 }
 
 // follow arms the roots in set it does not hold and releases those it armed that set no
-// longer names, reporting whether an arm hit a ceiling.
+// longer names, or that reach another folder than when armed, reporting whether an arm
+// hit a ceiling.
 func (lw *liveWatch) follow(ctx context.Context, set []Root) bool {
 	keep := make(map[string]bool, len(set))
 	for _, r := range set {
@@ -327,6 +355,12 @@ func (lw *liveWatch) follow(ctx context.Context, set []Root) bool {
 		}
 	}
 	lw.mu.Unlock()
+	for root := range keep {
+		if lw.retargeted(ctx, root) {
+			lw.log.Info("watch: library root reaches another folder now; watching it there", "root", root)
+			gone = append(gone, root)
+		}
+	}
 	for _, root := range gone {
 		lw.release(root)
 	}
@@ -345,6 +379,7 @@ func (lw *liveWatch) release(root string) {
 	lw.mu.Lock()
 	delete(lw.roots, root)
 	delete(lw.unreachable, root)
+	delete(lw.reaches, root)
 	gone := lw.drop(root, nil)
 	lw.unlink(root)
 	lw.mu.Unlock()
@@ -411,15 +446,21 @@ func (lw *liveWatch) watched(dir string) bool {
 	return lw.armed[dir]
 }
 
-// addTree watches dir and every folder below it, skipping the library trash directory
-// and unreadable subtrees. It stops early once the configured max is reached or the
-// kernel refuses a watch (an inotify exhaustion surfaces as ENOSPC), returning how
-// many it armed and whether it hit either ceiling. Stopping on ENOSPC avoids a
-// per-directory warning storm when the rest of the walk would fail the same way, and
-// it lets the caller fall back to scheduled-only coverage for the remainder.
-func (lw *liveWatch) addTree(dir string) (added int, exhausted bool) {
+// addTree watches dir and every folder below it, skipping the library trash directory,
+// unreadable subtrees and links; dir itself is followed when it is a link only for a
+// root (root), so a folder swapped for a link since its event is left unwatched. It
+// stops early once the configured max is reached or the kernel refuses a watch (an
+// inotify exhaustion surfaces as ENOSPC), returning how many it armed and whether it
+// hit either ceiling. Stopping on ENOSPC avoids a per-directory warning storm when the
+// rest of the walk would fail the same way, and it lets the caller fall back to
+// scheduled-only coverage for the remainder.
+func (lw *liveWatch) addTree(dir string, root bool) (added int, exhausted bool) {
 	dir = filepath.Clean(dir)
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	walk := filepath.WalkDir
+	if root {
+		walk = fsx.WalkRoot
+	}
+	_ = walk(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}

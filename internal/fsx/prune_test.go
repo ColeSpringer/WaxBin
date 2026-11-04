@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/colespringer/waxbin/internal/testpath"
 )
 
 func mkdirs(t *testing.T, dirs ...string) {
@@ -176,9 +178,7 @@ func TestPruneNeverRemovesASymlinkedFolder(t *testing.T) {
 	artist := filepath.Join(root, "Artist")
 	mkdirs(t, real, filepath.Join(artist, "Album"))
 	link := filepath.Join(artist, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Skipf("symlink: %v", err)
-	}
+	testpath.Symlink(t, real, link)
 	if rep, err := PruneDirs(link, pruneOpts(root, nil)); err != nil || len(removedDirs(rep)) != 0 || !exists(link) || !exists(real) {
 		t.Fatalf("from the link: Removed = %v (err %v); want nothing removed", removedDirs(rep), err)
 	}
@@ -250,9 +250,7 @@ func TestPruneFollowsALinkedRoot(t *testing.T) {
 	dir := t.TempDir()
 	real, root := filepath.Join(dir, "real"), filepath.Join(dir, "link")
 	mkdirs(t, filepath.Join(real, "Artist"))
-	if err := os.Symlink(real, root); err != nil {
-		t.Skipf("symlink: %v", err)
-	}
+	testpath.Symlink(t, real, root)
 	artist := filepath.Join(root, "Artist")
 	fsys := fakeDirs{device: map[string]uint64{root: 2, artist: 2}}
 	rep, err := pruneDirs(fsys, artist, pruneOpts(root, nil))

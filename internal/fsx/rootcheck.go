@@ -22,9 +22,11 @@ const RootCheckTimeout = 5 * time.Second
 var ErrUnverified = errors.New("root check timed out")
 
 // RootChecker runs RootUnreachable bounded in time. Its zero value stats with
-// RootUnreachable and waits RootCheckTimeout; Stat and Timeout replace either.
+// RootUnreachable and waits RootCheckTimeout; Stat and Timeout replace either, and Eval
+// replaces the resolution Resolve runs (ResolveLinks).
 type RootChecker struct {
 	Stat    func(root string) error
+	Eval    func(root string) (string, error)
 	Timeout time.Duration
 }
 
@@ -33,25 +35,78 @@ func RootUnreachableCtx(ctx context.Context, root string, timeout time.Duration)
 	return RootChecker{Timeout: timeout}.Check(ctx, root)
 }
 
-// inflight holds the stats running now, by root, so checks of one root share one.
+// inflight holds the probes running now, by root, so every check or resolution of a
+// root shares one.
 var inflight = struct {
 	sync.Mutex
 	stats map[string]*rootStat
 }{stats: map[string]*rootStat{}}
 
+// rootStat is one probe's answers: the stat's (reach) and the resolution's.
 type rootStat struct {
-	done chan struct{}
-	err  error
+	done  chan struct{}
+	reach error
+	path  string
+	err   error
 }
 
 // Check answers what RootUnreachable would, ctx's error when ctx ends first, or
 // ErrUnverified when the timeout does. The stat runs on a goroutine of its own, shared by
-// every check of the root that comes while it runs, and goes on until the kernel answers,
-// so a mount that never answers holds one thread however often it is asked.
+// every check or resolution of the root that comes while it runs, and goes on until the
+// kernel answers, so a mount that never answers holds one thread however often it is
+// asked.
 func (c RootChecker) Check(ctx context.Context, root string) error {
-	stat, timeout := c.Stat, c.Timeout
+	st, err := c.probe(ctx, root)
+	if err != nil {
+		return err
+	}
+	return st.reach
+}
+
+// Resolve returns the path root reaches with every link in it followed (ResolveLinks),
+// bounded as Check is: ctx's error when ctx ends first, ErrUnverified when the timeout
+// does, and otherwise the resolution's own answer.
+func (c RootChecker) Resolve(ctx context.Context, root string) (string, error) {
+	st, err := c.probe(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	return st.path, st.err
+}
+
+// ResolveAll resolves paths together, each bounded as Resolve is, and maps each that
+// answered to the path it reaches; one that did not answer is left out.
+func (c RootChecker) ResolveAll(ctx context.Context, paths []string) map[string]string {
+	type answer struct {
+		path, resolved string
+		err            error
+	}
+	answers := make(chan answer, len(paths))
+	for _, p := range paths {
+		go func() {
+			resolved, err := c.Resolve(ctx, p)
+			answers <- answer{p, resolved, err}
+		}()
+	}
+	out := map[string]string{}
+	for range paths {
+		if a := <-answers; a.err == nil {
+			out[a.path] = a.resolved
+		}
+	}
+	return out
+}
+
+// probe stats and resolves root on one goroutine, shared by every check or resolution of
+// root that comes while it runs, and answers ctx's error when ctx ends first or
+// ErrUnverified when the timeout does; the goroutine goes on until the kernel answers.
+func (c RootChecker) probe(ctx context.Context, root string) (*rootStat, error) {
+	stat, eval, timeout := c.Stat, c.Eval, c.Timeout
 	if stat == nil {
 		stat = RootUnreachable
+	}
+	if eval == nil {
+		eval = ResolveLinks
 	}
 	if timeout <= 0 {
 		timeout = RootCheckTimeout
@@ -63,7 +118,8 @@ func (c RootChecker) Check(ctx context.Context, root string) error {
 		st = &rootStat{done: make(chan struct{})}
 		inflight.stats[key] = st
 		go func() {
-			st.err = stat(root)
+			st.reach = stat(root)
+			st.path, st.err = eval(root)
 			inflight.Lock()
 			delete(inflight.stats, key)
 			inflight.Unlock()
@@ -75,11 +131,11 @@ func (c RootChecker) Check(ctx context.Context, root string) error {
 	defer timer.Stop()
 	select {
 	case <-st.done:
-		return st.err
+		return st, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-timer.C:
-		return ErrUnverified
+		return nil, ErrUnverified
 	}
 }
 

@@ -111,7 +111,9 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 			Promoted         int               `json:"promoted"`
 			Dropped          int               `json:"dropped"`
 			WalkErrors       int               `json:"walkErrors"`
+			Links            int               `json:"links"`
 			SubPathGone      bool              `json:"subPathGone,omitempty"`
+			SubPathLinked    bool              `json:"subPathLinked,omitempty"`
 			RootUnreachable  bool              `json:"rootUnreachable,omitempty"`
 			UnreachableRoots []string          `json:"unreachableRoots,omitempty"`
 			Converted        []string          `json:"converted"`
@@ -120,7 +122,7 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 		}{
 			string(jobPID), t.FilesSeen, t.AudioFiles, t.ItemsCreated, t.ItemsUpdated,
 			t.Relinked, t.Unchanged, t.SidecarsUpdated, t.Missing, t.Skipped, t.Errored,
-			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors, t.SubPathGone, t.RootUnreachable, unreachable,
+			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors, t.Links, t.SubPathGone, t.SubPathLinked, t.RootUnreachable, unreachable,
 			nonNil(pidStrings(t.Converted)), nonNilMap(pidMapStrings(t.Absorbed)), nonNilMap(pidMapStrings(t.Created)),
 		})
 	}
@@ -161,8 +163,14 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 	if t.WalkErrors > 0 {
 		fmt.Fprintf(out(cmd), "  unreadable:   %d (entries the walk could not read)\n", t.WalkErrors)
 	}
+	if t.Links > 0 {
+		fmt.Fprintf(out(cmd), "  links:        %d (not followed)\n", t.Links)
+	}
 	if t.SubPathGone {
 		fmt.Fprintln(out(cmd), "  sub-path:     not found (what the catalog held there is reconciled)")
+	}
+	if t.SubPathLinked {
+		fmt.Fprintln(out(cmd), "  sub-path:     behind a link, not followed (what the catalog held there is reconciled)")
 	}
 	for _, root := range unreachable {
 		fmt.Fprintf(out(cmd), "  root:         %s is not reachable (nothing under it was marked missing)\n", root)

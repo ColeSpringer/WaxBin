@@ -13,6 +13,7 @@ import (
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/testcatalog"
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
@@ -237,9 +238,7 @@ func TestPlanLeavesAMoveOntoItsOwnEntryFree(t *testing.T) {
 		o, st, lib := holdLib(t)
 		real := filepath.Join(lib.RootPath(), "Al")
 		mustMkdir(t, real)
-		if err := os.Symlink(real, filepath.Join(lib.RootPath(), "link")); err != nil {
-			t.Skipf("no symlinks here: %v", err)
-		}
+		testpath.Symlink(t, real, filepath.Join(lib.RootPath(), "link"))
 		it := holdTrack(t, st, lib, filepath.Join("link", "Song.mp3"), "e-1", "Song", 1)
 		flat := Profile{Name: "flat", Music: "{album}/{title}.{ext}", Audiobook: nativeProfile.Audiobook, Podcast: nativeProfile.Podcast}
 		plan := planFor(t, o, lib, flat, it)
@@ -771,5 +770,32 @@ func TestAMoveThatLeavesACopyKeepsItsJournalRow(t *testing.T) {
 	}
 	if rep.Errored != 1 || len(cat.aborted) != 0 {
 		t.Fatalf("report = %+v, aborted %v; want the move errored and its row kept", rep, cat.aborted)
+	}
+}
+
+// TestPlanHoldsADestinationBehindALink: a destination whose folder is reached through a
+// link below the library root is held, since a scan would never catalog the file there;
+// the hold is decided again when the plan is applied.
+func TestPlanHoldsADestinationBehindALink(t *testing.T) {
+	t.Parallel()
+	o, st, lib := holdLib(t)
+	it := holdTrack(t, st, lib, filepath.Join("Al", "Song.mp3"), "e-1", "Song", 1)
+	link := filepath.Join(lib.RootPath(), "A")
+	testpath.Symlink(t, t.TempDir(), link)
+	byArtist := Profile{Name: "by-artist", Music: "{artist}/{title}.{ext}", Audiobook: nativeProfile.Audiobook, Podcast: nativeProfile.Podcast}
+	plan := planFor(t, o, lib, byArtist, it)
+	a := actionOf(t, plan, it.PID)
+	if !a.Skip || a.Code != HoldLinkedFolder || !strings.Contains(a.Reason, link) {
+		t.Fatalf("action = %+v, want it held as a linked folder naming %s", a, link)
+	}
+	plan.Reopen()
+	if a := actionOf(t, plan, it.PID); a.Skip {
+		t.Fatalf("action after Reopen = %+v, want the hold cleared for the apply to decide", a)
+	}
+	if err := o.Hold(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if a := actionOf(t, plan, it.PID); !a.Skip || a.Code != HoldLinkedFolder {
+		t.Fatalf("action after Hold = %+v, want it held again", a)
 	}
 }

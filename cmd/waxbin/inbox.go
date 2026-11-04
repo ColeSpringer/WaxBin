@@ -6,12 +6,12 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/inbox"
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 	"io/fs"
-	"path/filepath"
 )
 
 func newInboxCmd(g *globals) *cobra.Command {
@@ -301,10 +301,11 @@ func batchesJSON(batches []*model.ImportBatch) any {
 	return out
 }
 
-// countAudio counts recognized audio files under a folder, for the inbox listing.
+// countAudio counts recognized audio files under a folder, for the inbox listing. A
+// folder given as a link is counted as the folder it reaches.
 func countAudio(folder string) int {
 	n := 0
-	_ = filepath.WalkDir(folder, func(path string, d fs.DirEntry, err error) error {
+	_ = fsx.WalkRoot(folder, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}

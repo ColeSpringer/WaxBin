@@ -79,7 +79,9 @@ exit codes (`waxbin exit-codes`).
   `scan --force` (alias `--full`) re-hashes and re-parses everything. A deliberate
   large deletion (more than half a library) is held back by the survival gate; run
   `scan --reconcile-deletions` to reconcile it once you have confirmed the files are
-  really gone.
+  really gone. A root may be a symbolic link to a folder, which is scanned as that
+  folder under the root's own path; links inside a library are counted and never
+  followed.
 - `waxbin watch` keeps the catalog in sync on a schedule (and, with `--live`, on
   filesystem events). Scheduled rescans are the primary mechanism because
   filesystem events are unreliable on WSL2, NFS, SMB, and bind mounts; a periodic

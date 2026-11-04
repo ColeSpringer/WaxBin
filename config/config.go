@@ -259,18 +259,9 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	for i := 0; i < len(c.Roots); i++ {
-		for j := i + 1; j < len(c.Roots); j++ {
-			if pathx.Overlap(c.Roots[i].Path, c.Roots[j].Path) {
-				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
-					fmt.Sprintf("library roots overlap: %q and %q", c.Roots[i].Path, c.Roots[j].Path))
-			}
-		}
-	}
-
-	// Normalize inbox staging folders to absolute, cleaned paths and reject any
-	// nested inside a library root: a file belongs to exactly one place, and an
-	// inbox under a root would be re-imported on every scan.
+	// Normalize inbox staging folders to absolute, cleaned paths. A file belongs to
+	// exactly one place, and an inbox under a root would be re-imported on every scan,
+	// which the pairs below refuse.
 	for i := range c.Inbox {
 		if strings.TrimSpace(c.Inbox[i]) == "" {
 			return waxerr.New(waxerr.CodeInvalid, "config.Validate", "inbox folder path is empty")
@@ -280,12 +271,6 @@ func (c *Config) Validate() error {
 			return waxerr.Wrapf(waxerr.CodeInvalid, "config.Validate", err, "resolving inbox %q", c.Inbox[i])
 		}
 		c.Inbox[i] = filepath.Clean(abs)
-		for _, r := range c.Roots {
-			if pathx.UnderRoot(r.Path, c.Inbox[i]) || pathx.UnderRoot(c.Inbox[i], r.Path) {
-				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
-					fmt.Sprintf("inbox %q overlaps library root %q", c.Inbox[i], r.Path))
-			}
-		}
 	}
 
 	// Keep podcast downloads outside user roots and inboxes. Scan should never see
@@ -298,26 +283,105 @@ func (c *Config) Validate() error {
 			return waxerr.Wrapf(waxerr.CodeInvalid, "config.Validate", err, "resolving podcast dir %q", c.Podcasts.Dir)
 		}
 		c.Podcasts.Dir = filepath.Clean(abs)
-		for _, r := range c.Roots {
-			if pathx.Overlap(r.Path, c.Podcasts.Dir) {
-				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
-					fmt.Sprintf("podcast dir %q overlaps library root %q", c.Podcasts.Dir, r.Path))
-			}
-		}
-		for _, in := range c.Inbox {
-			if pathx.Overlap(in, c.Podcasts.Dir) {
-				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
-					fmt.Sprintf("podcast dir %q overlaps inbox %q", c.Podcasts.Dir, in))
-			}
+	}
+	for pair := range c.pairs {
+		if pathx.Overlap(pair.a, pair.b) {
+			return waxerr.New(waxerr.CodeInvalid, "config.Validate", fmt.Sprintf(pair.format, pair.a, pair.b))
 		}
 	}
 	return nil
 }
 
-// CheckFolder refuses a root a scan could never walk: a path that is not a folder, or one
-// that cannot be reached unless absent is allowed (a drive or volume mounted later, which
-// may answer a stat with an error of its own until it is). The stat is bounded by ctx and
-// fsx.RootCheckTimeout, and one that does not answer in time passes only as an absent root.
+// pathPair is two paths Validate keeps apart, with the message for when they overlap.
+type pathPair struct{ format, a, b string }
+
+// pairs yields the pairs Validate keeps apart: each two roots, each inbox and root, the
+// podcast dir and each root, and the podcast dir and each inbox.
+func (c *Config) pairs(yield func(pathPair) bool) {
+	for i := 0; i < len(c.Roots); i++ {
+		for j := i + 1; j < len(c.Roots); j++ {
+			if !yield(pathPair{"library roots overlap: %q and %q", c.Roots[i].Path, c.Roots[j].Path}) {
+				return
+			}
+		}
+	}
+	for _, in := range c.Inbox {
+		for _, r := range c.Roots {
+			if !yield(pathPair{"inbox %q overlaps library root %q", in, r.Path}) {
+				return
+			}
+		}
+	}
+	if c.Podcasts.Dir == "" {
+		return
+	}
+	for _, r := range c.Roots {
+		if !yield(pathPair{"podcast dir %q overlaps library root %q", c.Podcasts.Dir, r.Path}) {
+			return
+		}
+	}
+	for _, in := range c.Inbox {
+		if !yield(pathPair{"podcast dir %q overlaps inbox %q", c.Podcasts.Dir, in}) {
+			return
+		}
+	}
+}
+
+// Paths lists the roots, inbox folders and podcast dir, the paths OverlapThroughLinks
+// compares, for a resolution of them (fsx.RootChecker.ResolveAll).
+func (c *Config) Paths() []string {
+	var out []string
+	for _, r := range c.Roots {
+		out = append(out, r.Path)
+	}
+	out = append(out, c.Inbox...)
+	if c.Podcasts.Dir != "" {
+		out = append(out, c.Podcasts.Dir)
+	}
+	return out
+}
+
+// OverlapThroughLinks applies Validate's overlap rules to the roots, inbox folders and
+// podcast dir as the disk resolves them, so a link registered beside the folder it
+// reaches is refused as the folder itself would be. resolved maps a path to the folder it
+// reaches (fsx.ResolveLinks); a path it lacks is compared as spelled. With candidate set,
+// only the pairs that include it are judged, so roots that already overlap through a link
+// do not refuse an unrelated one.
+func (c *Config) OverlapThroughLinks(resolved map[string]string, candidate string) error {
+	for pair := range c.pairs {
+		if candidate != "" && !pathx.SamePath(pair.a, candidate) && !pathx.SamePath(pair.b, candidate) {
+			continue
+		}
+		if err := LinkedOverlap(resolved, pair.format, pair.a, pair.b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LinkedOverlap refuses two paths that do not overlap as spelled (Validate's finding)
+// but reach overlapping folders through a link, with format, Validate's message for the
+// pair, extended by what they reach. resolved maps a path to the folder it reaches; a
+// path it lacks is compared as spelled.
+func LinkedOverlap(resolved map[string]string, format, a, b string) error {
+	reach := func(p string) string {
+		if r, ok := resolved[p]; ok {
+			return filepath.Clean(r)
+		}
+		return p
+	}
+	if pathx.Overlap(a, b) || !pathx.Overlap(reach(a), reach(b)) {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeInvalid, "config.OverlapThroughLinks",
+		fmt.Sprintf(format+" through a link: they reach %q and %q", a, b, reach(a), reach(b)))
+}
+
+// CheckFolder refuses a root a scan could never walk: a path that is not a folder (a link
+// to one passes, and a scan walks the folder it reaches), or one that cannot be reached
+// unless absent is allowed (a drive or volume mounted later, which may answer a stat with
+// an error of its own until it is). The stat is bounded by ctx and fsx.RootCheckTimeout,
+// and one that does not answer in time passes only as an absent root.
 func CheckFolder(ctx context.Context, path string, absent bool) error {
 	return FolderVerdict(path, absent, fsx.RootUnreachableCtx(ctx, path, fsx.RootCheckTimeout))
 }

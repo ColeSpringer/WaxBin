@@ -37,6 +37,59 @@ func TestScanResultSaysTheSubPathWasGone(t *testing.T) {
 	}
 }
 
+// TestScanResultSaysTheSubPathWasBehindALink: a scan of a sub-path reached through a
+// link below the root walked nothing and says so, in both outputs, so it does not read
+// as an empty folder.
+func TestScanResultSaysTheSubPathWasBehindALink(t *testing.T) {
+	t.Parallel()
+	render := func(asJSON bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := renderScanResult(cmd, &globals{jsonOut: asJSON}, "J1", scan.Result{SubPathLinked: true}, nil); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if out := render(false); !strings.Contains(out, "sub-path:     behind a link") {
+		t.Errorf("scan text does not say the sub-path was behind a link:\n%s", out)
+	}
+	var env struct {
+		Data struct {
+			SubPathLinked bool `json:"subPathLinked"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || !env.Data.SubPathLinked {
+		t.Errorf("scan json = %+v (err %v), want subPathLinked", env, err)
+	}
+}
+
+// TestScanResultCountsLinks: links the walk met and did not follow are counted in both
+// outputs, so a library of linked folders does not read as empty for no reason.
+func TestScanResultCountsLinks(t *testing.T) {
+	t.Parallel()
+	render := func(asJSON bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := renderScanResult(cmd, &globals{jsonOut: asJSON}, "J1", scan.Result{Links: 3}, nil); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if out := render(false); !strings.Contains(out, "links:        3 (not followed)") {
+		t.Errorf("scan text does not count the links:\n%s", out)
+	}
+	var env struct {
+		Data struct {
+			Links int `json:"links"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || env.Data.Links != 3 {
+		t.Errorf("scan json = %+v (err %v), want links 3", env, err)
+	}
+}
+
 // TestScanResultSaysTheRootWasUnreachable: a scan of a root that was not there names it
 // in both outputs, so an unmounted drive does not read as an empty library, and one
 // root of several is told apart from the others.

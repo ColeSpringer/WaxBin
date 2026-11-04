@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/port"
@@ -1054,5 +1055,136 @@ func TestABlankPodcastDirOpensAsNone(t *testing.T) {
 	defer lib.Close()
 	if _, err := lib.PodcastLibrary(ctx); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("podcast library = %v, want none configured", err)
+	}
+}
+
+// TestAddRootAtALinkScansItsFolder: a root registered at a link to a folder is stored
+// as typed and scanned as the folder it reaches, every file spelled under the link; a
+// link below the root is counted and not followed; and relocating the library onto the
+// folder itself leaves its rows in place.
+func TestAddRootAtALinkScansItsFolder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	real, link := filepath.Join(dir, "real"), filepath.Join(dir, "music")
+	writeFile(t, filepath.Join(real, "Adder", "late.mp3"), testaudio.BuildMP3("Through A Link", "Adder", "Runtime", 1))
+	testpath.Symlink(t, real, link)
+	testpath.Symlink(t, t.TempDir(), filepath.Join(real, "elsewhere"))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+
+	added, err := lib.AddRoot(ctx, config.Root{Path: link, Mode: model.ModeManaged})
+	if err != nil {
+		t.Fatalf("add root at a link: %v", err)
+	}
+	if added.DisplayRoot != link || string(added.Root) != link {
+		t.Fatalf("added library root = %q, want the link as typed %q", added.DisplayRoot, link)
+	}
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{LibraryPID: added.PID})
+	if err != nil || res.Total.ItemsCreated != 1 || res.Total.Links != 1 {
+		t.Fatalf("scan = %+v (err %v), want the file under the link created and the link below the root counted", res.Total, err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "Through A Link").Build(), "")
+	if err != nil || len(items) != 1 || !strings.HasPrefix(items[0].DisplayPath, link+string(filepath.Separator)) {
+		t.Fatalf("query = %d items (err %v), want one at a path under %s", len(items), err, link)
+	}
+
+	if err := lib.RelocateRoot(ctx, added.PID, real); err != nil {
+		t.Fatalf("relocate onto the folder: %v", err)
+	}
+	if res, err = lib.Scan(ctx, waxbin.ScanRequest{LibraryPID: added.PID}); err != nil || res.Total.Unchanged != 1 || res.Total.ItemsCreated != 0 || res.Total.Missing != 0 {
+		t.Fatalf("scan after relocating = %+v (err %v), want the file unchanged in place", res.Total, err)
+	}
+}
+
+// TestRootsOverlappingThroughALinkAreRefused: a root, inbox folder or podcast dir that
+// reaches another's folder through a link is refused as the folder itself would be, in
+// either order of registration, at AddRoot, at RelocateRoot and at Open; relocating a
+// library onto a link to its own folder is allowed.
+func TestRootsOverlappingThroughALinkAreRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	writeFile(t, filepath.Join(real, "sub", ".keep"), nil)
+	link := filepath.Join(base, "link")
+	testpath.Symlink(t, real, link)
+	mustLink := func(target, name string) string {
+		t.Helper()
+		p := filepath.Join(base, name)
+		testpath.Symlink(t, target, p)
+		return p
+	}
+	inboxReal := filepath.Join(base, "inbox")
+	writeFile(t, filepath.Join(inboxReal, ".keep"), nil)
+	podReal := filepath.Join(base, "pod")
+	writeFile(t, filepath.Join(podReal, ".keep"), nil)
+	other := filepath.Join(base, "other")
+	writeFile(t, filepath.Join(other, ".keep"), nil)
+
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
+		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:    []config.Root{{Path: real, Mode: model.ModeManaged, Profile: "waxbin-native"}, {Path: other, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Inbox:    []string{mustLink(inboxReal, "inbox-link")},
+		Podcasts: config.PodcastConfig{Dir: podReal},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	for _, tc := range []struct{ name, path string }{
+		{"a link to a root", link},
+		{"a link into a root", mustLink(filepath.Join(real, "sub"), "sub-link")},
+		{"a link above a root", mustLink(base, "base-link")},
+		{"the folder an inbox link reaches", inboxReal},
+		{"a link into the podcast dir", mustLink(podReal, "pod-link")},
+	} {
+		_, err := lib.AddRoot(ctx, config.Root{Path: tc.path, Mode: model.ModeManaged})
+		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
+			t.Errorf("AddRoot(%s) = %v, want CodeInvalid naming the link", tc.name, err)
+		}
+	}
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var realLib, otherLib *model.Library
+	for _, l := range libs {
+		switch l.DisplayRoot {
+		case real:
+			realLib = l
+		case other:
+			otherLib = l
+		}
+	}
+	if realLib == nil || otherLib == nil {
+		t.Fatalf("libraries = %+v, want the two configured roots", libs)
+	}
+	if err := lib.RelocateRoot(ctx, otherLib.PID, link); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
+		t.Errorf("RelocateRoot onto a link to another library's folder = %v, want CodeInvalid naming the link", err)
+	}
+	if err := lib.RelocateRoot(ctx, realLib.PID, link); err != nil {
+		t.Errorf("RelocateRoot onto a link to the library's own folder = %v, want it allowed", err)
+	}
+	// The other order: the link registered first, the folder it reaches added after.
+	if _, err := lib.AddRoot(ctx, config.Root{Path: real, Mode: model.ModeManaged}); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
+		t.Errorf("AddRoot of the folder a registered link reaches = %v, want CodeInvalid naming the link", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		opts waxbin.Options
+	}{
+		{"two roots", waxbin.Options{Roots: []config.Root{{Path: real}, {Path: link}}}},
+		{"an inbox reaching a root", waxbin.Options{Roots: []config.Root{{Path: real}}, Inbox: []string{link}}},
+		{"a podcast dir reaching a root", waxbin.Options{Roots: []config.Root{{Path: real}}, Podcasts: config.PodcastConfig{Dir: mustLink(filepath.Join(real, "sub"), "pod-sub-link")}}},
+	} {
+		tc.opts.DBPath = filepath.Join(t.TempDir(), "catalog.db")
+		l, err := waxbin.OpenSeeded(t, ctx, tc.opts)
+		if err == nil {
+			_ = l.Close()
+		}
+		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "through a link") {
+			t.Errorf("Open with %s = %v, want CodeInvalid naming the link", tc.name, err)
+		}
 	}
 }

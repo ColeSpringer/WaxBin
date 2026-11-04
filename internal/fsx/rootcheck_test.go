@@ -11,6 +11,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/colespringer/waxbin/internal/testpath"
 )
 
 // TestRootUnreachableCtxReturnsOnTheDeadline: a stat the kernel holds answers
@@ -153,5 +155,63 @@ func TestRootGateForgetsACheckCutOffByItsContext(t *testing.T) {
 	}
 	if _, ok := g.seen[root]; ok || downs != 0 {
 		t.Errorf("a canceled check was remembered (%v) or heard (%d)", g.seen, downs)
+	}
+}
+
+// TestRootCheckerResolveIsBounded: a resolution the kernel holds answers ErrUnverified
+// once the timeout passes and a canceled context its own error, resolutions of one path
+// at once share one, and a path that answers comes back as the folder it reaches.
+func TestRootCheckerResolveIsBounded(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		release := make(chan struct{})
+		c := RootChecker{Eval: func(p string) (string, error) { calls.Add(1); <-release; return p + "/resolved", nil }}
+		root := "/held/" + t.Name()
+		start := time.Now()
+		if _, err := c.Resolve(context.Background(), root); !errors.Is(err, ErrUnverified) {
+			t.Fatalf("held resolution: err = %v, want ErrUnverified", err)
+		}
+		if waited := time.Since(start); waited != RootCheckTimeout {
+			t.Errorf("waited %v, want the %v timeout", waited, RootCheckTimeout)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := c.Resolve(ctx, root); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled resolution: err = %v, want context.Canceled", err)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("eval ran %d times for two resolutions of one path, want 1", n)
+		}
+		close(release)
+		synctest.Wait()
+		if got, err := c.Resolve(context.Background(), root); err != nil || got != root+"/resolved" {
+			t.Fatalf("a later resolution = %q, %v; want the eval's answer", got, err)
+		}
+	})
+}
+
+// TestResolveAllAnswersWhatResolved: the paths come back as the folders they reach, a
+// link among them, and one not there yet as far as the disk holds it.
+func TestResolveAllAnswersWhatResolved(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	testpath.Symlink(t, real, link)
+	wantReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "gone")
+	got := RootChecker{}.ResolveAll(context.Background(), []string{real, link, filepath.Join(link, "gone"), gone})
+	if got[real] != wantReal || got[link] != wantReal || got[filepath.Join(link, "gone")] != filepath.Join(wantReal, "gone") {
+		t.Errorf("resolved = %v, want %q for the folder and the link to it, and a path not there yet carried under it", got, wantReal)
+	}
+	if got[gone] != filepath.Join(filepath.Dir(wantReal), "gone") || len(got) != 4 {
+		t.Errorf("resolved = %v, want the path that is not there resolved as far as its folder", got)
 	}
 }

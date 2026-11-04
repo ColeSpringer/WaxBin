@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/internal/fsx"
+	"github.com/colespringer/waxbin/internal/testpath"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -240,9 +241,27 @@ func TestDebouncerCoalesces(t *testing.T) {
 // directory triggers a directory-scoped rescan. It degrades gracefully: if watches
 // cannot be armed (ENOSPC, unsupported fs) the watcher reports degraded and we skip.
 func TestWatcherLive(t *testing.T) {
-	dir := t.TempDir()
+	t.Run("a folder", func(t *testing.T) {
+		dir := t.TempDir()
+		liveRescans(t, dir, dir)
+	})
+	t.Run("a link to a folder", func(t *testing.T) {
+		dir := t.TempDir()
+		real, link := filepath.Join(dir, "real"), filepath.Join(dir, "lib")
+		if err := os.Mkdir(real, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		testpath.Symlink(t, real, link)
+		liveRescans(t, link, real)
+	})
+}
+
+// liveRescans runs a live watch over root and checks that a file written into target,
+// the folder root names, schedules a rescan of root itself.
+func liveRescans(t *testing.T, root, target string) {
+	t.Helper()
 	eng := &mockEngine{changed: true}
-	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: dir}}, Options{
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: root}}, Options{
 		Interval:           time.Hour, // keep the scheduled ticker out of the way
 		FullRescanInterval: -1,
 		Live:               true,
@@ -260,7 +279,7 @@ func TestWatcherLive(t *testing.T) {
 		t.Skip("filesystem watches unavailable in this environment")
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "new.mp3"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "new.mp3"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +288,7 @@ func TestWatcherLive(t *testing.T) {
 		eng.mu.Lock()
 		defer eng.mu.Unlock()
 		for _, r := range eng.rescans {
-			if r.subPath == dir { // a directory-scoped (live) rescan
+			if r.subPath == root { // a directory-scoped (live) rescan
 				return true
 			}
 		}
@@ -295,7 +314,7 @@ func TestLiveWatchAddTreeCap(t *testing.T) {
 		}
 	}
 	lw := &liveWatch{src: testSource(t), log: quietLog, max: 3}
-	added, exhausted := lw.addTree(root)
+	added, exhausted := lw.addTree(root, true)
 	if !exhausted {
 		t.Fatal("expected exhausted=true when the directory count exceeds the cap")
 	}
@@ -316,7 +335,7 @@ func TestLiveWatchAddTreeUnbounded(t *testing.T) {
 		}
 	}
 	lw := &liveWatch{src: testSource(t), log: quietLog, max: 0}
-	added, exhausted := lw.addTree(root)
+	added, exhausted := lw.addTree(root, true)
 	if added == 0 {
 		t.Skip("environment cannot arm any fsnotify watches")
 	}
@@ -567,7 +586,7 @@ func testSource(t *testing.T) source {
 func armedTree(t *testing.T, root string, limit int) *liveWatch {
 	t.Helper()
 	lw := &liveWatch{src: testSource(t), log: quietLog, max: limit}
-	if added, _ := lw.addTree(root); added != limit {
+	if added, _ := lw.addTree(root, true); added != limit {
 		t.Skipf("armed %d of %d watches", added, limit)
 	}
 	return lw
@@ -581,7 +600,7 @@ func armArrivals(t *testing.T, lw *liveWatch, root string, names ...string) {
 		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, exhausted := lw.addTree(filepath.Join(root, name)); exhausted {
+		if _, exhausted := lw.addTree(filepath.Join(root, name), false); exhausted {
 			t.Fatalf("arming %s hit the cap with %d armed", name, lw.total())
 		}
 	}

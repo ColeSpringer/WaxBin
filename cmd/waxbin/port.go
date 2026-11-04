@@ -297,9 +297,10 @@ func scanResultJSON(res *waxbin.ScanResult) any {
 		Relinked         int      `json:"relinked"`
 		Errored          int      `json:"errored"`
 		WalkErrors       int      `json:"walkErrors"`
+		Links            int      `json:"links"`
 		RootUnreachable  bool     `json:"rootUnreachable,omitempty"`
 		UnreachableRoots []string `json:"unreachableRoots,omitempty"`
 	}{string(res.JobPID), res.Total.AudioFiles, res.Total.ItemsCreated,
 		res.Total.ItemsUpdated, res.Total.Copies, res.Total.Relinked, res.Total.Errored, res.Total.WalkErrors,
-		res.Total.RootUnreachable, unreachableRoots(res.Runs)}
+		res.Total.Links, res.Total.RootUnreachable, unreachableRoots(res.Runs)}
 }

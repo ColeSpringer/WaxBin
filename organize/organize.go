@@ -70,6 +70,9 @@ const (
 	// HoldRootUnreachable is a file under a library root that does not answer as a folder
 	// (a drive not mounted, or a stat that timed out), held from one check of the root.
 	HoldRootUnreachable HoldCode = "root-unreachable"
+	// HoldLinkedFolder is a destination whose folder is reached through a link below the
+	// library root, which a scan does not follow, so the file would be lost to the catalog.
+	HoldLinkedFolder HoldCode = "linked-folder"
 )
 
 // hold marks an action as not moving, for code.
@@ -616,6 +619,7 @@ func (o *Organizer) hold(ctx context.Context, plan *Plan, disk bool) error {
 		}
 	}
 	var dsts [][]byte
+	linked := map[string]string{} // a destination folder's link below its root, or ""
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.Skip && a.Code != HoldInPlace {
@@ -631,6 +635,8 @@ func (o *Organizer) hold(ctx context.Context, plan *Plan, disk bool) error {
 			a.hold(HoldMissing, "file is not on disk")
 		} else if err != nil {
 			a.hold(HoldMissing, "file cannot be looked at: "+err.Error())
+		} else if link := linkedFolder(linked, cmp.Or(a.Root, plan.Root), filepath.Dir(a.Dst)); link != "" && !a.Skip {
+			a.hold(HoldLinkedFolder, "destination folder is reached through a link below the library root, which a scan does not follow: "+link)
 		} else if !a.Skip {
 			dsts = append(dsts, []byte(a.Dst))
 		}
@@ -687,15 +693,15 @@ func (o *Organizer) hold(ctx context.Context, plan *Plan, disk bool) error {
 }
 
 // Reopen clears the holds that follow from how disk and catalog stood when the plan was
-// made (a collision, an occupied destination, a missing file, a root out of reach, a held
-// book part, a read-only library), so a Hold run later decides them again as things then
-// stand. A file in place, an untagged item, a cue rip and a book part outside its library
+// made (a collision, an occupied destination, a missing file, a root out of reach, a
+// destination folder behind a link, a held book part, a read-only library), so a Hold run
+// later decides them again as things then stand. A file in place, an untagged item, a cue rip and a book part outside its library
 // stay as planned.
 func (p *Plan) Reopen() {
 	for i := range p.Actions {
 		a := &p.Actions[i]
 		switch a.Code {
-		case HoldCollision, HoldOccupied, HoldOccupiedCase, HoldMissing, HoldRootUnreachable, HoldBookHeld, HoldReadOnly:
+		case HoldCollision, HoldOccupied, HoldOccupiedCase, HoldMissing, HoldRootUnreachable, HoldLinkedFolder, HoldBookHeld, HoldReadOnly:
 			if a.Dst == "" {
 				continue
 			}
@@ -705,6 +711,17 @@ func (p *Plan) Reopen() {
 			}
 		}
 	}
+}
+
+// linkedFolder names the link below root on the way to the folder dir, "" when there is
+// none, looking at each folder once (seen).
+func linkedFolder(seen map[string]string, root, dir string) string {
+	if link, ok := seen[dir]; ok {
+		return link
+	}
+	link, _ := fsx.LinkBelow(root, dir)
+	seen[dir] = link
+	return link
 }
 
 // holdUnreachableRoots checks each library root the plan's moves and in-place files sit

@@ -99,6 +99,7 @@ const (
 	HoldOccupiedCase     HoldCode = "occupied-case"      // a file named apart only by case or Unicode form stands there
 	HoldCataloged        HoldCode = "cataloged"          // the catalog holds its destination for a file not on disk
 	HoldCollisionCheck   HoldCode = "collision-check"    // its destination could not be looked at
+	HoldLinkedFolder     HoldCode = "linked-folder"      // its destination folder is reached through a link below the root
 	HoldBook             HoldCode = "book-held"          // its book's own part will not land
 	HoldAlbum            HoldCode = "album-held"         // a track of its album will not land, and the request holds units
 	HoldReadOnlyLibrary  HoldCode = "read-only-library"  // its library was flagged read-only since the plan
@@ -280,7 +281,9 @@ type Failure struct {
 
 // Plan walks the source folder and classifies every audio file: importable (with
 // its rendered destination), a catalog duplicate, or quarantined (unreadable, no
-// destination, or a destination that would collide). It does not touch disk.
+// destination, or a destination that would collide). A source that is a link to a
+// folder is walked as that folder, its files spelled under the source; a link below it
+// is not followed. It does not touch disk.
 func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 	const op = "inbox.Plan"
 	if err := checkRequest(op, &req); err != nil {
@@ -290,7 +293,7 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 		req.Source = abs
 	}
 	var paths []string
-	walkErr := filepath.WalkDir(req.Source, func(path string, d fs.DirEntry, err error) error {
+	walkErr := fsx.WalkRoot(req.Source, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries; the walk continues
 		}
@@ -636,10 +639,15 @@ func (s *Service) restored(ctx context.Context, a *Action, out *model.ScanItemRe
 // whose path differs only by case, which would coexist here on Linux but collide on a
 // case-insensitive filesystem. A gone file of the staged file's own audio is the row the
 // import takes back, while another item's gone file still holds its path, which a
-// different file landing there would take over. A plan and its apply check alike by it.
+// different file landing there would take over. A destination folder reached through a
+// link below the library root is held too, since a scan would never catalog the file
+// there. A plan and its apply check alike by it.
 func DestinationHold(ls *fsx.Lister, a *Action, occ []model.FileOccupant) (HoldCode, string, *Occupant) {
 	if fsx.SameFile(a.Src, a.Dst) {
 		return HoldExists, "the file is already at its destination", occupantAt(a.Dst, occ)
+	}
+	if link, ok := fsx.LinkBelow(a.Library.RootPath(), filepath.Dir(a.Dst)); ok {
+		return HoldLinkedFolder, "destination folder is reached through a link below the library root, which a scan does not follow: " + link, &Occupant{Path: a.Dst}
 	}
 	path, exact, err := ls.Occupant(a.Src, a.Dst)
 	switch {
