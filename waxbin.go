@@ -970,8 +970,8 @@ func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.
 // Search runs a grouped, BM25-ranked search across artists, albums, tracks, books,
 // and episodes (transcript-body hits rank below metadata hits). Field weighting puts
 // title hits above artist and album hits. opt.MaxCandidates bounds how many matches
-// are ranked, and opt.Libraries, opt.States and opt.Podcasts scope the search; see
-// read.SearchOptions for those contracts.
+// are ranked, and opt.Libraries, opt.PrimaryLibraries, opt.States and opt.Podcasts scope
+// the search; see read.SearchOptions for those contracts.
 func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
 	return l.store.Search(ctx, q, opt)
 }
@@ -3043,13 +3043,19 @@ type OrganizeOptions struct {
 // managed library, routing each item to the library whose root already contains it.
 // Roots are non-overlapping, so kind routing is implicit in the current file path.
 // A single managed library behaves exactly as before. opts overrides each library's
-// configured profile; setting both of its fields is CodeInvalid.
+// configured profile; setting both of its fields is CodeInvalid. q selects items with a
+// file and scopes libraries by primary_library: `library` is refused and a library the
+// rule names must exist (see fileOpItems).
 func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts OrganizeOptions) (*organize.Plan, error) {
 	const op = "Library.PlanOrganize"
 	if err := checkOrganizeOptions(op, opts); err != nil {
 		return nil, err
 	}
-	managed, err := l.managedLibraries(ctx)
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	managed, err := managedOf(libs)
 	if err != nil {
 		return nil, err
 	}
@@ -3060,10 +3066,9 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 			return nil, err
 		}
 	}
-	// Organize acts on catalog rows; a per-user filter in q resolves against the
-	// default user, and the library field against each item's primary, the file organize
-	// moves.
-	items, err := l.store.QueryItemsByPrimary(ctx, q, "")
+	// Organize acts on catalog rows; a per-user filter in q resolves against the default
+	// user, and the rule scopes libraries by placement (see fileOpItems).
+	items, err := l.fileOpItems(ctx, op, q, libs)
 	if err != nil {
 		return nil, err
 	}
@@ -3233,6 +3238,61 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 	return rep, err
 }
 
+// fileOpItems selects the items an operation on their own files (organize, a delete by
+// query) acts on: those with a file, by a rule that scopes libraries through
+// primary_library alone. `library` is refused (CodeInvalid): it matches an item through a
+// copy in another library, and a move or a delete takes the whole item, so a sweep of B
+// would reach A's primary through B's copy. With the same rule, Query previews exactly
+// the selection. Every library the rule names must exist (CodeNotFound), because a rule
+// outlives a removed library, and a deny-list over a missing one (isNot, notIn) would
+// select the whole catalog, which here means every file.
+func (l *Library) fileOpItems(ctx context.Context, op string, q query.Query, libs []*model.Library) ([]*model.ItemView, error) {
+	for _, c := range q.Conds() {
+		switch c.Field {
+		case "library":
+			return nil, waxerr.New(waxerr.CodeInvalid, op,
+				"a file operation scopes by primary_library, not library: an item another library holds a copy of is not that library's to move or delete")
+		case "primary_library":
+			for _, pid := range condPIDs(c) {
+				if !hasLibraryPID(libs, pid) {
+					return nil, waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(pid))
+				}
+			}
+		}
+	}
+	return l.store.QueryItemsWithFiles(ctx, q, "")
+}
+
+// condPIDs returns the pids a condition names, from its single value or its list; a
+// presence operator names none.
+func condPIDs(c query.Cond) []model.PID {
+	vals := c.Values
+	if c.Value != nil {
+		vals = []any{c.Value}
+	}
+	out := make([]model.PID, 0, len(vals))
+	for _, v := range vals {
+		switch v := v.(type) {
+		case model.PID:
+			out = append(out, v)
+		case string:
+			out = append(out, model.PID(v))
+		default:
+			out = append(out, model.PID(fmt.Sprint(v)))
+		}
+	}
+	return out
+}
+
+func hasLibraryPID(libs []*model.Library, pid model.PID) bool {
+	for _, lib := range libs {
+		if lib.PID == pid {
+			return true
+		}
+	}
+	return false
+}
+
 // DeleteOption adjusts a delete plan.
 type DeleteOption func(*deleteOptions)
 
@@ -3259,7 +3319,9 @@ func deleteReason(mode model.DeleteMode, opts []DeleteOption) (string, error) {
 // PlanDelete computes a dry-run deletion plan for the items matching q under a mode
 // (trash|prune|permanent). DeleteTrash moves files to the reversible per-library trash;
 // the other modes bypass it to reclaim space. Every mode keeps the logical item,
-// archived when it loses its last file, as the mode's DeleteMode.ArchiveReason.
+// archived when it loses its last file, as the mode's DeleteMode.ArchiveReason. q
+// selects items with a file and scopes libraries by primary_library: `library` is
+// refused and a library the rule names must exist (see fileOpItems).
 //
 // Items in the internal podcast library are dropped before planning and counted as
 // SkippedPodcast, so a sweep over a mixed query does not fail because it matched an
@@ -3275,10 +3337,10 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 	if err != nil {
 		return nil, err
 	}
-	// Delete acts on catalog rows; a per-user filter in q resolves against the
-	// default user, and the library field against each item's primary, so a sweep of
+	// Delete acts on catalog rows; a per-user filter in q resolves against the default
+	// user, and the rule scopes libraries by placement (see fileOpItems), so a sweep of
 	// one library never deletes an item another library owns.
-	matched, err := l.store.QueryItemsByPrimary(ctx, q, "")
+	matched, err := l.fileOpItems(ctx, "Library.PlanDelete", q, libs)
 	if err != nil {
 		return nil, err
 	}

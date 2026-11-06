@@ -160,6 +160,17 @@ func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 			groupBy: "flib.id", keyExpr: "flib.pid", display: "flib.display_root", sortExpr: "flib.display_root",
 			entity: true, unknown: read.NoFile,
 		}, true
+	case read.GroupPrimaryLibrary:
+		// The library of the item's primary file, the one ItemView.LibraryPID shows, so
+		// an item counts once here where GroupLibrary counts a copied item in every
+		// library holding a copy. It reads the f alias itemJoins binds. A fileless item
+		// lands in "[No File]", the same items GroupLibrary puts there, since an item
+		// with any file has a primary. Drilldown pairs with the primary_library field.
+		return facetSpec{
+			join:    " LEFT JOIN library fplib ON fplib.id = f.library_id",
+			groupBy: "f.library_id", keyExpr: "fplib.pid", display: "fplib.display_root", sortExpr: "fplib.display_root",
+			entity: true, unknown: read.NoFile,
+		}, true
 	case read.GroupPodcast:
 		// The episode's feed, keyed by pid so a bucket drills down through the
 		// podcast_pid query field. There is no unknown bucket because keyExpr cannot be

@@ -477,6 +477,74 @@ func TestSearchLibraryScope(t *testing.T) {
 	}
 }
 
+// TestSearchPrimaryLibraryScope: Libraries finds an item through a copy in the scope,
+// PrimaryLibraries only through its primary, the two intersect when both are set, and the
+// entity groups follow the items (an artist whose only item is placed elsewhere does not
+// reach a scoped search through its copy).
+func TestSearchPrimaryLibraryScope(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	lib2, err := st.EnsureLibrary(ctx, &model.Library{
+		Root: []byte("/other"), DisplayRoot: "/other", Mode: model.ModeManaged, Profile: "waxbin-native",
+	})
+	if err != nil {
+		t.Fatalf("second library: %v", err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "esame", content: "c1",
+		title: "Harbor Lights", artist: "A", album: "Alp"})
+	second := putTrack(t, st, lib2.ID, trackSpec{path: "/other/a.flac", essence: "esame", content: "c2",
+		title: "Harbor Lights", artist: "A", album: "Alp"})
+	if !second.AttachedAsCopy {
+		t.Fatalf("second read = %+v, want a copy", second)
+	}
+	putTrack(t, st, lib2.ID, trackSpec{path: "/other/b.flac", essence: "e2", content: "c3",
+		title: "Harbor Nights", artist: "B", album: "Bet"})
+
+	titles := func(hits []read.SearchHit) []string {
+		out := make([]string, len(hits))
+		for i, h := range hits {
+			out[i] = h.Title
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		opt   read.SearchOptions
+		want  []string
+		bands []string
+	}{
+		{"playable from /other", read.SearchOptions{Libraries: []model.PID{lib2.PID}},
+			[]string{"Harbor Lights", "Harbor Nights"}, []string{"A", "B"}},
+		{"placed in /other", read.SearchOptions{PrimaryLibraries: []model.PID{lib2.PID}},
+			[]string{"Harbor Nights"}, []string{"B"}},
+		{"placed in /lib", read.SearchOptions{PrimaryLibraries: []model.PID{lib.PID}},
+			[]string{"Harbor Lights"}, []string{"A"}},
+		{"playable from /other and placed in /lib", read.SearchOptions{Libraries: []model.PID{lib2.PID}, PrimaryLibraries: []model.PID{lib.PID}},
+			[]string{"Harbor Lights"}, []string{"A"}},
+		{"placed in /other and /lib", read.SearchOptions{PrimaryLibraries: []model.PID{lib.PID, lib2.PID}},
+			[]string{"Harbor Lights", "Harbor Nights"}, []string{"A", "B"}},
+	} {
+		res, err := st.Search(ctx, "harbor", tc.opt)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		got := titles(res.Tracks)
+		slices.Sort(got)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: tracks = %v, want %v", tc.name, got, tc.want)
+		}
+		bands := titles(res.Artists)
+		slices.Sort(bands)
+		if !slices.Equal(bands, tc.bands) {
+			t.Errorf("%s: artists = %v, want %v", tc.name, bands, tc.bands)
+		}
+	}
+	if _, err := st.Search(ctx, "harbor", read.SearchOptions{PrimaryLibraries: []model.PID{"nope"}}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("unknown primary library = %v, want CodeNotFound", err)
+	}
+}
+
 // transcriptFixture builds a show with one downloaded and one undownloaded episode,
 // each carrying a transcript that mentions "zanzibar", and returns their item pids.
 // The downloaded one is present and in lib; the remote one has no file at all.
@@ -862,9 +930,11 @@ func TestSearchNarrowArgsHaveNoSpareCapacity(t *testing.T) {
 	t.Parallel()
 	for _, sc := range []searchScope{
 		{libIDs: []int64{7}},
+		{primaryLibIDs: []int64{7}},
 		{states: []model.ItemState{model.StatePresent}},
 		{libIDs: []int64{7}, shows: []int64{}},
 		{libIDs: []int64{7}, states: []model.ItemState{model.StatePresent}, shows: []int64{3}},
+		{libIDs: []int64{7}, primaryLibIDs: []int64{8}, states: []model.ItemState{model.StatePresent}, shows: []int64{3}},
 	} {
 		if _, args := searchNarrow(sc); cap(args) != len(args) {
 			t.Errorf("searchNarrow(%+v) args len %d cap %d, want no spare room", sc, len(args), cap(args))
@@ -873,7 +943,7 @@ func TestSearchNarrowArgsHaveNoSpareCapacity(t *testing.T) {
 }
 
 // TestSearchStmtNarrowArgOrder walks the statement shapes (flat and capped, by nothing /
-// scope / states / shows / an empty show list / all of them) and pins that every
+// scope / placement / states / shows / an empty show list / all of them) and pins that every
 // placeholder has an arg and that the args arrive in clause order. The statement text and its binds are built
 // in two places, so a transposition is cheap to introduce and only shows up on one
 // combination behaviourally. limit and maxCandidates are chosen so the inner (601)
@@ -887,9 +957,10 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 		inner = "LIMIT 601" // maxCandidates + 1
 	)
 	libs := []int64{7, 9}
+	primary := []int64{8}
 	states := []model.ItemState{model.StatePresent, model.StateRemote}
 	shows := []int64{3, 4}
-	all := searchScope{libIDs: libs, states: states, shows: shows}
+	all := searchScope{libIDs: libs, primaryLibIDs: primary, states: states, shows: shows}
 	cases := []struct {
 		name   string
 		maxC   int
@@ -898,19 +969,22 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 		limits []string
 	}{
 		{"flat/none", 0, searchScope{}, []any{"x*"}, []string{outer}},
-		{"flat/scope", 0, searchScope{libIDs: libs}, []any{int64(7), int64(9), "x*"}, []string{outer}},
+		{"flat/scope", 0, searchScope{libIDs: libs}, []any{"[7,9]", "x*"}, []string{outer}},
+		{"flat/placement", 0, searchScope{primaryLibIDs: primary}, []any{"[8]", "x*"}, []string{outer}},
+		{"flat/both libraries", 0, searchScope{libIDs: libs, primaryLibIDs: primary}, []any{"[7,9]", "[8]", "x*"}, []string{outer}},
 		{"flat/states", 0, searchScope{states: states}, []any{"present", "remote", "x*"}, []string{outer}},
-		{"flat/both", 0, searchScope{libIDs: libs, states: states}, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{outer}},
+		{"flat/both", 0, searchScope{libIDs: libs, states: states}, []any{"present", "remote", "[7,9]", "x*"}, []string{outer}},
 		{"flat/shows", 0, searchScope{shows: shows}, []any{"[3,4]", "x*"}, []string{outer}},
 		{"flat/no shows", 0, searchScope{shows: []int64{}}, []any{"x*"}, []string{outer}},
-		{"flat/all", 0, all, []any{"present", "remote", int64(7), int64(9), "[3,4]", "x*"}, []string{outer}},
+		{"flat/all", 0, all, []any{"present", "remote", "[7,9]", "[8]", "[3,4]", "x*"}, []string{outer}},
 		{"capped/none", maxC, searchScope{}, []any{"x*"}, []string{inner, outer}},
-		{"capped/scope", maxC, searchScope{libIDs: libs}, []any{int64(7), int64(9), "x*"}, []string{inner, outer}},
+		{"capped/scope", maxC, searchScope{libIDs: libs}, []any{"[7,9]", "x*"}, []string{inner, outer}},
+		{"capped/placement", maxC, searchScope{primaryLibIDs: primary}, []any{"[8]", "x*"}, []string{inner, outer}},
 		{"capped/states", maxC, searchScope{states: states}, []any{"present", "remote", "x*"}, []string{inner, outer}},
-		{"capped/both", maxC, searchScope{libIDs: libs, states: states}, []any{"present", "remote", int64(7), int64(9), "x*"}, []string{inner, outer}},
+		{"capped/both", maxC, searchScope{libIDs: libs, states: states}, []any{"present", "remote", "[7,9]", "x*"}, []string{inner, outer}},
 		{"capped/shows", maxC, searchScope{shows: shows}, []any{"[3,4]", "x*"}, []string{inner, outer}},
 		{"capped/no shows", maxC, searchScope{shows: []int64{}}, []any{"x*"}, []string{inner, outer}},
-		{"capped/all", maxC, all, []any{"present", "remote", int64(7), int64(9), "[3,4]", "x*"}, []string{inner, outer}},
+		{"capped/all", maxC, all, []any{"present", "remote", "[7,9]", "[8]", "[3,4]", "x*"}, []string{inner, outer}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -953,6 +1027,15 @@ func TestSearchNarrowPlan(t *testing.T) {
 		t.Errorf("pi is no longer reached by rowid seek, so the state test is not a residual:\n%s", plan)
 	}
 
+	// Both library narrowings bind their list as one JSON array and still seek
+	// file_library inside their list subqueries.
+	scoped, scopedArgs, _ := searchStmt("harbor*", 20, 0, searchScope{libIDs: []int64{lib.ID}, primaryLibIDs: []int64{lib.ID}})
+	splan := explainPlan(t, st, scoped, scopedArgs...)
+	t.Logf("library scoped plan:\n%s", splan)
+	if strings.Count(splan, "file_library") < 2 || !strings.Contains(splan, "SEARCH pi USING INTEGER PRIMARY KEY") {
+		t.Errorf("a library narrowing lost its file_library seek or the rowid seek on pi:\n%s", splan)
+	}
+
 	capped, cappedArgs, _ := searchStmt("harbor*", 20, 50, searchScope{states: []model.ItemState{model.StatePresent},
 		shows: []int64{1}})
 	lines := explainPlanLines(t, st, capped, cappedArgs...)
@@ -987,7 +1070,7 @@ func TestSearchByNamePlans(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	for _, states := range [][]model.ItemState{nil, {model.StatePresent}} {
-		narrow, args := searchNarrow(searchScope{libIDs: []int64{1}, states: states, shows: []int64{2}})
+		narrow, args := searchNarrow(searchScope{libIDs: []int64{1}, primaryLibIDs: []int64{1}, states: states, shows: []int64{2}})
 		artists := strings.Join(explainPlanLines(t, st, artistByNameQ(narrow, 2, 5),
 			append(append([]any{"a", "b", "a"}, args...), args...)...), "\n")
 		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_name_key"} {

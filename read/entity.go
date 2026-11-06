@@ -94,6 +94,15 @@ type EntityInfo struct {
 	// episode carrying the genre, contributes nothing.
 	LibraryPIDs []model.PID
 
+	// PrimaryLibraryPIDs are the libraries among LibraryPIDs holding a member item's
+	// primary file, the libraries its members are placed in (ItemView.LibraryPID), in
+	// the same order; a library holding only copies of the members is in LibraryPIDs
+	// alone. A host serving whatever a library can play gates an entity on LibraryPIDs,
+	// and one granting a reader a library by placement gates it on this list, so an
+	// artist whose only presence in a library is a copy is not shown there with every
+	// item filtered out.
+	PrimaryLibraryPIDs []model.PID
+
 	// Aliases are an artist's other names, by name: a merged loser's, a name a locked
 	// rename left, those enrichment found. Empty for every other kind.
 	Aliases []string

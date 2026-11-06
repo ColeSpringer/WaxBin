@@ -20,7 +20,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 		user                              string
 		order                             string
 		limit                             int
-		libraries                         []string
+		libraries, primaryLibraries       []string
 	)
 	cmd := &cobra.Command{
 		Use:   "facet --group-by DIM",
@@ -50,7 +50,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 
 			q, err := scopedQuery(ctx(cmd), lib, cmd, "facet", rulePath, queryFlags{
 				title: title, artist: artist, album: album, genre: genre, kind: kind, year: year,
-			}, libraries)
+			}, libraries, primaryLibraries)
 			if err != nil {
 				return err
 			}
@@ -83,7 +83,8 @@ func newFacetCmd(g *globals) *cobra.Command {
 	f.StringVar(&genre, "genre", "", "match genre (exact)")
 	f.StringVar(&kind, "kind", "", "match kind ("+kindList()+", exact)")
 	f.IntVar(&year, "year", 0, "match year (exact)")
-	f.StringArrayVar(&libraries, "library", nil, "restrict to a library, by pid or registered root path (repeatable)")
+	f.StringArrayVar(&libraries, "library", nil, "restrict to items with a file in a library, copies included, by pid or registered root path (repeatable)")
+	f.StringArrayVar(&primaryLibraries, "primary-library", nil, "restrict to items whose primary file is in a library, by pid or registered root path (repeatable)")
 	f.StringVar(&rulePath, "rule", "", "load a JSON rule document (overrides filter flags)")
 	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count) and, with --group-by playlist, for which playlists get buckets; empty = default user")
 	f.StringVar(&order, "order", "", "bucket order: label (collation, the default) or count (biggest first)")

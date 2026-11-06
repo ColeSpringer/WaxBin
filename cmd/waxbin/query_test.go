@@ -164,6 +164,29 @@ func TestBuildQueryLibraryFlagsCompileToIn(t *testing.T) {
 	if !reflect.DeepEqual(c.Values, []any{model.PID("lib-music"), model.PID("lib-books")}) {
 		t.Errorf("values = %#v, want both pids", c.Values)
 	}
+	q, err = buildQuery(yearCmd(), "", queryFlags{primaryLibrary: []model.PID{"lib-music"}})
+	if err != nil {
+		t.Fatalf("buildQuery (primary): %v", err)
+	}
+	c = condOf(t, q)
+	if c.Field != "primary_library" || c.Op != query.OpIn || !reflect.DeepEqual(c.Values, []any{model.PID("lib-music")}) {
+		t.Fatalf("cond = %+v, want primary_library in [lib-music]", c)
+	}
+}
+
+// TestResolveLibraryScopesNamesTheFlag: an unknown ref says which flag carried it, since
+// query, facet and search take both, and each list is resolved against one listing.
+func TestResolveLibraryScopesNamesTheFlag(t *testing.T) {
+	t.Parallel()
+	_, _, err := resolveLibraryScopes(context.Background(), testLibs(), "query", []string{vol + "/music"}, []string{"/nope"})
+	if !waxerr.Is(err, waxerr.CodeNotFound) || !strings.Contains(err.Error(), "--primary-library /nope") {
+		t.Fatalf("err = %v, want CodeNotFound naming --primary-library /nope", err)
+	}
+	libs, primary, err := resolveLibraryScopes(context.Background(), testLibs(), "query",
+		[]string{vol + "/music"}, []string{"lib-books", vol + "/books"})
+	if err != nil || !reflect.DeepEqual(libs, []model.PID{"lib-music"}) || !reflect.DeepEqual(primary, []model.PID{"lib-books"}) {
+		t.Fatalf("scopes = %v / %v (err %v), want lib-music and a deduplicated lib-books", libs, primary, err)
+	}
 }
 
 func TestResolveLibraryRefsAcceptsAPIDOrARootPath(t *testing.T) {
@@ -312,7 +335,7 @@ func TestResolveLibraryRefsCarriesTheCallersOp(t *testing.T) {
 func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
 	t.Parallel()
 	q, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "",
-		queryFlags{}, []string{vol + "/music"})
+		queryFlags{}, []string{vol + "/music"}, nil)
 	if err != nil {
 		t.Fatalf("scopedQuery: %v", err)
 	}
@@ -321,6 +344,16 @@ func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
 		!reflect.DeepEqual(c.Values, []any{model.PID("lib-music")}) {
 		t.Errorf("cond = %+v, want the resolved pid applied as `library in`", c)
 	}
+	q, err = scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "",
+		queryFlags{}, nil, []string{vol + "/books"})
+	if err != nil {
+		t.Fatalf("scopedQuery (primary): %v", err)
+	}
+	c = condOf(t, q)
+	if c.Field != "primary_library" || c.Op != query.OpIn ||
+		!reflect.DeepEqual(c.Values, []any{model.PID("lib-books")}) {
+		t.Errorf("cond = %+v, want the resolved pid applied as `primary_library in`", c)
+	}
 }
 
 // A rule document owns the whole where-clause, so layering --library on top is refused
@@ -328,9 +361,19 @@ func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
 func TestScopedQueryRefusesLibraryWithARule(t *testing.T) {
 	t.Parallel()
 	_, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "rule.json",
-		queryFlags{}, []string{"/music"})
+		queryFlags{}, []string{"/music"}, nil)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("err = %v, want CodeInvalid", err)
+	}
+	_, perr := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "rule.json",
+		queryFlags{}, nil, []string{"/music"})
+	if !waxerr.Is(perr, waxerr.CodeInvalid) || !strings.Contains(perr.Error(), "--primary-library does not") {
+		t.Fatalf("primary err = %v, want CodeInvalid naming --primary-library", perr)
+	}
+	_, berr := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "rule.json",
+		queryFlags{}, []string{"/music"}, []string{"/books"})
+	if !waxerr.Is(berr, waxerr.CodeInvalid) || !strings.Contains(berr.Error(), "--library and --primary-library do not") {
+		t.Fatalf("both err = %v, want CodeInvalid naming both flags", berr)
 	}
 	if !strings.Contains(err.Error(), "--rule") {
 		t.Errorf("error %q does not name the conflicting flag", err)

@@ -206,6 +206,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"browse", "recently-added"}},
 		{args: []string{"facet", "--group-by", "genre"}},
 		{args: []string{"facet", "--group-by", "author"}},
+		{args: []string{"facet", "--group-by", "primaryLibrary"}},
 		{args: []string{"show", p(fx.one)}},
 		{args: []string{"provenance", p(fx.one)}},
 		{args: []string{"acquisition", p(fx.one)}},

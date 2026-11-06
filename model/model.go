@@ -441,10 +441,13 @@ type ItemView struct {
 	PodcastPID      PID
 	SeriesPID       PID
 
-	// LibraryPID is the registered root the item's primary file sits under. It resolves
-	// through the file rather than a subtype row, so it is empty only for a fileless
-	// item and never because an entity is missing, and an empty value selects what
-	// `library isMissing` and the facet's [No File] bucket select.
+	// LibraryPID is the registered root the item's primary file sits under, the library
+	// the primary_library query field filters by and the primaryLibrary facet buckets by.
+	// A copy in another library does not move it; the library field and facet count the
+	// item there as well. It resolves through the file rather than a subtype row, so it
+	// is empty only for a fileless item and never because an entity is missing, and an
+	// empty value selects what `primary_library isMissing` (and `library isMissing`) and
+	// both facets' [No File] bucket select.
 	LibraryPID PID
 
 	// External identifiers, projected so a consumer can hand an item to a
@@ -619,9 +622,10 @@ type Change struct {
 	Op         ChangeOp
 	// LibraryPID is where an item or file sits once the change is applied, as the
 	// transaction that wrote the row left it: a file's library, and for an item the value
-	// ItemView.LibraryPID reads (its primary file's library, empty for a fileless item).
-	// It is empty for a delete and for every other entity. A consumer placing items per
-	// library reads it here rather than off the item, which may have moved again since.
+	// ItemView.LibraryPID reads (its primary file's library, which the primary_library
+	// field filters by; empty for a fileless item). It is empty for a delete and for every
+	// other entity. A consumer placing items per library reads it here rather than off
+	// the item, which may have moved again since.
 	LibraryPID PID
 }
 

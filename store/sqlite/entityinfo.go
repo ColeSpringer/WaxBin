@@ -101,7 +101,7 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 	if err != nil {
 		return nil, err
 	}
-	info.LibraryPIDs = libs
+	info.LibraryPIDs, info.PrimaryLibraryPIDs = libs.all, libs.primary
 	if kind == read.EntityArtist {
 		aliases, err := s.artistAliases(ctx, []int64{id}, op)
 		if err != nil {
@@ -305,38 +305,51 @@ func entityMemberSource(kind read.EntityKind) (from, idExpr string) {
 }
 
 // entityLibraryPIDsStmt selects the distinct libraries holding one entity's member files,
-// in library order; entityLibraryPIDsBatchStmt is the same over an id array, keyed by
-// entity id. The plan test reads both.
+// in library order, each with whether a member's primary file sits there;
+// entityLibraryPIDsBatchStmt is the same over an id array, keyed by entity id. The plan
+// test reads both.
 func entityLibraryPIDsStmt(kind read.EntityKind) string {
 	from, idExpr := entityMemberSource(kind)
-	return "SELECT l.pid" + from + " JOIN library l ON l.id = f.library_id WHERE " + idExpr + " = ? GROUP BY l.id ORDER BY l.id"
+	return "SELECT l.pid, MAX(pf.role = 'primary')" + from + " JOIN library l ON l.id = f.library_id WHERE " + idExpr + " = ? GROUP BY l.id ORDER BY l.id"
 }
 
 func entityLibraryPIDsBatchStmt(kind read.EntityKind) string {
 	from, idExpr := entityMemberSource(kind)
-	return "SELECT " + idExpr + " AS eid, l.pid" + from +
+	return "SELECT " + idExpr + " AS eid, l.pid, MAX(pf.role = 'primary')" + from +
 		" JOIN library l ON l.id = f.library_id WHERE " + idExpr + " IN " + inArray +
 		" GROUP BY eid, l.id ORDER BY eid, l.id"
 }
 
-// entityLibraryPIDs returns the distinct libraries holding an entity's member
-// items' files, in library order.
-func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id int64, op string) ([]model.PID, error) {
+// entityLibraries is one entity's libraries in library order: every library holding a
+// member's file, and among them the ones holding a member's primary file
+// (read.EntityInfo.LibraryPIDs and PrimaryLibraryPIDs).
+type entityLibraries struct{ all, primary []model.PID }
+
+func (e *entityLibraries) add(pid string, primary bool) {
+	e.all = append(e.all, model.PID(pid))
+	if primary {
+		e.primary = append(e.primary, model.PID(pid))
+	}
+}
+
+// entityLibraryPIDs returns the libraries holding an entity's member items' files.
+func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id int64, op string) (entityLibraries, error) {
 	rows, err := s.rstmts.queryContext(ctx, s.rdb(), entityLibraryPIDsStmt(kind), id)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return entityLibraries{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
-	var out []model.PID
+	var out entityLibraries
 	for rows.Next() {
 		var pid string
-		if err := rows.Scan(&pid); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		var primary bool
+		if err := rows.Scan(&pid, &primary); err != nil {
+			return entityLibraries{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		out = append(out, model.PID(pid))
+		out.add(pid, primary)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return entityLibraries{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return out, nil
 }
@@ -521,9 +534,9 @@ func (s *Store) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []m
 		if err != nil {
 			return err
 		}
-		for id, pids := range libs {
+		for id, e := range libs {
 			if info := byID[id]; info != nil {
-				info.LibraryPIDs = pids
+				info.LibraryPIDs, info.PrimaryLibraryPIDs = e.all, e.primary
 			}
 		}
 		if kind == read.EntityArtist {
@@ -690,24 +703,30 @@ func (s *Store) entityLiveCountsBatch(ctx context.Context, kind read.EntityKind,
 	return out, nil
 }
 
-// entityLibraryPIDsBatch is the batched entityLibraryPIDs: the distinct libraries
-// holding each entity's member files, keyed by entity id, in library order per
-// entity. It shares entityMemberSource with the single lookup, projecting and
-// grouping by the member's entity id so one query serves the whole chunk.
-func (s *Store) entityLibraryPIDsBatch(ctx context.Context, kind read.EntityKind, ids []int64, op string) (map[int64][]model.PID, error) {
+// entityLibraryPIDsBatch is the batched entityLibraryPIDs: the libraries holding each
+// entity's member files, keyed by entity id, in library order per entity. It shares
+// entityMemberSource with the single lookup, projecting and grouping by the member's
+// entity id so one query serves the whole chunk.
+func (s *Store) entityLibraryPIDsBatch(ctx context.Context, kind read.EntityKind, ids []int64, op string) (map[int64]*entityLibraries, error) {
 	rows, err := s.rstmts.queryContext(ctx, s.rdb(), entityLibraryPIDsBatchStmt(kind), idArray(ids))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
-	out := make(map[int64][]model.PID, len(ids))
+	out := make(map[int64]*entityLibraries, len(ids))
 	for rows.Next() {
 		var eid int64
 		var pid string
-		if err := rows.Scan(&eid, &pid); err != nil {
+		var primary bool
+		if err := rows.Scan(&eid, &pid, &primary); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		out[eid] = append(out[eid], model.PID(pid))
+		e := out[eid]
+		if e == nil {
+			e = &entityLibraries{}
+			out[eid] = e
+		}
+		e.add(pid, primary)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

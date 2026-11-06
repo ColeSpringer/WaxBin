@@ -118,7 +118,8 @@ const (
 // for all but the podcast, which is NULL for everything else. The release group is also
 // NULL for a track whose album has none. The library pid follows them and is not an
 // entity: it reads through the primary file, so it is NULL for a fileless item and
-// matches the library query field, which reads the same f.library_id.
+// matches the primary_library query field, which reads the same primary edge; the
+// library field matches through any of the item's files.
 //
 // The six external-identifier columns near the end of the list are the MusicBrainz ids
 // and the ISRC (see model.ItemView). The first four read off joined aliases; the artist

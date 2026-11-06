@@ -28,7 +28,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 		tagEq, tagContains, tagPresent, tagMissing []string
 		limitMode                                  string
 		seed                                       int64
-		libraries                                  []string
+		libraries, primaryLibraries                []string
 	)
 	cmd := &cobra.Command{
 		Use:     "query",
@@ -59,7 +59,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 				year: year, limit: limit, sortField: sortField, desc: desc,
 				tagEq: tagEq, tagContains: tagContains, tagPresent: tagPresent, tagMissing: tagMissing,
 				limitMode: limitMode, seed: seed,
-			}, libraries)
+			}, libraries, primaryLibraries)
 			if err != nil {
 				return err
 			}
@@ -104,7 +104,8 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.StringArrayVar(&tagContains, "tag-contains", nil, "match a custom tag by substring: KEY=SUBSTR (repeatable; case-insensitive)")
 	f.StringArrayVar(&tagPresent, "tag-present", nil, "require a custom tag key to be present (repeatable)")
 	f.StringArrayVar(&tagMissing, "tag-missing", nil, "require a custom tag key to be absent (repeatable)")
-	f.StringArrayVar(&libraries, "library", nil, "restrict to a library, by pid or registered root path (repeatable)")
+	f.StringArrayVar(&libraries, "library", nil, "restrict to items with a file in a library, copies included, by pid or registered root path (repeatable)")
+	f.StringArrayVar(&primaryLibraries, "primary-library", nil, "restrict to items whose primary file is in a library, by pid or registered root path (repeatable)")
 	f.StringVar(&limitMode, "limit-mode", "", "interpret --limit as: count|random|minutes|megabytes")
 	f.Int64Var(&seed, "seed", 0, "pin the shuffle order for --limit-mode random or a sortless budget mode (0 = fresh per run)")
 	return cmd
@@ -189,45 +190,74 @@ type libraryLister interface {
 	Libraries(ctx context.Context) ([]*model.Library, error)
 }
 
-// scopedQuery resolves the --library refs against the catalog and builds the query with
-// the resulting pids applied. Resolving and applying live together so they cannot drift:
-// a resolve whose result never reaches the query is a filter that silently matches
-// everything, which is the failure this flag exists to prevent.
+// scopedQuery resolves the --library and --primary-library refs against the catalog and
+// builds the query with the resulting pids applied. Resolving and applying live together
+// so they cannot drift: a resolve whose result never reaches the query is a filter that
+// silently matches everything, which is the failure these flags exist to prevent.
 func scopedQuery(ctx context.Context, lister libraryLister, cmd *cobra.Command,
-	op, rulePath string, qf queryFlags, refs []string) (query.Query, error) {
-	// A rule document owns the whole where-clause, so --library cannot be layered on
-	// top of one. Refused rather than ignored: this flag validates its input, so
-	// silently dropping it would answer a wider question than the user asked for.
-	if rulePath != "" && len(refs) > 0 {
+	op, rulePath string, qf queryFlags, refs, primaryRefs []string) (query.Query, error) {
+	// A rule document owns the whole where-clause, so --library and --primary-library
+	// cannot be layered on top of one. Refused rather than ignored: these flags validate
+	// their input, so silently dropping one would answer a wider question than the user
+	// asked for.
+	if rulePath != "" && (len(refs) > 0 || len(primaryRefs) > 0) {
+		var flags []string
+		if len(refs) > 0 {
+			flags = append(flags, "--library")
+		}
+		if len(primaryRefs) > 0 {
+			flags = append(flags, "--primary-library")
+		}
+		verb := "does"
+		if len(flags) > 1 {
+			verb = "do"
+		}
 		return query.Query{}, waxerr.New(waxerr.CodeInvalid, op,
-			"--library does not combine with --rule; put a library condition in the rule document")
+			strings.Join(flags, " and ")+" "+verb+" not combine with --rule; put a library condition in the rule document")
 	}
-	pids, err := resolveLibraryRefs(ctx, lister, op, refs)
-	if err != nil {
+	var err error
+	if qf.library, qf.primaryLibrary, err = resolveLibraryScopes(ctx, lister, op, refs, primaryRefs); err != nil {
 		return query.Query{}, err
 	}
-	qf.library = pids
 	return buildQuery(cmd, rulePath, qf)
 }
 
-// resolveLibraryRefs turns each --library ref into a library pid, accepting a pid or
-// either spelling of a registered root. An unknown ref errors rather than matching
-// nothing, so a mistyped root does not read as an empty catalog.
+// resolveLibraryScopes turns the --library and --primary-library refs into library pids
+// against one listing of the catalog's libraries. A ref is a pid or either spelling of a
+// registered root, and each list is deduplicated in first-seen order, since a pid and its
+// root path are two spellings of one library. An unknown ref errors naming its flag
+// rather than matching nothing, so a mistyped root does not read as an empty catalog.
+func resolveLibraryScopes(ctx context.Context, lister libraryLister, op string, refs, primaryRefs []string) (libs, primary []model.PID, err error) {
+	if len(refs) == 0 && len(primaryRefs) == 0 {
+		return nil, nil, nil
+	}
+	known, err := lister.Libraries(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if libs, err = matchLibraryRefs(known, op, "--library", refs); err != nil {
+		return nil, nil, err
+	}
+	if primary, err = matchLibraryRefs(known, op, "--primary-library", primaryRefs); err != nil {
+		return nil, nil, err
+	}
+	return libs, primary, nil
+}
+
+// resolveLibraryRefs is resolveLibraryScopes for a command with the --library flag alone.
 func resolveLibraryRefs(ctx context.Context, lister libraryLister, op string, refs []string) ([]model.PID, error) {
+	libs, _, err := resolveLibraryScopes(ctx, lister, op, refs, nil)
+	return libs, err
+}
+
+func matchLibraryRefs(known []*model.Library, op, flag string, refs []string) ([]model.PID, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	libs, err := lister.Libraries(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Deduplicated, first-seen order. A pid and its root path are two spellings of one
-	// library, and the arity is load-bearing: compileValueSubCond emits the indexed
-	// `is` form only at one value, and repeats the whole subquery above that.
 	out := make([]model.PID, 0, len(refs))
 	seen := make(map[model.PID]bool, len(refs))
 	for _, ref := range refs {
-		pid, err := matchLibraryRef(libs, op, ref)
+		pid, err := matchLibraryRef(known, op, flag, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -257,7 +287,7 @@ func rootSpellings(l *model.Library) []string {
 	return []string{l.DisplayRoot}
 }
 
-func matchLibraryRef(libs []*model.Library, op, ref string) (model.PID, error) {
+func matchLibraryRef(libs []*model.Library, op, flag, ref string) (model.PID, error) {
 	// Roots are stored absolute, so a relative ref is resolved against the working
 	// directory before comparing, the same way `library add` resolves the path it
 	// registers. A pid is matched before this ever matters, and Abs on a pid produces
@@ -287,12 +317,12 @@ func matchLibraryRef(libs []*model.Library, op, ref string) (model.PID, error) {
 		for _, root := range rootSpellings(l) {
 			if root != "" && pathx.UnderRoot(filepath.Clean(root), abs) {
 				return "", waxerr.New(waxerr.CodeNotFound, op,
-					"no such library: "+ref+"; it is inside root "+root+", so filter by path instead")
+					flag+" "+ref+": no such library; it is inside root "+root+", so filter by path instead")
 			}
 		}
 	}
 	return "", waxerr.New(waxerr.CodeNotFound, op,
-		"no such library: "+ref+"; registered: "+libraryRootList(libs))
+		flag+" "+ref+": no such library; registered: "+libraryRootList(libs))
 }
 
 func libraryRootList(libs []*model.Library) string {
@@ -320,11 +350,12 @@ type queryFlags struct {
 	// not expose the flags (facet ignores modes anyway).
 	limitMode string
 	seed      int64
-	// library holds already-resolved library pids, since buildQuery is deliberately
-	// catalog-free and resolving a root path needs a catalog. Registering the flag on
-	// a new command means extending that command's own selection check too; edit.go
-	// enumerates these fields by hand.
-	library []model.PID
+	// library and primaryLibrary hold already-resolved library pids (--library matches
+	// an item through any of its files, --primary-library through its primary alone),
+	// since buildQuery is deliberately catalog-free and resolving a root path needs a
+	// catalog. Registering the flags on a new command means extending that command's own
+	// selection check too; edit.go enumerates these fields by hand.
+	library, primaryLibrary []model.PID
 }
 
 // tagField builds the tag.<KEY> query field for a user-supplied key, giving a clear
@@ -380,10 +411,13 @@ func buildQuery(cmd *cobra.Command, rulePath string, qf queryFlags) (query.Query
 	if qf.source != "" {
 		b.Where("source", query.OpIs, qf.source)
 	}
-	// `in` at arity 1 compiles to what `is` compiles to, so a single --library still
-	// seeks file_library.
+	// Both library fields are member columns, which seek file_library at any arity, so
+	// one value costs what several do.
 	if len(qf.library) > 0 {
 		b.WhereValues("library", query.OpIn, query.Values(qf.library)...)
+	}
+	if len(qf.primaryLibrary) > 0 {
+		b.WhereValues("primary_library", query.OpIn, query.Values(qf.primaryLibrary)...)
 	}
 	if cmd.Flags().Changed("year") {
 		b.Where("year", query.OpIs, qf.year)

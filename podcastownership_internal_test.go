@@ -133,13 +133,14 @@ func TestRmRefusesANeverDownloadedEpisode(t *testing.T) {
 	if _, err := lib.PlanDeletePIDs(ctx, []model.PID{added.EpisodePID}, model.DeleteTrash); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("rm of a never-downloaded episode = %v, want CodeInvalid", err)
 	}
-	// The query-driven path skips it for the same reason, and counts it.
+	// The query-driven path never selects it: a file operation acts on items with a file,
+	// so the sweep counts the downloaded episode alone and the remote one takes no slot.
 	plan, err := lib.PlanDelete(ctx, query.New(query.EntityItems).Build(), model.DeleteTrash)
 	if err != nil {
 		t.Fatalf("PlanDelete: %v", err)
 	}
-	if plan.SkippedPodcast != 2 {
-		t.Errorf("SkippedPodcast = %d, want 2 (the downloaded and the remote episode)", plan.SkippedPodcast)
+	if plan.SkippedPodcast != 1 {
+		t.Errorf("SkippedPodcast = %d, want 1 (the downloaded episode; the remote one has no file to act on)", plan.SkippedPodcast)
 	}
 }
 

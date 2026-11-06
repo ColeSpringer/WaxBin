@@ -57,22 +57,16 @@ const (
 	seriesIDByPIDSub       = "(SELECT srsq.id FROM series srsq WHERE srsq.pid = ?)"
 )
 
-// primaryLibraryFields reads the library field from an item's primary file (alias f in
-// itemJoins) and every other field as the wrapped map does (QueryItemsByPrimary).
-type primaryLibraryFields struct{ query.Fields }
-
-func (p primaryLibraryFields) Column(field string) (query.Column, bool) {
-	if field == "library" {
-		return query.Column{Expr: "f.library_id", ValueSub: "(SELECT libq.id FROM library libq WHERE libq.pid = ?)", Kind: query.KindInt}, true
-	}
-	return p.Fields.Column(field)
-}
-
 // libraryMemberSub selects the items with a file in the libraries the compiled condition
 // names, through every edge, so an item counts in its alternates' libraries as well as
-// its primary's.
-const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
-	JOIN file lff ON lff.library_id = lfl.id JOIN item_file lfe ON lfe.file_id = lff.id WHERE lfl.pid`
+// its primary's. primaryLibraryMemberSub reads the primary edge alone: the library
+// ItemView.LibraryPID shows and a change row carries, one per item.
+const (
+	libraryMemberHead = `SELECT lfe.item_id FROM library lfl
+	JOIN file lff ON lff.library_id = lfl.id JOIN item_file lfe ON lfe.file_id = lff.id`
+	libraryMemberSub        = libraryMemberHead + ` WHERE lfl.pid`
+	primaryLibraryMemberSub = libraryMemberHead + ` AND lfe.role = 'primary' WHERE lfl.pid`
+)
 
 // itemFields whitelists the logical fields a query over items/tracks may
 // reference, mapping each to a column expression in the items SELECT (aliases:
@@ -121,22 +115,37 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // move updated_at), which is what makes last_progress the ordering key for "where was I".
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
-// text, so a facet drilldown can query by the bucket's EntityPID. There are twelve,
+// text, so a facet drilldown can query by the bucket's EntityPID. There are thirteen,
 // and they split three ways: artist_pid, album_artist_pid, album_pid,
 // release_group_pid, podcast_pid, and series_pid are scalar columns lowered on the
 // value side; genre_pid, credit_artist_pid, author_pid, narrator_pid, and
 // playlist_pid are set fields, over item_genre, item_contributor (one role each, see
 // contributorPIDColumn), and playlist_item, because those dimensions hold many rows
-// per item (the paragraphs below say why they stay set fields); and library is a
-// member column (query.MemberColumn) over every file edge, since an item with a copy
-// in another library belongs to that library too.
+// per item (the paragraphs below say why they stay set fields); and library and
+// primary_library are member columns (query.MemberColumn) over the file edges, the
+// first through every edge, since an item with a copy in another library belongs to
+// that library too, and the second through the primary edge alone.
+//
+// The two library fields answer different questions, and the view and the change log
+// side with the second. `library is B` is what is in B: an item whose primary sits in A
+// matches through its copy in B, which is what a host serving B to a device wants,
+// since it can play the copy. `primary_library is B` is what is placed in B: that item
+// does not match, because ItemView.LibraryPID and Change.LibraryPID both read the
+// primary file's library and say A. A host that shows each item once under its
+// library, or grants a reader one library, filters by primary_library, so that its
+// facet buckets, scoped counts and listing pages agree with the LibraryPID it checks
+// per item. The primaryLibrary facet is the matching dimension. Organize and delete,
+// whose unit is the whole item, take primary_library alone and refuse library
+// (Library.PlanOrganize, Library.PlanDelete).
 //
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
 // its author, like the artist facet). album_pid and release_group_pid are track-only
 // (NULL for books/episodes), podcast_pid is episode-only, series_pid is NULL but for a
 // book in a series, and library matches the library of any of the item's files (none
-// for a fileless item, so `library isMissing` matches undownloaded episodes). release_group_pid reads the album joined by itemJoins, so
+// for a fileless item, so `library isMissing` matches undownloaded episodes, and so
+// does `primary_library isMissing`: an item with any file has a primary, see
+// model.ItemFileRef.Role). release_group_pid reads the album joined by itemJoins, so
 // it is additionally NULL for a track whose album carries no release group:
 // isMissing there covers all three of no album, no release group, and not a track.
 //
@@ -148,8 +157,10 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // use the id column's index where one exists: podcast_pid seeks episode_podcast,
 // album_pid seeks track_album_id and series_pid book_series, so they narrow the outer
 // loop and cost O(matches).
-// library gets the same from its member form: the subquery seeks file_library once and
-// the items are reached by rowid.
+// library and primary_library get the same from their member form: the subquery seeks
+// file_library once and the items are reached by rowid. The lowered scalar form the
+// primary field could have taken (f.library_id against the pid's id) scans
+// playable_item instead, since the primary edge is reached from the item side.
 //
 // artist_pid, album_artist_pid, and release_group_pid still scan playable_item; what
 // they gain from lowering is N pid lookups collapsing to one, not an indexed seek.
@@ -164,13 +175,14 @@ const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
 // The indexed seeks above are `is` and `in` only. `in` seeks the same index `is` does
 // at every arity, including one, and an empty list matches nothing. notIn is an
 // anti-join and scans at any arity, on every one of these, so a deny-list costs
-// O(catalog) even on podcast_pid and library.
+// O(catalog) even on podcast_pid and the library pair.
 //
 // in and notIn are not complements over an item with no handle at all. notIn keeps
 // such a row, so `library notIn [every root]` returns every fileless item (an
-// undownloaded episode) while `library in [every root]` returns none. That is the
-// deny-list contract a stale entry needs; see query.Column.ValueSub. A caller
-// scoping visibility by library has to decide what a fileless item means to it.
+// undownloaded episode) while `library in [every root]` returns none, and
+// primary_library behaves the same. That is the deny-list contract a stale entry needs;
+// see query.Column.ValueSub. A caller scoping visibility by library has to decide what a
+// fileless item means to it.
 //
 // genre_pid, the three contributor fields, and playlist_pid stay set fields
 // (set-field semantics: isNot is a deny-list, ordered operators are rejected) and are
@@ -281,8 +293,8 @@ var itemFields = query.FieldMap{
 	"rel_path": {Expr: relPathExpr, Kind: query.KindText},
 
 	// Entity handles (see the header block): the item's internal id column compared
-	// against a subquery that resolves the caller's pid once, followed by the library
-	// member column and the set fields over their own tables. Kind describes the Expr,
+	// against a subquery that resolves the caller's pid once, followed by the two library
+	// member columns and the set fields over their own tables. Kind describes the Expr,
 	// which since the lowering is an integer id column and not the pid text the caller
 	// passes. Nothing reads it today (compileValueSubCond handles every operator these
 	// fields accept), but declaring KindText would leave a live trap: routed back
@@ -297,6 +309,7 @@ var itemFields = query.FieldMap{
 	"podcast_pid":       {Expr: "ep.podcast_id", ValueSub: podcastIDByPIDSub, Kind: query.KindInt},
 	"series_pid":        {Expr: "bk.series_id", ValueSub: seriesIDByPIDSub, Kind: query.KindInt},
 	"library":           {Member: &query.MemberColumn{IDExpr: "pi.id", Sub: libraryMemberSub}},
+	"primary_library":   {Member: &query.MemberColumn{IDExpr: "pi.id", Sub: primaryLibraryMemberSub}},
 	"genre_pid": {Set: &query.SetColumn{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
 		ValueExpr: "gq.pid",
@@ -521,6 +534,11 @@ func fieldMapFor(e query.Entity) (query.Fields, bool) {
 		return nil, false
 	}
 }
+
+// hasFilePredicate scopes a compiled item query to the items with a file, through the
+// primary edge itemJoins binds (an item with any file has a primary, see
+// model.ItemFileRef.Role).
+const hasFilePredicate = "pf.file_id IS NOT NULL"
 
 // entityPredicate returns an extra WHERE predicate scoping a compiled item query to
 // its entity's kind, or "" for the kind-agnostic items entity. The tracks entity is

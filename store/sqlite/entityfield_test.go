@@ -489,7 +489,7 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	for _, field := range []string{"artist_pid", "release_group_pid", "series_pid"} {
+	for _, field := range []string{"artist_pid", "release_group_pid", "series_pid", "library", "primary_library"} {
 		for _, op := range []query.Op{query.OpGt, query.OpLt, query.OpGte, query.OpLte,
 			query.OpContains, query.OpStartsWith, query.OpEndsWith} {
 			_, err := st.QueryItems(ctx, query.New(query.EntityItems).
@@ -502,7 +502,7 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 	// in and notIn are both accepted on every lowered field, at arity 1 and at 0,
 	// since the empty list takes a shortcut before the operator is ever consulted.
 	for _, field := range []string{"artist_pid", "album_artist_pid", "album_pid",
-		"release_group_pid", "podcast_pid", "series_pid", "library"} {
+		"release_group_pid", "podcast_pid", "series_pid", "library", "primary_library"} {
 		for _, op := range []query.Op{query.OpIn, query.OpNotIn} {
 			for _, vals := range [][]any{{"some-pid"}, {}} {
 				if _, err := st.QueryItems(ctx, query.New(query.EntityItems).
@@ -512,7 +512,7 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 			}
 		}
 	}
-	for _, field := range []string{"album_pid", "series_pid"} {
+	for _, field := range []string{"album_pid", "series_pid", "library", "primary_library"} {
 		_, err := st.QueryItems(ctx, query.New(query.EntityItems).
 			OrderBy(field, false).Build(), "")
 		if !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -607,9 +607,10 @@ func TestLoweredNotInStalePIDExcludesNothing(t *testing.T) {
 	}
 }
 
-// TestLibraryMemberPlans: the library field matches an item through any of its files, and
-// still drives off file_library: `is` and `in` run the membership subquery once and reach
-// the items by rowid, never a correlated probe per item.
+// TestLibraryMemberPlans: the library field matches an item through any of its files and
+// primary_library through its primary, and both drive off file_library: `is` and `in` run
+// the membership subquery once and reach the items by rowid, never a correlated probe per
+// item.
 func TestLibraryMemberPlans(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
@@ -622,6 +623,8 @@ func TestLibraryMemberPlans(t *testing.T) {
 	for _, q := range []query.Query{
 		query.New(query.EntityItems).Where("library", query.OpIs, "some-pid").Build(),
 		query.New(query.EntityItems).WhereValues("library", query.OpIn, "a", "b").Build(),
+		query.New(query.EntityItems).Where("primary_library", query.OpIs, "some-pid").Build(),
+		query.New(query.EntityItems).WhereValues("primary_library", query.OpIn, "a", "b").Build(),
 	} {
 		c, err := query.Compile(q, fm)
 		if err != nil {
@@ -640,8 +643,8 @@ func TestLibraryMemberPlans(t *testing.T) {
 }
 
 // TestLoweredNotInScansTheCatalog records the honest cost, in
-// TestReleaseGroupPIDScansOuterLoop's voice: a deny-list is an anti-join, so even
-// library, which `is` drives off file_library, scans here.
+// TestReleaseGroupPIDScansOuterLoop's voice: a deny-list is an anti-join, so even the
+// library pair, which `is` drives off file_library, scans here.
 func TestLoweredNotInScansTheCatalog(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
@@ -652,30 +655,32 @@ func TestLoweredNotInScansTheCatalog(t *testing.T) {
 	if !ok {
 		t.Fatal("no field map for items")
 	}
-	c, err := query.Compile(query.New(query.EntityItems).
-		WhereValues("library", query.OpNotIn, "some-pid").Build(), fm)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
-	lines := explainPlanLines(t, st, itemSelect+" WHERE "+c.Where, c.Args...)
-	plan := strings.Join(lines, "\n")
-	if !strings.Contains(plan, "SCAN pi") {
-		t.Errorf("library notIn no longer scans playable_item:\n%s", plan)
-	}
-	// The projection's own columns are correlated by design, so search for the filter's
-	// own subquery (the one resolving the pid against lfl) and check its parent node: the
-	// deny-set is built once, not resolved per row.
-	var parent string
-	for i, l := range lines {
-		if strings.Contains(l, "lfl") && i > 0 {
-			parent = lines[i-1]
+	for _, field := range []string{"library", "primary_library"} {
+		c, err := query.Compile(query.New(query.EntityItems).
+			WhereValues(field, query.OpNotIn, "some-pid").Build(), fm)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
 		}
-	}
-	if parent == "" {
-		t.Fatalf("no lfl line; the filter did not build its member set:\n%s", plan)
-	}
-	if !strings.Contains(parent, "LIST SUBQUERY") || strings.Contains(parent, "CORRELATED") {
-		t.Errorf("library notIn resolves its members per row (%q):\n%s", parent, plan)
+		lines := explainPlanLines(t, st, itemSelect+" WHERE "+c.Where, c.Args...)
+		plan := strings.Join(lines, "\n")
+		if !strings.Contains(plan, "SCAN pi") {
+			t.Errorf("%s notIn no longer scans playable_item:\n%s", field, plan)
+		}
+		// The projection's own columns are correlated by design, so search for the
+		// filter's own subquery (the one resolving the pid against lfl) and check its
+		// parent node: the deny-set is built once, not resolved per row.
+		var parent string
+		for i, l := range lines {
+			if strings.Contains(l, "lfl") && i > 0 {
+				parent = lines[i-1]
+			}
+		}
+		if parent == "" {
+			t.Fatalf("%s: no lfl line; the filter did not build its member set:\n%s", field, plan)
+		}
+		if !strings.Contains(parent, "LIST SUBQUERY") || strings.Contains(parent, "CORRELATED") {
+			t.Errorf("%s notIn resolves its members per row (%q):\n%s", field, parent, plan)
+		}
 	}
 }
 

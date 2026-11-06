@@ -27,6 +27,16 @@ type SearchOptions struct {
 	// unknown library pid is an error, not an empty scope.
 	Libraries []model.PID
 
+	// PrimaryLibraries, when non-empty, scopes the search to items placed in these
+	// libraries: an item counts when its primary file lives in one of them, the library
+	// ItemView.LibraryPID shows, so an item another library holds only a copy of is
+	// outside the scope. It is the search-side form of the primary_library query field,
+	// for a host that shows each item once under its library or grants a reader one
+	// library, where Libraries is the form for a host serving whatever a library can
+	// play. With both set, both apply. A fileless item drops out as under Libraries,
+	// and an unknown pid is an error.
+	PrimaryLibraries []model.PID
+
 	// States, when non-empty, narrows the search to items in these lifecycle
 	// states. Empty means no narrowing, which is the behavior from before the
 	// option existed: an archived item keeps its FTS row and stays searchable.

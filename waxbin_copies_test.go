@@ -18,6 +18,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/scan"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // copyLibrary scans a root holding one recording twice: a/1.mp3 tagged "Original" and a
@@ -487,19 +488,61 @@ func TestLibraryScopedFileOperationsKeepToTheirLibrary(t *testing.T) {
 	if items, err := lib.Query(ctx, inB, ""); err != nil || len(items) != 1 {
 		t.Fatalf("items in B = %d (err %v), want the item found through its copy", len(items), err)
 	}
-	plan, err := lib.PlanOrganize(ctx, inB, waxbin.OrganizeOptions{})
+	placedInB := query.New(query.EntityItems).Where("primary_library", query.OpIs, string(libraryPIDFor(t, ctx, lib, rootB))).Build()
+	if items, err := lib.Query(ctx, placedInB, ""); err != nil || len(items) != 0 {
+		t.Fatalf("items placed in B = %d (err %v), want none: a copy does not place its item there", len(items), err)
+	}
+	placedInA := query.New(query.EntityItems).Where("primary_library", query.OpIs, string(libraryPIDFor(t, ctx, lib, rootA))).Build()
+	if items, err := lib.Query(ctx, placedInA, ""); err != nil || len(items) != 1 {
+		t.Fatalf("items placed in A = %d (err %v), want the item under its primary", len(items), err)
+	}
+	// A file operation refuses the any-file field, scopes by primary_library alone, and
+	// refuses a library the catalog does not hold rather than planning nothing or everything.
+	byAnyFile := query.New(query.EntityItems).WhereValues("library", query.OpNotIn, "x").Build()
+	for _, q := range []query.Query{inB, byAnyFile} {
+		if _, err := lib.PlanOrganize(ctx, q, waxbin.OrganizeOptions{}); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("organize by library = %v, want CodeInvalid", err)
+		}
+		if _, err := lib.PlanDelete(ctx, q, model.DeleteTrash); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("delete by library = %v, want CodeInvalid", err)
+		}
+	}
+	stale := query.New(query.EntityItems).Where("primary_library", query.OpIsNot, "no-such-library").Build()
+	if _, err := lib.PlanOrganize(ctx, stale, waxbin.OrganizeOptions{}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("organize over a removed library = %v, want CodeNotFound", err)
+	}
+	if _, err := lib.PlanDelete(ctx, stale, model.DeleteTrash); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("delete over a removed library = %v, want CodeNotFound", err)
+	}
+	plan, err := lib.PlanOrganize(ctx, placedInB, waxbin.OrganizeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plan.Actions) != 0 {
 		t.Errorf("organize of B = %+v, want nothing planned for A's primary", plan.Actions)
 	}
-	del, err := lib.PlanDelete(ctx, inB, model.DeleteTrash)
+	del, err := lib.PlanDelete(ctx, placedInB, model.DeleteTrash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(del.Actions) != 0 {
 		t.Errorf("delete of B = %+v, want nothing planned for an item whose primary is in A", del.Actions)
+	}
+	// Placed in A: organize lays out A's file, and a delete takes every file of the item,
+	// the copy in B included.
+	plan, err = lib.PlanOrganize(ctx, placedInA, waxbin.OrganizeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Actions) == 0 {
+		t.Errorf("organize of A planned nothing, want A's file laid out")
+	}
+	del, err = lib.PlanDelete(ctx, placedInA, model.DeleteTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(del.Actions) != 2 {
+		t.Errorf("delete of A = %+v, want both files of the item", del.Actions)
 	}
 }
 

@@ -12,11 +12,12 @@ import (
 
 func newSearchCmd(g *globals) *cobra.Command {
 	var (
-		limit         int
-		maxCandidates int
-		libraries     []string
-		states        []string
-		podcasts      []string
+		limit            int
+		maxCandidates    int
+		libraries        []string
+		primaryLibraries []string
+		states           []string
+		podcasts         []string
 	)
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
@@ -29,7 +30,8 @@ func newSearchCmd(g *globals) *cobra.Command {
 			"\"Ke$ha\" and \"kesha\" find each other), either kana finds a Japanese title, and a word " +
 			"inside a CJK or Thai title is found; a query of symbols alone matches titles and artists spelled the same. " +
 			"--max-candidates bounds how many matches are ranked (the newest ones win under " +
-			"truncation), --library scopes the search to items playable from those libraries, " +
+			"truncation), --library scopes the search to items playable from those libraries " +
+			"(a copy counts) and --primary-library to items whose primary file is in them, " +
 			"--state narrows it to items in those lifecycle states, and --podcast keeps only " +
 			"the episodes of those shows.",
 		Args: cobra.MinimumNArgs(1),
@@ -41,7 +43,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
-			libPIDs, err := resolveLibraryRefs(ctx(cmd), lib, "search", libraries)
+			libPIDs, primaryPIDs, err := resolveLibraryScopes(ctx(cmd), lib, "search", libraries, primaryLibraries)
 			if err != nil {
 				return err
 			}
@@ -50,7 +52,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 				return err
 			}
 			opt := read.SearchOptions{
-				Limit: limit, MaxCandidates: maxCandidates, Libraries: libPIDs, States: itemStates,
+				Limit: limit, MaxCandidates: maxCandidates, Libraries: libPIDs, PrimaryLibraries: primaryPIDs, States: itemStates,
 			}
 			for _, p := range podcasts {
 				opt.Podcasts = append(opt.Podcasts, model.PID(p))
@@ -80,7 +82,8 @@ func newSearchCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 0, "max results per group (0 = default)")
 	cmd.Flags().IntVar(&maxCandidates, "max-candidates", 0, "cap the ranked match pool; the newest matches win under truncation (0 = no cap)")
-	cmd.Flags().StringArrayVar(&libraries, "library", nil, "scope to items playable from this library, by pid or registered root path (repeatable)")
+	cmd.Flags().StringArrayVar(&libraries, "library", nil, "scope to items playable from this library, a copy included, by pid or registered root path (repeatable)")
+	cmd.Flags().StringArrayVar(&primaryLibraries, "primary-library", nil, "scope to items whose primary file is in this library, by pid or registered root path (repeatable)")
 	cmd.Flags().StringArrayVar(&states, "state", nil,
 		"narrow to items in this item lifecycle state: "+model.ItemStateList()+
 			" (repeatable; not the per-user star/rating of the 'state' command, nor 'entity state';"+

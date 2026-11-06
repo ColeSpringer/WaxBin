@@ -12,16 +12,16 @@ type Bucket struct {
 	IsUnknown bool   // the dimension was absent (mapped to a sentinel)
 	// EntityPID is the bucket's entity pid on the entity-keyed dimensions
 	// (genre, artist, creditArtist, albumArtist, album, releaseGroup, library,
-	// podcast, playlist, series, author, narrator) and "" on the rest, including the
-	// unknown bucket of a dimension that has one.
+	// primaryLibrary, podcast, playlist, series, author, narrator) and "" on the rest,
+	// including the unknown bucket of a dimension that has one.
 	//
 	// It is a pid, not a typed handle, so the dimension is what says how to resolve
 	// it. Most pair with an EntityKind and read back through EntityByPID or
-	// EntityByPIDs; three do not. library's pid is a model.Library, podcast's reads
-	// back through PodcastByPID, and playlist's through PlaylistByPID or
-	// PlaylistItems. EntityKind deliberately covers none of the three, so a consumer
-	// walking buckets generically has to switch on GroupBy rather than assume every
-	// EntityPID is an EntityByPID argument.
+	// EntityByPIDs; four do not. library's and primaryLibrary's pid is a
+	// model.Library, podcast's reads back through PodcastByPID, and playlist's through
+	// PlaylistByPID or PlaylistItems. EntityKind deliberately covers none of the four,
+	// so a consumer walking buckets generically has to switch on GroupBy rather than
+	// assume every EntityPID is an EntityByPID argument.
 	EntityPID model.PID
 }
 

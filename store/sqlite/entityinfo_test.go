@@ -242,6 +242,10 @@ func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
 	if len(spread.LibraryPIDs) != 2 || spread.LibraryPIDs[0] != lib.PID || spread.LibraryPIDs[1] != lib2.PID {
 		t.Errorf("spread libraries = %v, want [%s %s] in library order", spread.LibraryPIDs, lib.PID, lib2.PID)
 	}
+	// Each track is its library's primary, so the artist is placed in both as well.
+	if !reflect.DeepEqual(spread.PrimaryLibraryPIDs, spread.LibraryPIDs) {
+		t.Errorf("spread primary libraries = %v, want %v", spread.PrimaryLibraryPIDs, spread.LibraryPIDs)
+	}
 
 	// The author artist has no tracks, so the rollup count is zero, but the
 	// authored book still places the artist in its library.
@@ -251,6 +255,9 @@ func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
 	}
 	if len(author.LibraryPIDs) != 1 || author.LibraryPIDs[0] != lib2.PID {
 		t.Errorf("author libraries = %v, want [%s] via the authored book", author.LibraryPIDs, lib2.PID)
+	}
+	if !reflect.DeepEqual(author.PrimaryLibraryPIDs, []model.PID{lib2.PID}) {
+		t.Errorf("author primary libraries = %v, want [%s]", author.PrimaryLibraryPIDs, lib2.PID)
 	}
 }
 
@@ -681,8 +688,9 @@ func TestArtistLibrariesFollowEveryCredit(t *testing.T) {
 		if !reflect.DeepEqual(single.LibraryPIDs, want[name]) {
 			t.Errorf("%s libraries = %v, want %v", name, single.LibraryPIDs, want[name])
 		}
-		if b := batch[pid]; b == nil || !reflect.DeepEqual(b.LibraryPIDs, single.LibraryPIDs) {
-			t.Errorf("%s batch libraries = %+v, single %v", name, b, single.LibraryPIDs)
+		if b := batch[pid]; b == nil || !reflect.DeepEqual(b.LibraryPIDs, single.LibraryPIDs) ||
+			!reflect.DeepEqual(b.PrimaryLibraryPIDs, single.PrimaryLibraryPIDs) {
+			t.Errorf("%s batch libraries = %+v, single %v / %v", name, b, single.LibraryPIDs, single.PrimaryLibraryPIDs)
 		}
 	}
 }

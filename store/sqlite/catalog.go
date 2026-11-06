@@ -793,16 +793,18 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID
 	return s.queryItems(ctx, q, userPID, false)
 }
 
-// QueryItemsByPrimary is QueryItems with the library field reading each item's primary
-// file alone, for an operation on an item's own files (organize, a delete by query): an
-// item another library holds only a copy of is not that library's to move or delete.
-func (s *Store) QueryItemsByPrimary(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
+// QueryItemsWithFiles is QueryItems over the items that have a file, the selection for
+// an operation on an item's own files (organize, a delete by query): an item with none
+// (an undownloaded episode, an archived track) has nothing to act on, and left in the
+// selection it would take a Limit slot from one that does or count as a skipped episode
+// in a sweep. Library.PlanOrganize and Library.PlanDelete add the rule checks.
+func (s *Store) QueryItemsWithFiles(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
 	return s.queryItems(ctx, q, userPID, true)
 }
 
-func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID, byPrimary bool) ([]*model.ItemView, error) {
+func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID, withFiles bool) ([]*model.ItemView, error) {
 	const op = "store.QueryItems"
-	stmt, args, c, err := s.queryItemsStmt(ctx, q, userPID, byPrimary, op)
+	stmt, args, c, err := s.queryItemsStmt(ctx, q, userPID, withFiles, op)
 	if err != nil {
 		return nil, err
 	}
@@ -829,13 +831,10 @@ func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID
 
 // queryItemsStmt assembles queryItems' statement and bind args, split out so the plan
 // tests EXPLAIN the real statement.
-func (s *Store) queryItemsStmt(ctx context.Context, q query.Query, userPID model.PID, byPrimary bool, op string) (string, []any, *query.Compiled, error) {
+func (s *Store) queryItemsStmt(ctx context.Context, q query.Query, userPID model.PID, withFiles bool, op string) (string, []any, *query.Compiled, error) {
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
 		return "", nil, nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
-	}
-	if byPrimary {
-		fm = primaryLibraryFields{fm}
 	}
 	c, err := query.Compile(q, fm)
 	if err != nil {
@@ -870,6 +869,9 @@ func (s *Store) queryItemsStmt(ctx context.Context, q query.Query, userPID model
 			" WHERE szif.item_id = pi.id AND szif.role IN ('primary', 'part'))"
 	}
 	where := andWhere(c.Where, entityPredicate(q.Entity))
+	if withFiles {
+		where = andWhere(where, hasFilePredicate)
+	}
 	// leadArgs carries the join's user id (or is empty) and precedes the query args.
 	args := append(leadArgs, c.Args...)
 

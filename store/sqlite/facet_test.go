@@ -595,7 +595,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	}
 
 	withUnknown := 0
-	seriesUnknown := false
+	unknownIn := map[read.GroupBy]bool{}
 	dims := append(read.GroupBys(), read.GroupBy("tag.MOOD"))
 	for _, g := range dims {
 		base, err := st.Facet(ctx, all, g, "", 0, "")
@@ -615,7 +615,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 				continue
 			}
 			withUnknown++
-			seriesUnknown = seriesUnknown || g == read.GroupSeries
+			unknownIn[g] = true
 			if i != len(base.Buckets)-1 {
 				t.Errorf("%s: unknown bucket %q is at %d of %d, want last: %+v",
 					g, b.Display, i, len(base.Buckets), base.Buckets)
@@ -624,9 +624,13 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	}
 	// Guard the guard: if the fixture stops producing unknown buckets the loop above
 	// asserts nothing and the (sortExpr IS NULL) term goes unpinned again.
-	if withUnknown < 5 || !seriesUnknown {
-		t.Fatalf("fixture produced %d unknown buckets across %d dimensions (series among them: %v), "+
-			"want the five music dimensions, library and series", withUnknown, len(dims), seriesUnknown)
+	if withUnknown < 5 {
+		t.Fatalf("fixture produced %d unknown buckets across %d dimensions, want the five music dimensions at least", withUnknown, len(dims))
+	}
+	for _, g := range []read.GroupBy{read.GroupLibrary, read.GroupPrimaryLibrary, read.GroupSeries} {
+		if !unknownIn[g] {
+			t.Fatalf("the %s dimension produced no unknown bucket, so its order went unpinned", g)
+		}
 	}
 }
 

@@ -32,9 +32,15 @@ const (
 	GroupKind         GroupBy = "kind"
 	// GroupLibrary buckets items by the libraries their files sit in (key = library
 	// pid, display = the display root), so an item with a copy in another library
-	// counts under both. A fileless item, such as an undownloaded episode, lands in the
-	// NoFile unknown bucket.
+	// counts under both. It is the mirror of the library query field. A fileless item,
+	// such as an undownloaded episode, lands in the NoFile unknown bucket.
 	GroupLibrary GroupBy = "library"
+	// GroupPrimaryLibrary buckets items by the library of their primary file (key =
+	// library pid, display = the display root), the one ItemView.LibraryPID shows, so
+	// each item counts once and the counts sum to the item count where GroupLibrary's
+	// can exceed it. It is the mirror of the primary_library query field. A fileless
+	// item lands in NoFile, as it does under GroupLibrary.
+	GroupPrimaryLibrary GroupBy = "primaryLibrary"
 	// GroupPodcast buckets episodes by their feed (key = podcast pid, display = the
 	// feed title). It is the mirror of the podcast_pid query field, so a bucket
 	// drills down through it. The dimension is episode-scoped and every episode has
@@ -79,8 +85,8 @@ const (
 func (g GroupBy) Valid() bool {
 	switch g {
 	case GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
-		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries,
-		GroupAuthor, GroupNarrator:
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPrimaryLibrary, GroupPodcast,
+		GroupPlaylist, GroupSeries, GroupAuthor, GroupNarrator:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -91,8 +97,8 @@ func (g GroupBy) Valid() bool {
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
 	return []GroupBy{GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
-		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast, GroupPlaylist, GroupSeries,
-		GroupAuthor, GroupNarrator}
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPrimaryLibrary, GroupPodcast,
+		GroupPlaylist, GroupSeries, GroupAuthor, GroupNarrator}
 }
 
 // UserScoped reports whether g's bucket set depends on the calling user. Only

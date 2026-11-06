@@ -473,11 +473,8 @@ func newEntityInfoCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(tw, "RELEASE GROUPS\t%d\n", info.ReleaseGroupCount)
 			}
 			fmt.Fprintf(tw, "DURATION\t%s\n", durationLabel(info.TotalDurationMS))
-			libs := make([]string, len(info.LibraryPIDs))
-			for i, p := range info.LibraryPIDs {
-				libs[i] = string(p)
-			}
-			fmt.Fprintf(tw, "LIBRARIES\t%s\n", strings.Join(libs, ", "))
+			fmt.Fprintf(tw, "LIBRARIES\t%s\n", strings.Join(pidStrings(info.LibraryPIDs), ", "))
+			fmt.Fprintf(tw, "PRIMARY LIBRARIES\t%s\n", strings.Join(pidStrings(info.PrimaryLibraryPIDs), ", "))
 			return tw.Flush()
 		},
 	}
@@ -794,12 +791,19 @@ type entityInfoView struct {
 	ReleaseGroupCount int      `json:"releaseGroupCount,omitempty"`
 	TotalDurationMS   int64    `json:"totalDurationMs"`
 	LibraryPIDs       []string `json:"libraryPids"`
+	// PrimaryLibraryPIDs are the libraries among libraryPids holding a member's primary
+	// file, the ones the members are placed in (read.EntityInfo.PrimaryLibraryPIDs).
+	PrimaryLibraryPIDs []string `json:"primaryLibraryPids"`
 }
 
 func toEntityInfoView(info *read.EntityInfo) entityInfoView {
-	libs := make([]string, len(info.LibraryPIDs))
-	for i, p := range info.LibraryPIDs {
-		libs[i] = string(p)
+	// An empty list stays a list in JSON, as libraryPids always has.
+	strs := func(pids []model.PID) []string {
+		out := make([]string, len(pids))
+		for i, p := range pids {
+			out[i] = string(p)
+		}
+		return out
 	}
 	return entityInfoView{
 		Kind: string(info.Kind), PID: string(info.PID), Name: info.Name, SortKey: info.SortKey,
@@ -808,7 +812,8 @@ func toEntityInfoView(info *read.EntityInfo) entityInfoView {
 		Media: info.Media, Country: info.Country,
 		ArtistPID: string(info.ArtistPID), ReleaseGroupPID: string(info.ReleaseGroupPID),
 		ItemCount: info.ItemCount, ReleaseGroupCount: info.ReleaseGroupCount,
-		TotalDurationMS: info.TotalDurationMS, LibraryPIDs: libs,
+		TotalDurationMS: info.TotalDurationMS, LibraryPIDs: strs(info.LibraryPIDs),
+		PrimaryLibraryPIDs: strs(info.PrimaryLibraryPIDs),
 	}
 }
 

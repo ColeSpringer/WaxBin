@@ -1364,8 +1364,9 @@ func TestCopyLibraryScopeCoversEveryFile(t *testing.T) {
 	if err != nil || it.LibraryPID != libA.PID {
 		t.Fatalf("item library = %+v (err %v), want A", it, err)
 	}
-	if info, err := st.EntityByPID(ctx, read.EntityArtist, it.ArtistPID); err != nil || !slices.Equal(info.LibraryPIDs, []model.PID{libA.PID, libB.PID}) {
-		t.Errorf("artist libraries = %+v (err %v), want A and B", info, err)
+	if info, err := st.EntityByPID(ctx, read.EntityArtist, it.ArtistPID); err != nil || !slices.Equal(info.LibraryPIDs, []model.PID{libA.PID, libB.PID}) ||
+		!slices.Equal(info.PrimaryLibraryPIDs, []model.PID{libA.PID}) {
+		t.Errorf("artist libraries = %+v (err %v), want A and B, placed in A alone", info, err)
 	}
 	refs, err := st.ItemFiles(ctx, ra.ItemPID)
 	if err != nil {

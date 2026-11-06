@@ -19,7 +19,9 @@ import (
 // it fails here instead.
 //
 // Set fields are skipped: their Expr is empty by contract, so genre_pid, the three
-// contributor fields, and playlist_pid would otherwise read as one group.
+// contributor fields, and playlist_pid would otherwise read as one group. A member
+// field's Expr is empty by the same contract, so it groups by its membership subquery,
+// which is what two spellings of one member column would share.
 func TestNoUndeclaredFieldAliases(t *testing.T) {
 	t.Parallel()
 	byExpr := map[string][]string{}
@@ -27,7 +29,11 @@ func TestNoUndeclaredFieldAliases(t *testing.T) {
 		if col.Set != nil {
 			continue
 		}
-		byExpr[col.Expr] = append(byExpr[col.Expr], name)
+		key := col.Expr
+		if col.Member != nil {
+			key = col.Member.Sub
+		}
+		byExpr[key] = append(byExpr[key], name)
 	}
 	for expr, names := range byExpr {
 		if len(names) < 2 {

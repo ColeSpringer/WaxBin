@@ -52,22 +52,25 @@ const searchDisplayJoins = `
 		LEFT JOIN album al ON al.id = t.album_id`
 
 // searchScope is what narrows a search's matched items: the libraries their files sit
-// in, their states, and for an episode its show. shows nil keeps every show's episodes;
-// an empty non-nil shows keeps none.
+// in, the libraries their primary files sit in, their states, and for an episode its
+// show. shows nil keeps every show's episodes; an empty non-nil shows keeps none.
 type searchScope struct {
-	libIDs []int64
-	states []model.ItemState
-	shows  []int64
+	libIDs        []int64
+	primaryLibIDs []int64
+	states        []model.ItemState
+	shows         []int64
 }
 
 // searchNarrow returns the fragment narrowing matched items (the pi alias) to a scope,
 // plus its bind args. It is spliced directly after a caller's own `JOIN playable_item pi
 // ON ...` line, because the two rungs join pi on different columns and disagree about
 // whether the join is wanted when nothing narrows at all. For libIDs=[7],
-// states=[present remote] and shows=[3] it returns:
+// primaryLibIDs=[7], states=[present remote] and shows=[3] it returns:
 //
 //	` AND pi.state IN (?,?) AND pi.id IN (SELECT spf.item_id FROM file sf
-//		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN (?))
+//		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN (SELECT value FROM json_each(?)))
+//		AND pi.id IN (SELECT spf.item_id FROM file sf
+//		JOIN item_file spf ON spf.file_id = sf.id AND spf.role = 'primary' WHERE sf.library_id IN (SELECT value FROM json_each(?)))
 //		AND (pi.kind <> 'episode' OR pi.id IN (SELECT se.item_id FROM episode se
 //		WHERE se.podcast_id IN (SELECT value FROM json_each(?))))`
 //
@@ -76,21 +79,24 @@ type searchScope struct {
 // makes the bind order fall out of fragment order.
 //
 // An item counts in a library when any of its files lives there, its alternates'
-// included, so a host scoping by library finds it wherever it can serve a file. One with
-// no file at all (an undownloaded episode) drops out of a scoped search. The membership
-// subquery seeks file_library once, and the show list, bound as one JSON array so a
-// caller's list of any length runs one statement, seeks episode_podcast. A part left
-// empty contributes nothing, except an empty non-nil show list, which keeps every
-// episode out.
+// included, so a host scoping by library finds it wherever it can serve a file; the
+// primary form counts it in its primary file's library alone, where the item view places
+// it. One with no file at all (an undownloaded episode) drops out of either scope. Each
+// id list binds as one JSON array, so a caller's list of any length runs one statement
+// text; the membership subqueries seek file_library and the show list seeks
+// episode_podcast. A part left empty contributes nothing, except an empty non-nil show
+// list, which keeps every episode out.
 func searchNarrow(sc searchScope) (string, []any) {
-	if len(sc.libIDs) == 0 && len(sc.states) == 0 && sc.shows == nil {
+	if len(sc.libIDs) == 0 && len(sc.primaryLibIDs) == 0 && len(sc.states) == 0 && sc.shows == nil {
 		return "", nil
 	}
 	// Exact capacity so every caller's append reallocates rather than writing into
 	// a shared backing array.
-	n := len(sc.states) + len(sc.libIDs)
-	if len(sc.shows) > 0 {
-		n++
+	n := len(sc.states)
+	for _, list := range [][]int64{sc.libIDs, sc.primaryLibIDs, sc.shows} {
+		if len(list) > 0 {
+			n++
+		}
 	}
 	args := make([]any, 0, n)
 	frag := ""
@@ -101,11 +107,12 @@ func searchNarrow(sc searchScope) (string, []any) {
 		}
 	}
 	if len(sc.libIDs) > 0 {
-		frag += ` AND pi.id IN (SELECT spf.item_id FROM file sf
-		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN ` + placeholders(len(sc.libIDs)) + `)`
-		for _, id := range sc.libIDs {
-			args = append(args, id)
-		}
+		frag += libraryMembersFrag("")
+		args = append(args, idArray(sc.libIDs))
+	}
+	if len(sc.primaryLibIDs) > 0 {
+		frag += libraryMembersFrag(" AND spf.role = 'primary'")
+		args = append(args, idArray(sc.primaryLibIDs))
 	}
 	switch {
 	case sc.shows == nil:
@@ -117,6 +124,14 @@ func searchNarrow(sc searchScope) (string, []any) {
 		args = append(args, idArray(sc.shows))
 	}
 	return frag, args
+}
+
+// libraryMembersFrag narrows to the items with a file in a bound list of libraries,
+// through every edge or, with edge naming the primary role, the primary alone. The list
+// binds as one JSON array (inArray).
+func libraryMembersFrag(edge string) string {
+	return ` AND pi.id IN (SELECT spf.item_id FROM file sf
+		JOIN item_file spf ON spf.file_id = sf.id` + edge + ` WHERE sf.library_id IN ` + inArray + `)`
 }
 
 // podcastIDsByPIDs resolves a show list to podcast ids in one statement, keeping a nil
@@ -249,9 +264,10 @@ func searchScanCap(limit, maxCandidates int) int {
 // by how each name meets the query (searchTier), first-seen order breaking ties. A
 // query of symbols alone, which has no word to match, is looked up by sort key
 // instead (searchItemsBySortKey); an empty one returns an empty result, not an error.
-// opt.MaxCandidates bounds the match pool, while opt.Libraries, opt.States and
-// opt.Podcasts narrow it and the entity lookups alike (see read.SearchOptions for their
-// contracts), and an unknown library, state or show is refused whatever the query holds.
+// opt.MaxCandidates bounds the match pool, while opt.Libraries, opt.PrimaryLibraries,
+// opt.States and opt.Podcasts narrow it and the entity lookups alike (see
+// read.SearchOptions for their contracts), and an unknown library, state or show is
+// refused whatever the query holds.
 func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOptions) (*read.SearchResult, error) {
 	const op = "store.Search"
 	res := &read.SearchResult{Query: queryStr}
@@ -263,6 +279,10 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	if err != nil {
 		return nil, err
 	}
+	primaryLibIDs, err := s.libraryIDsByPIDs(ctx, opt.PrimaryLibraries, op)
+	if err != nil {
+		return nil, err
+	}
 	if err := checkItemStates(opt.States, op); err != nil {
 		return nil, err
 	}
@@ -270,7 +290,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	if err != nil {
 		return nil, err
 	}
-	sc := searchScope{libIDs: libIDs, states: opt.States, shows: shows}
+	sc := searchScope{libIDs: libIDs, primaryLibIDs: primaryLibIDs, states: opt.States, shows: shows}
 	g := newSearchGroups(res, limit, queryStr)
 	match := ftsMatchQuery(queryStr)
 	if match == "" {

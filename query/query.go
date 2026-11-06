@@ -112,6 +112,31 @@ func (And) isNode()  {}
 func (Or) isNode()   {}
 func (Not) isNode()  {}
 
+// Conds returns every condition in q's filter, in tree order through And, Or and Not,
+// for a caller checking what a rule references before running it.
+func (q Query) Conds() []Cond {
+	var out []Cond
+	collectConds(q.Where, &out)
+	return out
+}
+
+func collectConds(n Node, out *[]Cond) {
+	switch n := n.(type) {
+	case Cond:
+		*out = append(*out, n)
+	case And:
+		for _, c := range n.Nodes {
+			collectConds(c, out)
+		}
+	case Or:
+		for _, c := range n.Nodes {
+			collectConds(c, out)
+		}
+	case Not:
+		collectConds(n.Node, out)
+	}
+}
+
 // Sort is one ordering term. Sorts are applied in slice order.
 type Sort struct {
 	Field string `json:"field"`
