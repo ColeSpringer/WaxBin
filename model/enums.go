@@ -175,6 +175,27 @@ func ItemStateList() string {
 	return strings.Join(names, "|")
 }
 
+// ArchiveReason is what archived an item. An archived item carries exactly one and every
+// other item none, a pairing the schema enforces.
+type ArchiveReason string
+
+const (
+	// ArchiveTrash: a trash delete took its last file, and RestorableTrash lists the
+	// entries that bring it back.
+	ArchiveTrash ArchiveReason = "trash"
+	// ArchivePurge: a trash delete archived it and no entry is left to restore it: the
+	// entries were purged, went with the library whose trash held them, or were restored
+	// without bringing it back. It is read from the trash journal, never stored: the item
+	// keeps ArchiveTrash.
+	ArchivePurge ArchiveReason = "purge"
+	// ArchivePrune and ArchivePermanent: a delete in that mode took its last file.
+	ArchivePrune     ArchiveReason = "prune"
+	ArchivePermanent ArchiveReason = "permanent"
+	// ArchiveRootRemoved: removing its library took its last file. Adding the root back
+	// and scanning relinks the item under the same pid.
+	ArchiveRootRemoved ArchiveReason = "root-removed"
+)
+
 // MarkMissingOutcome is what a mark-missing did, or why it did nothing. A bare
 // bool would collapse four different answers into false, and for a caller repairing
 // the catalog the distinction is the payload: a worker requeuing doomed work needs

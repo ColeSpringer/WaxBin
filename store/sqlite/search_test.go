@@ -697,7 +697,7 @@ func TestSearchStateNarrowing(t *testing.T) {
 	gone := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "e2", content: "c2",
 		title: "Harbor Nights", artist: "B", album: "Bet"})
 	// After the last putTrack for the item: upsertItem rewrites state on every rescan.
-	if _, err := st.DetachFile(ctx, gone.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, gone.FilePID, model.DeletePermanent); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 
@@ -796,7 +796,7 @@ func TestSearchCapAndStatesCombined(t *testing.T) {
 		r := putTrack(t, st, lib.ID, trackSpec{
 			path: "/lib/" + strconv.Itoa(i) + ".flac", essence: "e" + strconv.Itoa(i), content: "c" + strconv.Itoa(i),
 			title: "Meridian " + strconv.Itoa(i), artist: "B", album: "Bet"})
-		if _, err := st.DetachFile(ctx, r.FilePID); err != nil {
+		if _, err := st.DetachFile(ctx, r.FilePID, model.DeletePermanent); err != nil {
 			t.Fatalf("detach %d: %v", i, err)
 		}
 	}

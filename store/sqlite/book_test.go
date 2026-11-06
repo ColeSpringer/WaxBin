@@ -650,7 +650,7 @@ func TestArchivedBookShedsItsDuration(t *testing.T) {
 	})
 
 	// One part gone: the book survives, and its total is the surviving part alone.
-	if _, err := st.DetachFile(ctx, r1.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, r1.FilePID, model.DeletePermanent); err != nil {
 		t.Fatalf("detach p1: %v", err)
 	}
 	d, err := st.BookByPID(ctx, r1.ItemPID)
@@ -662,7 +662,7 @@ func TestArchivedBookShedsItsDuration(t *testing.T) {
 	}
 
 	// Last part gone: the book is archived with no parts, so its total is 0.
-	if _, err := st.DetachFile(ctx, r2.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, r2.FilePID, model.DeletePermanent); err != nil {
 		t.Fatalf("detach p2: %v", err)
 	}
 	if s := itemState(t, st, r1.ItemPID); s != string(model.StateArchived) {
@@ -940,7 +940,7 @@ func TestTrashDetachEmitsItemUpdate(t *testing.T) {
 	seq, _ := st.LatestChangeSeq(ctx)
 
 	// Detaching a part of a surviving book must emit an item update (symmetric with attach).
-	if _, err := st.DetachFile(ctx, p2pid); err != nil {
+	if _, err := st.DetachFile(ctx, p2pid, model.DeletePermanent); err != nil {
 		t.Fatalf("DetachFile: %v", err)
 	}
 	changes, _ := st.ChangesSince(ctx, seq)
@@ -1186,7 +1186,7 @@ func TestBookPartCopyPromotedWhenThePartIsTrashed(t *testing.T) {
 	c1 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part1.mp3"), "mb1", "mc1-copy", 1, 1000))
 	c2 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part2.mp3"), "mb2", "mc2-copy", 2, 2000))
 
-	res, err := st.DetachFile(ctx, r2.FilePID)
+	res, err := st.DetachFile(ctx, r2.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1244,7 +1244,7 @@ func TestBookPartCopyDiagnosticsFollowTheirPart(t *testing.T) {
 	c1 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part1.mp3"), "mb1", "mc1-copy", 1))
 	c2 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part2.mp3"), "mb2", "mc2-copy", 2))
 
-	res, err := st.DetachFile(ctx, r1.FilePID)
+	res, err := st.DetachFile(ctx, r1.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1635,7 +1635,7 @@ func TestBookPartEncodingTakesTheLostPartsPlace(t *testing.T) {
 			t.Fatalf("mp3 = %s before the detach, want part 1's other encoding", r.Role)
 		}
 	}
-	if _, err := st.DetachFile(ctx, flacPID); err != nil {
+	if _, err := st.DetachFile(ctx, flacPID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 	refs, err := st.ItemFiles(ctx, book)
@@ -1883,7 +1883,7 @@ func TestBookPartLossSkipsAnAlternateOfAnotherLength(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.DetachFile(ctx, one.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, one.FilePID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 	refs, err := st.ItemFiles(ctx, one.ItemPID)

@@ -189,7 +189,7 @@ func TestMarkItemMissingRefusesFilelessStates(t *testing.T) {
 	ctx := context.Background()
 
 	gone := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
-	if _, err := st.DetachFile(ctx, gone.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, gone.FilePID, model.DeletePermanent); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{

@@ -218,6 +218,11 @@ func TestPermanentDeleteTakesSidecarsAndCompanions(t *testing.T) {
 	if entries, _ := lib.Trash(ctx, false, 0); len(entries) != 0 {
 		t.Errorf("a permanent delete wrote %d trash entries", len(entries))
 	}
+	for _, title := range []string{"Song", "Other"} {
+		if r := reasonOf(t, ctx, lib, itemPIDByTitle(t, ctx, lib, title)); r != model.ArchivePermanent {
+			t.Errorf("%s reason = %q, want permanent", title, r)
+		}
+	}
 	if fileExists(filepath.Join(managed, model.TrashDirName, "folders")) {
 		t.Error("the companions a permanent delete held were not deleted")
 	}

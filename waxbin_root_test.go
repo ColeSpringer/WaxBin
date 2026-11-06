@@ -518,9 +518,9 @@ func TestRemoveRootArchivesWhatItHeldAndAReaddRelinksIt(t *testing.T) {
 	if err != nil || len(libs) != 1 || libs[0].DisplayRoot != rootA {
 		t.Fatalf("libraries = %+v (err %v), want only %s", libs, err, rootA)
 	}
-	for _, pid := range []model.PID{one, two, trashed} {
-		if st := stateOf(t, ctx, lib, pid); st != model.StateArchived {
-			t.Errorf("item %s state = %q, want archived", pid, st)
+	for pid, want := range map[model.PID]model.ArchiveReason{one: model.ArchiveRootRemoved, two: model.ArchiveRootRemoved, trashed: model.ArchivePurge} {
+		if st, r := stateOf(t, ctx, lib, pid), reasonOf(t, ctx, lib, pid); st != model.StateArchived || r != want {
+			t.Errorf("item %s = %q (%q), want archived as %s", pid, st, r, want)
 		}
 	}
 	if ps, err := lib.Playback().State(ctx, "", one); err != nil || !ps.Starred {
@@ -563,6 +563,10 @@ func TestRemoveRootArchivesWhatItHeldAndAReaddRelinksIt(t *testing.T) {
 		t.Errorf("library deletes = %d, want 1", deletes)
 	}
 
+	readd, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	again, err := lib.AddRoot(ctx, config.Root{Path: rootB, Mode: model.ModeManaged, Profile: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("add the root back: %v", err)
@@ -571,8 +575,26 @@ func TestRemoveRootArchivesWhatItHeldAndAReaddRelinksIt(t *testing.T) {
 		t.Fatalf("scan the root back: %v", err)
 	}
 	for _, pid := range []model.PID{one, two} {
-		if st := stateOf(t, ctx, lib, pid); st != model.StatePresent {
-			t.Errorf("item %s after the re-add = %q, want present under its old pid", pid, st)
+		if st, r := stateOf(t, ctx, lib, pid), reasonOf(t, ctx, lib, pid); st != model.StatePresent || r != "" {
+			t.Errorf("item %s after the re-add = %q (%q), want present under its old pid with no reason", pid, st, r)
+		}
+	}
+	relinked, err := lib.Changes(ctx, readd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range []model.PID{one, two} {
+		rows := 0
+		for _, ch := range relinked {
+			if ch.EntityType == "item" && ch.EntityPID == pid {
+				rows++
+				if ch.LibraryPID != again.PID {
+					t.Errorf("item %s re-add row %+v, want it placed in the library added back %s", pid, ch, again.PID)
+				}
+			}
+		}
+		if rows == 0 {
+			t.Errorf("item %s logged no row on the re-add", pid)
 		}
 	}
 	if ps, err := lib.Playback().State(ctx, "", one); err != nil || !ps.Starred {

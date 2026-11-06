@@ -4,6 +4,7 @@ CREATE TABLE playable_item (
   pid          TEXT    NOT NULL UNIQUE,
   kind         TEXT    NOT NULL,         -- track|book|episode
   state        TEXT    NOT NULL,         -- present|archived|remote|missing (model.ItemStates)
+  archive_reason TEXT  NOT NULL DEFAULT '',  -- what archived it (model.ArchiveReason), '' unless archived; purge is read, not stored
   title        TEXT    NOT NULL,
   title_sort   TEXT    NOT NULL DEFAULT '',  -- the sort spelling the file states (a book's ALBUMSORT), '' when none
   sort_key     TEXT    NOT NULL,
@@ -13,7 +14,8 @@ CREATE TABLE playable_item (
   -- newest list walks an index; upsertTrack and upsertBook write it beside the year.
   release_year INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL
+  updated_at   INTEGER NOT NULL,
+  CONSTRAINT item_archive_reason CHECK ((state = 'archived') = (archive_reason <> ''))
 );
 CREATE INDEX item_sort ON playable_item(sort_key);
 CREATE INDEX item_title_key ON playable_item(title_key);

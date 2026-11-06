@@ -71,7 +71,7 @@ func TestDetachFilePreservesPlayState(t *testing.T) {
 	seedPlayState(t, ctx, st, r.ItemPID)
 
 	seq0, _ := st.LatestChangeSeq(ctx)
-	if _, err := st.DetachFile(ctx, r.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, r.FilePID, model.DeletePermanent); err != nil {
 		t.Fatalf("DetachFile: %v", err)
 	}
 
@@ -80,8 +80,8 @@ func TestDetachFilePreservesPlayState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ItemByPID after detach: %v (item must survive, not cascade-delete)", err)
 	}
-	if it.State != model.StateArchived {
-		t.Fatalf("state = %s, want archived", it.State)
+	if it.State != model.StateArchived || it.ArchiveReason != model.ArchivePermanent {
+		t.Fatalf("state = %s (%q), want archived as permanent", it.State, it.ArchiveReason)
 	}
 	assertPlayStatePreserved(t, ctx, st, r.ItemPID)
 

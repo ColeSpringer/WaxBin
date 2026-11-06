@@ -1038,7 +1038,7 @@ func (s *Store) AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFil
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE playable_item SET state=?, updated_at=? WHERE id=?",
+			"UPDATE playable_item SET state=?, archive_reason='', updated_at=? WHERE id=?",
 			string(model.StatePresent), now, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

@@ -138,10 +138,12 @@ const (
 // fifth probe and another 797 -> 842 us, 5.6% over 8 runs (p=0.01). A rowid seek into a
 // one-row table is not free, so measure before adding a sixth. The file's size and
 // bitrate and the added time cost no probe (606 -> 616 us over 5 interleaved runs, within
-// this machine's noise). The tax also falls on readers that never want the column,
-// since every splicer of this list pays it: the playback queue, share's resolve ladders,
-// portable's identity selects, and port's export, which discards the library pid
-// outright.
+// this machine's noise). The archive reason, last, probes the trash only for an item the
+// trash archived, and a page reads in the same 600 us with it as with the plain column
+// (602 and 615 us medians over 5 interleaved runs). The tax also falls on readers that
+// never want the column, since every splicer of this list pays it: the playback queue,
+// share's resolve ladders, portable's identity selects, and port's export, which
+// discards the library pid outright.
 //
 // Serving the artist pair from two more joins instead cuts it to two probes but costs
 // album_pid its track_album_id seek, which TestLoweredIdentityFieldPlans catches, so a
@@ -172,7 +174,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE((SELECT vapm.mbid FROM artist vapm WHERE vapm.id = ` + itemArtistIDExpr + `),''),
 	COALESCE((SELECT vaapm.mbid FROM artist vaapm WHERE vaapm.id = ` + itemAlbumArtistIDExpr + `),''),
 	t.bpm, bk.track_total, f.size, f.bitrate, pi.created_at, pi.title_sort, COALESCE(t.album_sort,''),
-	COALESCE(t.album_artist_sort,'')`
+	COALESCE(t.album_artist_sort,''), ` + archiveReasonExpr
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -229,7 +231,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.seriesPID, &n.libraryPID,
 		&v.MBID, &v.ISRC, &v.AlbumMBID, &v.ReleaseGroupMBID, &v.ArtistMBID, &v.AlbumArtistMBID,
 		&n.bpm, &n.partTotal, &n.fileSize, &n.bitrate, &v.CreatedAt, &v.TitleSort, &v.AlbumSort,
-		&v.AlbumArtistSort,
+		&v.AlbumArtistSort, &v.ArchiveReason,
 	}
 }
 
@@ -627,7 +629,7 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 		switch {
 		case qerr == nil:
 			if _, uerr := tx.ExecContext(ctx,
-				"UPDATE playable_item SET title=?, title_sort=?, sort_key=?, title_key=?, state=?, release_year=?, updated_at=? WHERE id=?",
+				"UPDATE playable_item SET title=?, title_sort=?, sort_key=?, title_key=?, state=?, archive_reason='', release_year=?, updated_at=? WHERE id=?",
 				item.Title, item.TitleSort, key, model.SortKey(item.Title), string(item.State), releaseYear, now, rid); uerr != nil {
 				return 0, "", false, false, itemTitle{}, uerr
 			}

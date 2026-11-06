@@ -652,7 +652,7 @@ func TestVirtualTrackRipCopyAddsAlternates(t *testing.T) {
 		t.Errorf("copy re-put deltas = %+v, want none", cs)
 	}
 
-	if _, err := st.DetachFile(ctx, rc.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, rc.FilePID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range vtItems(t, st) {
@@ -848,7 +848,7 @@ func TestRipCopyDiagnosticsFollowAPromotion(t *testing.T) {
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	rips, paths := ripCopies(t, st, lib, root, 3)
-	if _, err := st.DetachFile(ctx, rips[0].FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, rips[0].FilePID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range vtItems(t, st) {

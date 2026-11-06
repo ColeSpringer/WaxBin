@@ -107,6 +107,9 @@ func TestPurgeEmitsItemDelta(t *testing.T) {
 		if n := trashRowCount(t, st, entry.PID); n != 0 {
 			t.Errorf("trash rows left = %d, want 0", n)
 		}
+		if r := archiveReason(t, st, entry.ItemPID); r != "purge" {
+			t.Errorf("archive reason = %q, want purge", r)
+		}
 	})
 
 	// The book keeps a present part, so its state does not change; the delta is still
@@ -138,8 +141,8 @@ func TestPurgeEmitsItemDelta(t *testing.T) {
 		if !hasItemUpdate(changes, book.ItemPID) {
 			t.Errorf("no item delta for the purged part: %+v", changes)
 		}
-		if s := itemState(t, st, book.ItemPID); s != string(model.StatePresent) {
-			t.Errorf("book state = %q, want present (the delta carries no state change)", s)
+		if s, r := itemState(t, st, book.ItemPID), archiveReason(t, st, book.ItemPID); s != string(model.StatePresent) || r != "" {
+			t.Errorf("book = %q (%q), want present with no reason (the delta carries no column change)", s, r)
 		}
 	})
 

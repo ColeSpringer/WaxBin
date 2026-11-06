@@ -107,6 +107,9 @@ func (f *plannedTrash) checkFinished(t *testing.T, st *sqlite.Store) {
 	if err != nil || it.State != model.StateArchived {
 		t.Errorf("item = %+v (err %v), want it archived", it, err)
 	}
+	if m, err := st.ActiveTrashForItems(ctx, []model.PID{f.item}); err != nil || len(m[f.item]) != 1 || m[f.item][0].PID != f.pending.PID {
+		t.Errorf("restorable = %+v (err %v), want the entry under the item", m, err)
+	}
 	if n := pendingRows(t, f.db); n != 0 {
 		t.Errorf("%d pending rows left, want none", n)
 	}
@@ -158,6 +161,10 @@ func TestRecoverTrashFinishesAMoveWhoseRowNeverLanded(t *testing.T) {
 	if _, err := st.FileByPath(context.Background(), []byte(f.src)); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("file row: err = %v, want it detached", err)
 	}
+	var reason string
+	if err := roConn(t, f.db).QueryRow("SELECT archive_reason FROM playable_item WHERE pid = ?", string(f.item)).Scan(&reason); err != nil || reason != "trash" {
+		t.Errorf("archive reason = %q (err %v), want trash", reason, err)
+	}
 }
 
 // TestRecoverTrashFinishesWithoutTheFileRow: with the file row gone meanwhile, the journal
@@ -165,12 +172,59 @@ func TestRecoverTrashFinishesAMoveWhoseRowNeverLanded(t *testing.T) {
 func TestRecoverTrashFinishesWithoutTheFileRow(t *testing.T) {
 	t.Parallel()
 	f := planTrashFixture(t)
-	if _, err := f.st.DetachFile(context.Background(), f.file); err != nil {
+	if _, err := f.st.DetachFile(context.Background(), f.file, model.DeletePermanent); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 	f.move(t)
 	st := f.reopen(t)
 	f.checkFinished(t, st)
+}
+
+// TestRecoverTrashOfARipWithoutItsFileRowKeepsEveryTrack: a rip's trash move a crash cut
+// off, finished after its file row went, still lists the entry under each track the file
+// backed when the move was planned.
+func TestRecoverTrashOfARipWithoutItsFileRowKeepsEveryTrack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db"))
+	st, lib := openRootedStore(t, dir, db, "owner-a")
+	rips, paths := ripCopies(t, st, lib, dir, 1)
+	dst := filepath.Join(dir, model.TrashDirName, "01ENTRY", "album.flac")
+	pending := model.TrashPending{PID: model.NewPID(), FilePID: rips[0].FilePID, TrashPath: []byte(dst), TrashDisplay: dst}
+	if err := st.PlanTrash(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(paths[0], dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DetachFile(ctx, rips[0].FilePID, model.DeletePermanent); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = openRootedStore(t, dir, db, "owner-b")
+	tracks := vtItems(t, st)
+	var pids []model.PID
+	for _, tr := range tracks {
+		pids = append(pids, tr.PID)
+	}
+	m, err := st.ActiveTrashForItems(ctx, pids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracks) != 3 {
+		t.Fatalf("tracks = %d, want 3", len(tracks))
+	}
+	for _, tr := range tracks {
+		if len(m[tr.PID]) != 1 || m[tr.PID][0].PID != pending.PID {
+			t.Errorf("%s restorable from %+v, want the recovered entry %s", tr.Title, m[tr.PID], pending.PID)
+		}
+	}
 }
 
 // TestRecoverTrashDropsAPendingRowWhoseMoveNeverHappened: a crash before the move leaves

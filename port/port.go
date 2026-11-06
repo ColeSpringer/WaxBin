@@ -44,7 +44,8 @@ const ExportFormat = "waxbin-export"
 // spellings as stated, additive again.
 // Version 10 adds the title spelling and a track's album and album-artist spellings,
 // additive again.
-const ExportVersion = 10
+// Version 11 adds what archived an archived item, additive again.
+const ExportVersion = 11
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -100,6 +101,8 @@ type ItemExport struct {
 	TrackTotal  int    `json:"trackTotal,omitempty"`
 	DiscNo      int    `json:"discNo,omitempty"`
 	DiscTotal   int    `json:"discTotal,omitempty"`
+	// ArchiveReason is what archived the item (model.ArchiveReason), absent unless it is.
+	ArchiveReason string `json:"archiveReason,omitempty"`
 	// PartTotal is the number of parts a book's primary file says it has.
 	PartTotal int    `json:"partTotal,omitempty"`
 	Year      int    `json:"year,omitempty"`
@@ -198,7 +201,7 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 	for _, it := range items {
 		ie := ItemExport{
 			PID: string(it.PID), Kind: string(it.Kind), State: string(it.State), Title: it.Title,
-			Artist: it.Artist, AlbumArtist: it.AlbumArtist, Album: it.Album,
+			ArchiveReason: string(it.ArchiveReason), Artist: it.Artist, AlbumArtist: it.AlbumArtist, Album: it.Album,
 			TrackNo: it.TrackNo, TrackTotal: it.TrackTotal, DiscNo: it.DiscNo, DiscTotal: it.DiscTotal,
 			PartTotal: it.PartTotal, Year: it.Year, Genre: it.Genre, BPM: it.BPM, MBID: it.MBID, ISRC: it.ISRC,
 			TitleSort: it.TitleSort, ArtistSort: it.ArtistSort, AlbumSort: it.AlbumSort, AlbumArtistSort: it.AlbumArtistSort,

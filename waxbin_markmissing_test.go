@@ -28,6 +28,15 @@ func stateOf(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model.P
 	return got.State
 }
 
+func reasonOf(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model.PID) model.ArchiveReason {
+	t.Helper()
+	got, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", pid, err)
+	}
+	return got.ArchiveReason
+}
+
 // TestMarkMissingVerifiesBeforeWriting walks the verification the facade adds over
 // the store's state rule: a file that is really on disk is reported back instead of
 // recorded, a deleted file marks, and a repeat is idempotent.

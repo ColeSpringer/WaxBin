@@ -66,12 +66,12 @@ func TestRemoveLibraryDetachesInBatches(t *testing.T) {
 		t.Errorf("beats = %v, want one per batch of two", beats)
 	}
 	for _, pid := range []model.PID{one.ItemPID, two.ItemPID, part1.ItemPID} {
-		if s := itemState(t, st, pid); s != string(model.StateArchived) {
-			t.Errorf("item %s = %s, want archived", pid, s)
+		if s, r := itemState(t, st, pid), archiveReason(t, st, pid); s != string(model.StateArchived) || r != string(model.ArchiveRootRemoved) {
+			t.Errorf("item %s = %s (%q), want archived as root-removed", pid, s, r)
 		}
 	}
-	if s := itemState(t, st, moved.ItemPID); s != string(model.StatePresent) {
-		t.Errorf("the item with a copy elsewhere = %s, want present", s)
+	if s, r := itemState(t, st, moved.ItemPID), archiveReason(t, st, moved.ItemPID); s != string(model.StatePresent) || r != "" {
+		t.Errorf("the item with a copy elsewhere = %s (%q), want present with no reason", s, r)
 	}
 	refs, err := st.ItemFiles(ctx, moved.ItemPID)
 	if err != nil || len(refs) != 1 || refs[0].FilePID != copied.FilePID || refs[0].Role != primaryRole {
@@ -225,7 +225,7 @@ func TestRelocateLibraryRootMovesEveryStoredPath(t *testing.T) {
 	if err := st.CommitMove(ctx, gjpid, gmove); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.DetachFile(ctx, gone.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, gone.FilePID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 

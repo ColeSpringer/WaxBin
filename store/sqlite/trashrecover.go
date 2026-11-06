@@ -12,6 +12,7 @@ import (
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -150,11 +151,25 @@ func recoveryGate(log *slog.Logger, what string) *fsx.RootGate {
 }
 
 // finishPendingTrashTx writes the journal row a pending move planned, detaching its file
-// row when it is still there, as TrashFile would have.
+// row when it is still there, as TrashFile would have. With the row gone, the items the
+// plan recorded are the ones its trash_item rows name. A plan no longer there finishes
+// nothing.
 func finishPendingTrashTx(ctx context.Context, tx *sql.Tx, p pendingTrash) error {
+	var trashID int64
+	err := tx.QueryRowContext(ctx, `INSERT INTO trash
+		(pid, library_id, item_pid, item_kind, orig_path, orig_display, trash_path, trash_display, essence_hash, reason, size, trashed_at)
+		SELECT pid, library_id, item_pid, item_kind, orig_path, orig_display, trash_path, trash_display,
+			NULLIF(essence_hash, ''), reason, size, created_at
+		FROM trash_pending WHERE pid = ? RETURNING id`, p.pid).Scan(&trashID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	if p.fileID.Valid {
-		b := newDetachBatch()
-		_, err := b.detachTx(ctx, tx, p.fileID.Int64)
+		b := newDetachBatch(model.ArchiveTrash)
+		d, err := b.detachTx(ctx, tx, p.fileID.Int64)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 		case err != nil:
@@ -163,13 +178,11 @@ func finishPendingTrashTx(ctx context.Context, tx *sql.Tx, p pendingTrash) error
 			if err := b.settleTx(ctx, tx); err != nil {
 				return err
 			}
+			return recordTrashItemsTx(ctx, tx, trashID, d.items)
 		}
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO trash
-		(pid, library_id, item_pid, item_kind, orig_path, orig_display, trash_path, trash_display, essence_hash, reason, size, trashed_at)
-		SELECT pid, library_id, item_pid, item_kind, orig_path, orig_display, trash_path, trash_display,
-			NULLIF(essence_hash, ''), reason, size, created_at
-		FROM trash_pending WHERE pid = ?`, p.pid)
+	_, err = tx.ExecContext(ctx, `INSERT INTO trash_item(trash_id, item_pid)
+		SELECT ?, item_pid FROM trash_pending_item WHERE pending_pid = ?`, trashID, p.pid)
 	return err
 }
 

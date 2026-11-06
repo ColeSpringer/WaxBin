@@ -188,14 +188,13 @@ func (s *Store) setLibraryFlag(ctx context.Context, op string, pid model.PID, co
 	return out, nil
 }
 
-// dropLibraryTx drops a library's active trash entries, giving each one's item an update
-// (it can no longer be restored, which a tailer learns as DeleteTrashRow tells it), then
-// the library row with its delta, and returns how many entries went. Restored entries go
-// with the row.
+// dropLibraryTx drops a library's active trash entries, then the library row with its
+// delta, and returns how many entries went. Each item an entry backed earns an update (it
+// can no longer be restored, which a tailer learns as DeleteTrashRow tells it), and one
+// the trash archived reads purge once no entry is left for it. Restored entries go with
+// the row.
 func dropLibraryTx(ctx context.Context, tx *sql.Tx, libID int64, libPID model.PID) (int, error) {
-	items, err := queryInt64sTx(ctx, tx, `SELECT DISTINCT pi.id FROM trash tr JOIN playable_item pi ON pi.pid = tr.item_pid
-		WHERE tr.library_id = ? AND tr.restored_at IS NULL`, libID)
-	if err != nil {
+	if err := logTrashItemsTx(ctx, tx, "t.library_id = ? AND t.restored_at IS NULL", libID); err != nil {
 		return 0, err
 	}
 	r, err := tx.ExecContext(ctx, "DELETE FROM trash WHERE library_id = ? AND restored_at IS NULL", libID)
@@ -203,11 +202,6 @@ func dropLibraryTx(ctx context.Context, tx *sql.Tx, libID int64, libPID model.PI
 		return 0, err
 	}
 	n, _ := r.RowsAffected()
-	for _, id := range items {
-		if err := appendItemUpdateTx(ctx, tx, id); err != nil {
-			return 0, err
-		}
-	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM library WHERE id = ?", libID); err != nil {
 		return 0, err
 	}
@@ -219,9 +213,10 @@ const removeBatch = 500
 
 // RemoveLibrary takes a library out of the catalog and touches nothing on disk. Each file
 // row under it is detached as a trash detach does it: an alternate in another library
-// takes the place of a primary or part, and an item left with no file is archived, its
-// pid, play state and list entries kept, so adding the root back and scanning re-links
-// it. The library's trash journal goes too, leaving its trashed files where they lie,
+// takes the place of a primary or part, and an item left with no file is archived as
+// root-removed, its pid, play state and list entries kept, so adding the root back and
+// scanning re-links it. The library's trash journal goes too, leaving its trashed files
+// where they lie (an item the trash archived reads purge once no entry is left for it),
 // then the row with one library delta. The files go removeBatch at a time, each batch its
 // own transaction, beat (when set) hearing the files detached so far and the total after
 // each; a cancel stops between batches with the library still registered, and calling
@@ -261,7 +256,7 @@ func (s *Store) removeLibrary(ctx context.Context, libPID model.PID, batch int, 
 		if err := ctx.Err(); err != nil {
 			return rep, settled(), waxerr.FromContext(op, err, waxerr.CodeIO)
 		}
-		b := newDetachBatch()
+		b := newDetachBatch(model.ArchiveRootRemoved)
 		dropped, left := 0, 0
 		err := s.writeTx(ctx, func(tx *sql.Tx) error {
 			ids, err := queryInt64sTx(ctx, tx, "SELECT id FROM file WHERE library_id = ? ORDER BY id LIMIT ?", lib.ID, batch)
@@ -1279,19 +1274,17 @@ func fileIDByPIDRead(ctx context.Context, q queryer, pid model.PID, op string) (
 func (s *Store) ChangesSince(ctx context.Context, seq int64) ([]model.Change, error) {
 	const op = "store.ChangesSince"
 	rows, err := s.rdb().QueryContext(ctx,
-		"SELECT seq, ts, entity_type, entity_pid, op FROM change_log WHERE seq > ? ORDER BY seq LIMIT 1000", seq)
+		"SELECT "+changeCols+" FROM change_log WHERE seq > ? ORDER BY seq LIMIT 1000", seq)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
 	var out []model.Change
 	for rows.Next() {
-		var c model.Change
-		var pid string
-		if err := rows.Scan(&c.Seq, &c.TS, &c.EntityType, &pid, &c.Op); err != nil {
+		c, err := scanChange(rows)
+		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		c.EntityPID = model.PID(pid)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -1350,14 +1343,41 @@ func (s *Store) NoteReopened(ctx context.Context) (int64, error) {
 	return seq, err
 }
 
+// changeCols reads a change_log row in scanChange's order.
+const changeCols = "seq, ts, entity_type, entity_pid, op, library_pid"
+
+func scanChange(sc rowScanner) (model.Change, error) {
+	var c model.Change
+	err := sc.Scan(&c.Seq, &c.TS, &c.EntityType, &c.EntityPID, &c.Op, &c.LibraryPID)
+	return c, err
+}
+
 // appendChangeSQL is the one change_log insert. A bulk writer prepares it once
-// (see sortKeyPatch.flush) rather than re-parsing it per row.
+// (see sortKeyPatch.flush) rather than re-parsing it per row. The row's library is
+// written when its transaction ends (placeChangesSQL).
 const appendChangeSQL = "INSERT INTO change_log(ts, entity_type, entity_pid, op) VALUES (?,?,?,?)"
 
 func appendChange(ctx context.Context, tx *sql.Tx, entityType string, pid model.PID, op model.ChangeOp) error {
 	_, err := tx.ExecContext(ctx, appendChangeSQL, nowNS(), entityType, string(pid), string(op))
 	return err
 }
+
+// changeHeadSQL reads the change_log head a write transaction starts from.
+const changeHeadSQL = "SELECT COALESCE(MAX(seq), 0) FROM change_log"
+
+// placeChangesSQL writes where each item and file logged after the head sits now that the
+// transaction's writes are done (model.Change.LibraryPID): a file's library, and an
+// item's primary file's, the rule ItemView.LibraryPID reads. A delete names none. It runs
+// once at the end because a writer may log an item before its edges settle, as a put's
+// album merge logs every member before the put links its file.
+const placeChangesSQL = `UPDATE change_log SET library_pid = COALESCE(CASE entity_type
+		WHEN 'item' THEN (SELECT l.pid FROM playable_item pi
+			JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+			JOIN file f ON f.id = pf.file_id JOIN library l ON l.id = f.library_id
+			WHERE pi.pid = change_log.entity_pid)
+		ELSE (SELECT l.pid FROM file f JOIN library l ON l.id = f.library_id WHERE f.pid = change_log.entity_pid)
+		END, '')
+		WHERE seq > ? AND op <> 'delete' AND entity_type IN ('item', 'file')`
 
 // carryHandedPID makes a put's new item carry on under took, the pid a rip's opening track
 // handed it (reconcileOrphansTx), so the put reports and logs it as that item changed

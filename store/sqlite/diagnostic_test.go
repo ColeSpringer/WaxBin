@@ -118,7 +118,7 @@ func TestDiagnosticsCascadeOnFileDelete(t *testing.T) {
 	// correct one from a catalog-wide count of zero.
 	kept := diagnosed("/lib/kept.mp3", "ess-k", "c-k")
 
-	if _, err := st.DetachFile(ctx, gone); err != nil {
+	if _, err := st.DetachFile(ctx, gone, model.DeletePermanent); err != nil {
 		t.Fatalf("DetachFile: %v", err)
 	}
 

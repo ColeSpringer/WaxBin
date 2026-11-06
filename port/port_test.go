@@ -51,8 +51,8 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if got.Manifest.Version != port.ExportVersion {
 		t.Errorf("manifest version = %d, want %d", got.Manifest.Version, port.ExportVersion)
 	}
-	if port.ExportVersion != 10 {
-		t.Errorf("ExportVersion = %d, want 10 now that the title and album spellings are carried", port.ExportVersion)
+	if port.ExportVersion != 11 {
+		t.Errorf("ExportVersion = %d, want 11 now that the archive reason is carried", port.ExportVersion)
 	}
 	if got.PlayState[0].Rating == nil || *got.PlayState[0].Rating != 80 {
 		t.Fatalf("rating round-trip wrong: %+v", got.PlayState[0])
@@ -108,6 +108,30 @@ func TestSnapshotCarriesTotalsAndSortSpellings(t *testing.T) {
 		if _, ok := raw.Items[2][k]; ok {
 			t.Errorf("a bare track encoded %s: %v", k, raw.Items[2])
 		}
+	}
+}
+
+// TestSnapshotCarriesTheArchiveReason: version 11 carries what archived an item, and an
+// item that is not archived encodes none.
+func TestSnapshotCarriesTheArchiveReason(t *testing.T) {
+	t.Parallel()
+	items := []*model.ItemView{
+		{PID: "A1", Kind: model.KindTrack, State: model.StateArchived, ArchiveReason: model.ArchiveRootRemoved, Title: "Gone"},
+		{PID: "P1", Kind: model.KindTrack, State: model.StatePresent, Title: "Here"},
+	}
+	var buf bytes.Buffer
+	if err := port.WriteSnapshot(&buf, port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil, nil)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := port.ReadSnapshot(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.Items[0].ArchiveReason != "root-removed" {
+		t.Errorf("archived item = %+v, want its reason", got.Items[0])
+	}
+	if strings.Count(buf.String(), "archiveReason") != 1 {
+		t.Errorf("snapshot = %s, want archiveReason on the archived item alone", buf.String())
 	}
 }
 

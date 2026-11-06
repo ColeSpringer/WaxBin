@@ -129,10 +129,35 @@ type generation struct {
 	write  *sql.DB         // nil when read-only
 	lock   *writeLock      // nil when read-only
 	thumbs thumbsConnector // the write pool's, which reattachThumbs runs again
+	// head and place are writeTx's change_log statements (changeHeadSQL, placeChangesSQL),
+	// prepared on the write pool by the first transaction that runs them, under wmu.
+	// Parsing them for every transaction cost each write about 58 us more; prepared, it is
+	// about 7, and placing a logged item or file row about 2.6 more (BenchmarkWriteTx).
+	head, place *sql.Stmt
+}
+
+// prepareLog prepares writeTx's change_log statements on the write pool.
+func (g *generation) prepareLog(ctx context.Context) error {
+	head, err := g.write.PrepareContext(ctx, changeHeadSQL)
+	if err != nil {
+		return err
+	}
+	place, err := g.write.PrepareContext(ctx, placeChangesSQL)
+	if err != nil {
+		_ = head.Close()
+		return err
+	}
+	g.head, g.place = head, place
+	return nil
 }
 
 func (g *generation) closePools() error {
 	var errs []error
+	for _, st := range []*sql.Stmt{g.head, g.place} {
+		if st != nil {
+			errs = append(errs, st.Close())
+		}
+	}
 	if g.write != nil {
 		errs = append(errs, g.write.Close())
 	}
@@ -613,9 +638,6 @@ func (s *Store) OwnerInfo() (OwnerInfo, error) {
 	return readOwnerInfo(s.path + ".waxlock")
 }
 
-// writeTx runs fn inside a single serialized write transaction. It is the only
-// path that mutates the database (the write-coordinator). fn must not retain the
-// *sql.Tx beyond the call.
 // writable is writeTx's refusal, for the work a method does ahead of its transaction, so
 // a read-only or closed store answers a caller the same way whatever that work was.
 func (s *Store) writable() error {
@@ -628,7 +650,17 @@ func (s *Store) writable() error {
 	return nil
 }
 
+// writeTx runs fn inside a single serialized write transaction, the path every write but
+// a migration's takes (the write-coordinator). fn must not retain the *sql.Tx beyond the
+// call.
 func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return s.serialTx(ctx, true, fn)
+}
+
+// serialTx is writeTx's body. logged places and publishes the change_log rows fn appends;
+// a migration passes false, as it logs nothing (the baseline runs before the change log
+// exists).
+func (s *Store) serialTx(ctx context.Context, logged bool, fn func(*sql.Tx) error) error {
 	if s.readOnly {
 		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "library opened read-only")
 	}
@@ -638,16 +670,14 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "store is closed")
 	}
 
-	// With in-process listeners, snapshot the change_log head so rows appended by
-	// this transaction can be published after commit. The common CLI path has no
-	// subscribers and pays no publish cost.
-	notify := s.hasSubscribers()
-	var preSeq int64
-	if notify {
-		preSeq = s.maxChangeSeq(ctx)
+	notify := logged && s.hasSubscribers()
+	g := s.gen.Load()
+	if logged && g.head == nil {
+		if err := g.prepareLog(ctx); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
+		}
 	}
-
-	tx, err := s.wdb().BeginTx(ctx, nil)
+	tx, err := g.write.BeginTx(ctx, nil)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
 	}
@@ -658,9 +688,25 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 			panic(p)
 		}
 	}()
+	// The change_log head before fn: the rows after it are this transaction's, placed
+	// before commit and, with in-process listeners, published after it. The common CLI
+	// path has no subscribers and pays no publish cost.
+	var preSeq int64
+	if logged {
+		if err := tx.StmtContext(ctx, g.head).QueryRowContext(ctx).Scan(&preSeq); err != nil {
+			_ = tx.Rollback()
+			return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
+		}
+	}
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback()
 		return err
+	}
+	if logged {
+		if _, err := tx.StmtContext(ctx, g.place).ExecContext(ctx, preSeq); err != nil {
+			_ = tx.Rollback()
+			return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)

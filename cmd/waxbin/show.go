@@ -43,7 +43,11 @@ func newShowCmd(g *globals) *cobra.Command {
 			}
 			w := out(cmd)
 			fmt.Fprintf(w, "pid:          %s\n", v.PID)
-			fmt.Fprintf(w, "kind/state:   %s / %s\n", v.Kind, v.State)
+			if v.ArchiveReason != "" {
+				fmt.Fprintf(w, "kind/state:   %s / %s (%s)\n", v.Kind, v.State, v.ArchiveReason)
+			} else {
+				fmt.Fprintf(w, "kind/state:   %s / %s\n", v.Kind, v.State)
+			}
 			fmt.Fprintf(w, "title:        %s\n", v.Title)
 			fmt.Fprintf(w, "artist:       %s\n", v.Artist)
 			fmt.Fprintf(w, "album artist: %s\n", v.AlbumArtist)

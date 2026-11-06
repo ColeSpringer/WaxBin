@@ -227,7 +227,7 @@ func TestScanReadsAPromotedCopyNoOneReRead(t *testing.T) {
 	if err := os.Remove(original); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.DetachFile(ctx, items[0].FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, items[0].FilePID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 	r := scanAll(t, sc, lib, false)

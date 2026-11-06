@@ -94,7 +94,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	for _, m := range pending {
-		err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		err := s.serialTx(ctx, false, func(tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 				return waxerr.Wrapf(waxerr.CodeIO, op, err, "applying migration %04d_%s", m.version, m.name)
 			}

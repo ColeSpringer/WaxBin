@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -82,6 +83,34 @@ func BenchmarkPutScannedTrack(b *testing.B) {
 	for b.Loop() {
 		benchInsert(b, st, lib.ID, i)
 		i++
+	}
+}
+
+// BenchmarkWriteTx measures what every write transaction pays around its own work: the
+// change_log head read and the placement of the rows it logged (placeChangesSQL), with
+// nothing logged and with one item row.
+func BenchmarkWriteTx(b *testing.B) {
+	st, lib := benchStore(b)
+	ctx := context.Background()
+	put, err := st.PutScannedTrack(ctx, benchTrack(lib.ID, 0))
+	if err != nil {
+		b.Fatal(err)
+	}
+	item := put.ItemPID
+	for _, c := range []struct {
+		name string
+		fn   func(*sql.Tx) error
+	}{
+		{"empty", func(*sql.Tx) error { return nil }},
+		{"one item row", func(tx *sql.Tx) error { return appendChange(ctx, tx, "item", item, model.OpUpdate) }},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			for b.Loop() {
+				if err := st.writeTx(ctx, c.fn); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

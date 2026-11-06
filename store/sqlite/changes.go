@@ -67,21 +67,19 @@ func (s *Store) hasSubscribers() bool {
 // behind and must full-resync, so dropping is correct.
 func (s *Store) publishSince(ctx context.Context, preSeq int64) {
 	rows, err := s.wdb().QueryContext(ctx,
-		"SELECT seq, ts, entity_type, entity_pid, op FROM change_log WHERE seq > ? ORDER BY seq", preSeq)
+		"SELECT "+changeCols+" FROM change_log WHERE seq > ? ORDER BY seq", preSeq)
 	if err != nil {
 		s.log.Warn("change publish read", "err", err)
 		return
 	}
 	var changes []model.Change
 	for rows.Next() {
-		var c model.Change
-		var pid string
-		if err := rows.Scan(&c.Seq, &c.TS, &c.EntityType, &pid, &c.Op); err != nil {
+		c, err := scanChange(rows)
+		if err != nil {
 			s.log.Warn("change publish scan", "err", err)
 			rows.Close()
 			return
 		}
-		c.EntityPID = model.PID(pid)
 		changes = append(changes, c)
 	}
 	// A row-iteration error means the delta set is incomplete; don't publish a
@@ -107,14 +105,6 @@ func (s *Store) publishSince(ctx context.Context, preSeq int64) {
 			}
 		}
 	}
-}
-
-// maxChangeSeq returns the current highest change_log seq on the write
-// connection, captured before a transaction so publishSince can find its rows.
-func (s *Store) maxChangeSeq(ctx context.Context) int64 {
-	var seq int64
-	_ = s.wdb().QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM change_log").Scan(&seq)
-	return seq
 }
 
 // DataVersion returns a counter that moves when another connection commits, letting a

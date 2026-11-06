@@ -413,6 +413,16 @@ type ItemView struct {
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)
 
+	// ArchiveReason is what took the item's last file, empty unless State is archived:
+	// a trash delete (trash, or purge once no trash entry is left to restore it), a prune
+	// or permanent delete, or a root removal (root-removed, which adding the root back and
+	// scanning undoes under this pid). It does not decide restorability, which
+	// Library.RestorableTrash answers on its own: a book a prune archived can still hold a
+	// part trashed before, whose entry brings the book back. An item reading prune,
+	// permanent or purge with nothing restorable is gone as far as the catalog knows,
+	// though a scan meeting its audio again revives it.
+	ArchiveReason ArchiveReason
+
 	// Entity handles: the effective artist, album-artist, album, release-group, podcast
 	// and series entity pids, projected so a consumer can group an item view by real
 	// identity instead of display text. ArtistPID and AlbumArtistPID resolve a track's
@@ -607,6 +617,12 @@ type Change struct {
 	EntityType string
 	EntityPID  PID
 	Op         ChangeOp
+	// LibraryPID is where an item or file sits once the change is applied, as the
+	// transaction that wrote the row left it: a file's library, and for an item the value
+	// ItemView.LibraryPID reads (its primary file's library, empty for a fileless item).
+	// It is empty for a delete and for every other entity. A consumer placing items per
+	// library reads it here rather than off the item, which may have moved again since.
+	LibraryPID PID
 }
 
 // ChangeCatalog is the EntityType of the row a maintenance hand-off appends, with no

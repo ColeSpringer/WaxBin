@@ -117,6 +117,8 @@ type itemView struct {
 	DiscTotal   int    `json:"discTotal,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
+	// What archived the item (see model.ItemView), absent unless it is archived.
+	ArchiveReason string `json:"archiveReason,omitempty"`
 	// Entity handles: the effective artist/album-artist/album/release-group/podcast/
 	// series entity pids, so a consumer can group by real identity. albumPid and
 	// releaseGroupPid are absent for a book or episode, releaseGroupPid is also absent
@@ -196,8 +198,8 @@ type itemView struct {
 
 func toItemView(v *model.ItemView) itemView {
 	return itemView{
-		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), Title: v.Title,
-		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
+		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), ArchiveReason: string(v.ArchiveReason),
+		Title: v.Title, Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
 		TrackTotal: v.TrackTotal, Disc: v.DiscNo, DiscTotal: v.DiscTotal, Year: v.Year, Genre: v.Genre,
 		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
 		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),

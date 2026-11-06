@@ -33,7 +33,7 @@ type Store interface {
 	PlanTrash(ctx context.Context, in model.TrashPending) error
 	AbortTrash(ctx context.Context, pid model.PID) error
 	TrashFile(ctx context.Context, in model.TrashFileInput) (*model.DetachResult, error)
-	DetachFile(ctx context.Context, filePID model.PID) (*model.DetachResult, error)
+	DetachFile(ctx context.Context, filePID model.PID, mode model.DeleteMode) (*model.DetachResult, error)
 	// ItemFiles returns every file backing an item, so a multi-file book's parts are
 	// all planned for deletion, not just the representative primary.
 	ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error)
@@ -664,7 +664,7 @@ func (s *Service) apply(ctx context.Context, a *Action, plan *Plan) (int64, []mo
 		if err := os.Remove(pathx.Long(a.Src)); err != nil && !os.IsNotExist(err) {
 			return 0, nil, &applyError{disk: DiskInPlace, err: waxerr.Wrap(waxerr.CodeIO, "trash.delete", err)}
 		}
-		res, err := s.store.DetachFile(settle, a.FilePID)
+		res, err := s.store.DetachFile(settle, a.FilePID, plan.Mode)
 		if err != nil {
 			return size, nil, &applyError{disk: DiskRemoved, err: err}
 		}

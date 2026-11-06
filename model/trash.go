@@ -51,7 +51,9 @@ func (m DeleteMode) BypassesTrash() bool {
 	return m == DeletePrune || m == DeletePermanent
 }
 
-// Reason is the recorded provenance of a deletion.
+// Reason is the trash journal's default text for a deletion, what `trash list` shows
+// when the caller gave none ("user" for a trash delete). ArchiveReason is what the
+// delete archives an item as.
 func (m DeleteMode) Reason() string {
 	switch m {
 	case DeletePrune:
@@ -63,9 +65,25 @@ func (m DeleteMode) Reason() string {
 	}
 }
 
+// ArchiveReason is what a delete in this mode archives an item as when it takes the
+// item's last file (ArchiveTrash for a trash delete). Reason is the journal's text.
+func (m DeleteMode) ArchiveReason() ArchiveReason {
+	switch m {
+	case DeletePrune:
+		return ArchivePrune
+	case DeletePermanent:
+		return ArchivePermanent
+	default:
+		return ArchiveTrash
+	}
+}
+
 // TrashEntry is one record in the trash undo journal.
 type TrashEntry struct {
-	PID          PID
+	PID PID
+	// ItemPID is the item the journal reports for the file, the first track of a rip. A
+	// file backing several items restores all of them, and RestorableTrash lists the entry
+	// under each, so match an entry to an item by that key, never by this field.
 	ItemPID      PID
 	OrigPath     []byte
 	OrigDisplay  string

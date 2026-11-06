@@ -668,7 +668,7 @@ func TestCopyPromotionPrefersAWritableLibrary(t *testing.T) {
 	r1 := mustPut(t, st, input(lib.ID, p1, "sha256:SAME", "sha256:C1", "Original"))
 	rr := mustPut(t, st, input(ro.ID, pr, "sha256:SAME", "sha256:CR", "Archive"))
 	rw := mustPut(t, st, input(other.ID, pw, "sha256:SAME", "sha256:CW", "Working"))
-	res, err := st.DetachFile(ctx, r1.FilePID)
+	res, err := st.DetachFile(ctx, r1.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +692,7 @@ func TestCopyPromotionPrefersAWritableLibrary(t *testing.T) {
 	ra := mustPut(t, st, encoding(pa, "EA", "flac", 900000, 24))
 	mustPut(t, st, encoding(pb, "EB", "mp3", 320000, 0))
 	rc := mustPut(t, st, encoding(pc, "EC", "flac", 900000, 16))
-	res, err = st.DetachFile(ctx, ra.FilePID)
+	res, err = st.DetachFile(ctx, ra.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +842,7 @@ func TestCopyPromotionPrefersACopyOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := st.DetachFile(ctx, r1.FilePID)
+	res, err := st.DetachFile(ctx, r1.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,7 +874,7 @@ func TestCopyGoneStillGivesTheItemAPrimary(t *testing.T) {
 	if err := os.Remove(p2); err != nil {
 		t.Fatal(err)
 	}
-	res, err := st.DetachFile(ctx, r1.FilePID)
+	res, err := st.DetachFile(ctx, r1.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1083,7 +1083,7 @@ func TestUnreachableCopyLeavesTheItemMissing(t *testing.T) {
 	if len(mr.Promoted) != 0 || mr.Marked != 1 || stateOf(t, st, r1.ItemPID) != model.StateMissing {
 		t.Errorf("reconcile = %+v, state %s, want nothing promoted and the item missing", mr, stateOf(t, st, r1.ItemPID))
 	}
-	res, err := st.DetachFile(ctx, s1.FilePID)
+	res, err := st.DetachFile(ctx, s1.FilePID, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1416,7 +1416,7 @@ func TestLibraryFieldOperators(t *testing.T) {
 	ra := mustPut(t, st, input(libA.ID, pa, "sha256:SAME", "sha256:CA", "Both"))
 	mustPut(t, st, input(libB.ID, pb, "sha256:SAME", "sha256:CB", "Both"))
 	rg := mustPut(t, st, input(libA.ID, pg, "sha256:GONE", "sha256:CG", "Fileless"))
-	if _, err := st.DetachFile(ctx, rg.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, rg.FilePID, model.DeletePermanent); err != nil {
 		t.Fatal(err)
 	}
 	match := func(q query.Query) []model.PID {

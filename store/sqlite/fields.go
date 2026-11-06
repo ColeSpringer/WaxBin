@@ -27,6 +27,14 @@ const (
 // deliberately does not use it; see GroupYear.
 const itemYearExpr = "COALESCE(t.year, bk.year, ep.year)"
 
+// archiveReasonExpr is an item's archive reason, shared by the field and itemViewCols:
+// the stored one, except that an item the trash archived reads purge once no active trash
+// entry restores it. That half is read rather than stored, so a path that drops or
+// restores journal rows has nothing of its own to keep true.
+const archiveReasonExpr = `CASE WHEN pi.archive_reason = 'trash' AND NOT EXISTS (SELECT 1 FROM trash_item tiq
+	JOIN trash tq ON tq.id = tiq.trash_id WHERE tiq.item_pid = pi.pid AND tq.restored_at IS NULL)
+	THEN 'purge' ELSE pi.archive_reason END`
+
 // itemArtSlotExpr selects the art_map entity_type slot an item's own art lives
 // under. Tracks and books both store item art under the 'track' slot (the shared
 // attachArtTx path treats the entity id as the playable_item id), but an
@@ -232,6 +240,8 @@ var itemFields = query.FieldMap{
 	"album":        {Expr: "COALESCE(NULLIF(t.album,''), srs.name, pod.title, '')", Kind: query.KindText},
 	"podcast":      {Expr: "COALESCE(pod.title, '')", Kind: query.KindText},
 	"genre":        {Expr: "COALESCE(NULLIF(t.genre,''), bk.genre, '')", Kind: query.KindText},
+	// What archived an item (model.ArchiveReason), '' unless it is archived.
+	"archive_reason": {Expr: archiveReasonExpr, Kind: query.KindText},
 	// composer_sort and author_sort read the keys beside the spellings the item view
 	// shows, so a sorted list collates (and an item with no spelling sorts by its name);
 	// never NULL, '' for the kinds that lack them. album_sort reads the key of the album

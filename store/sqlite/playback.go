@@ -352,9 +352,9 @@ func nullableInt64(v sql.NullInt64) any {
 //
 // The delta itself is not that answer, which is the obvious objection and why it is
 // worth stating. A consumer already tailing ChangesSince for catalog sync cannot
-// reuse it for play state: model.Change carries {Seq, TS, EntityType, EntityPID, Op}
-// with no user dimension, and for a play_state row EntityPID is the item pid. So a
-// per-user consumer sees "item X's play state changed" and cannot tell whose.
+// reuse it for play state: model.Change carries {Seq, TS, EntityType, EntityPID, Op,
+// LibraryPID} with no user dimension, and for a play_state row EntityPID is the item
+// pid. So a per-user consumer sees "item X's play state changed" and cannot tell whose.
 // Routing it would mean reading every user's state for that item on every row and
 // diffing, which costs more than the redundant event, and it would wake user B
 // because user A starred a shared track. The bool answers per call, for the caller

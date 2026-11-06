@@ -1257,8 +1257,8 @@ func TestPruneBypassesTrash(t *testing.T) {
 	if entries, _ := lib.Trash(ctx, false, 0); len(entries) != 0 {
 		t.Fatalf("prune must not write a trash entry, got %d", len(entries))
 	}
-	if got, _ := lib.Get(ctx, itemPID); got.State != model.StateArchived {
-		t.Fatal("pruned item should be preserved as archived")
+	if got, _ := lib.Get(ctx, itemPID); got.State != model.StateArchived || got.ArchiveReason != model.ArchivePrune {
+		t.Fatalf("pruned item = %s (%q), want it preserved as archived by the prune", got.State, got.ArchiveReason)
 	}
 }
 
@@ -1328,9 +1328,8 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	if j := latestJob(t, ctx, lib); j.Kind != "purge-trash" || j.TargetType != "trash" || j.TargetPID != entries[0].PID {
 		t.Fatalf("purge job = %+v, want it to name trash:%s", j, entries[0].PID)
 	}
-	// The purge announces itself on the feed a consumer actually tails. The item is
-	// already archived and its columns do not move, so this delta is the only signal
-	// that a client's copy of it became unrecoverable.
+	// The purge announces itself on the feed a consumer actually tails: the archived item
+	// now reads purge, and a client's copy of it is unrecoverable.
 	purgeChanges, err := lib.Changes(ctx, seqBeforePurge)
 	if err != nil {
 		t.Fatalf("changes after purge: %v", err)
@@ -1343,6 +1342,12 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	}
 	if !purgeDelta {
 		t.Fatalf("no item delta for the purge of %s: %+v", entries[0].ItemPID, purgeChanges)
+	}
+	if r := reasonOf(t, ctx, lib, entries[0].ItemPID); r != model.ArchivePurge {
+		t.Fatalf("purged item reason = %q, want purge", r)
+	}
+	if r := reasonOf(t, ctx, lib, entries[1].ItemPID); r != model.ArchiveTrash {
+		t.Fatalf("the other trashed item's reason = %q, want trash", r)
 	}
 	if size <= 0 {
 		t.Fatalf("purge reclaimed %d bytes, want > 0", size)
@@ -1371,6 +1376,9 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	if _, err := lib.PurgeTrash(ctx, entries[1].PID); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("purge of a restored entry = %v, want CodeNotFound", err)
 	}
+	if st, r := stateOf(t, ctx, lib, entries[1].ItemPID), reasonOf(t, ctx, lib, entries[1].ItemPID); st != model.StatePresent || r != "" {
+		t.Fatalf("restored item = %s (%q), want present with no reason", st, r)
+	}
 
 	// Re-trash the restored file and drain everything with an unscoped empty.
 	items, _ = lib.Query(ctx, query.New(query.EntityItems).
@@ -1394,6 +1402,9 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	}
 	if remaining, _ := lib.Trash(ctx, false, 0); len(remaining) != 0 {
 		t.Fatalf("trash not drained: %+v", remaining)
+	}
+	if r := reasonOf(t, ctx, lib, entries[1].ItemPID); r != model.ArchivePurge {
+		t.Fatalf("emptied item reason = %q, want purge", r)
 	}
 }
 

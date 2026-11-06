@@ -87,7 +87,7 @@ func (fakeStore) TrashFile(context.Context, model.TrashFileInput) (*model.Detach
 	return &model.DetachResult{}, nil
 }
 
-func (fakeStore) DetachFile(context.Context, model.PID) (*model.DetachResult, error) {
+func (fakeStore) DetachFile(context.Context, model.PID, model.DeleteMode) (*model.DetachResult, error) {
 	return &model.DetachResult{}, nil
 }
 
@@ -483,7 +483,7 @@ type stubStore struct {
 	planned                      []model.TrashPending
 	aborted                      []model.PID
 	committed                    []model.TrashFileInput
-	detached                     int
+	detached                     []model.DeleteMode
 }
 
 func (s *stubStore) PlanTrash(ctx context.Context, in model.TrashPending) error {
@@ -522,11 +522,11 @@ func (s *stubStore) TrashFile(ctx context.Context, in model.TrashFileInput) (*mo
 	return &model.DetachResult{TrashPID: in.PID}, nil
 }
 
-func (s *stubStore) DetachFile(ctx context.Context, _ model.PID) (*model.DetachResult, error) {
+func (s *stubStore) DetachFile(ctx context.Context, _ model.PID, mode model.DeleteMode) (*model.DetachResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.detached++
+	s.detached = append(s.detached, mode)
 	if s.detachErr != nil {
 		return nil, s.detachErr
 	}
@@ -577,8 +577,24 @@ func TestAFailedRemoveSaysTheFileStayed(t *testing.T) {
 	writeAt(t, filepath.Join(src, "inside"), "x")
 	st := &stubStore{}
 	_, rep := runOne(t, context.Background(), st, root, src, model.DeletePermanent)
-	if rep.Errored != 1 || len(rep.Failures) != 1 || rep.Failures[0].Disk != DiskInPlace || rep.ReclaimedBytes != 0 || st.detached != 0 {
-		t.Fatalf("report = %+v (detached %d), want one failure leaving the file in place and no catalog write", rep, st.detached)
+	if rep.Errored != 1 || len(rep.Failures) != 1 || rep.Failures[0].Disk != DiskInPlace || rep.ReclaimedBytes != 0 || len(st.detached) != 0 {
+		t.Fatalf("report = %+v (detached %d), want one failure leaving the file in place and no catalog write", rep, len(st.detached))
+	}
+}
+
+// TestABypassDeleteArchivesAsItsMode: a delete that bypasses the trash hands the catalog
+// its mode, which is what the item is archived as.
+func TestABypassDeleteArchivesAsItsMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []model.DeleteMode{model.DeletePrune, model.DeletePermanent} {
+		root := t.TempDir()
+		src := filepath.Join(root, "Album", "song.mp3")
+		writeAt(t, src, "audio")
+		st := &stubStore{}
+		runOne(t, context.Background(), st, root, src, mode)
+		if !reflect.DeepEqual(st.detached, []model.DeleteMode{mode}) {
+			t.Errorf("%s delete detached as %v, want [%s]", mode, st.detached, mode)
+		}
 	}
 }
 

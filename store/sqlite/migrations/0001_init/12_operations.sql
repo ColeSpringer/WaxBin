@@ -4,7 +4,11 @@ CREATE TABLE change_log (
   ts          INTEGER NOT NULL,         -- unix nanoseconds
   entity_type TEXT    NOT NULL,
   entity_pid  TEXT    NOT NULL,
-  op          TEXT    NOT NULL          -- create|update|delete
+  op          TEXT    NOT NULL,         -- create|update|delete
+  -- The library an item or file sits in as the row's transaction leaves it (an item's
+  -- primary file's), '' for a fileless item, a delete and every other entity. A pid rather
+  -- than a reference, so a library removed later leaves the history as it was.
+  library_pid TEXT    NOT NULL DEFAULT ''
 );
 
 -- Mutating background work.
@@ -83,12 +87,21 @@ CREATE TABLE trash (
   restored_at   INTEGER                       -- NULL = still in trash
 );
 CREATE INDEX trash_active ON trash(restored_at);
-CREATE INDEX trash_item   ON trash(item_pid);
 -- A scan reading a file no row holds looks here for the item it backed before the trash
 -- took it (FileStanding), by the path it left or its audio, so a file put back by hand
 -- keeps its item's kind lock.
 CREATE INDEX trash_orig    ON trash(orig_path) WHERE restored_at IS NULL;
 CREATE INDEX trash_essence ON trash(essence_hash) WHERE restored_at IS NULL;
+
+-- Every item a trashed file backed: one for a track or a book part, each track of a rip
+-- carved into virtual tracks. trash.item_pid is the one the journal reports; whether an
+-- item is restorable, and which items a purge announces, read these.
+CREATE TABLE trash_item (
+  trash_id INTEGER NOT NULL REFERENCES trash(id) ON DELETE CASCADE,
+  item_pid TEXT    NOT NULL,
+  PRIMARY KEY (trash_id, item_pid)
+) WITHOUT ROWID;
+CREATE INDEX trash_item_pid ON trash_item(item_pid);
 
 -- A trash move written before the file is moved, holding everything its trash row needs,
 -- so an open after a crash between the move and the catalog write can finish or drop it.
@@ -108,6 +121,13 @@ CREATE TABLE trash_pending (
   job_pid       TEXT,
   created_at    INTEGER NOT NULL
 );
+-- The items a pending move's file backed when it was planned, which the trash_item rows
+-- take from a recovery that finds the file row gone.
+CREATE TABLE trash_pending_item (
+  pending_pid TEXT NOT NULL REFERENCES trash_pending(pid) ON DELETE CASCADE,
+  item_pid    TEXT NOT NULL,
+  PRIMARY KEY (pending_pid, item_pid)
+) WITHOUT ROWID;
 
 -- Staging/inbox import batches. Each import of a staging folder into a managed
 -- library is recorded with its source attribution and a tally of imported/

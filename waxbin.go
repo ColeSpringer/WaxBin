@@ -641,11 +641,12 @@ type RemoveRootOptions struct {
 
 // RemoveRoot takes a library out of the catalog without touching its files. Each file row
 // under it is detached: an item with a copy in another library carries on from that copy,
-// and an item left with no file is archived with its pid, play state and playlist
-// entries, so AddRoot of the same path and a scan re-link it. The library's trash journal
-// goes too, its trashed files staying in the library's trash folder, and the row is
-// deleted with one library delta. A running Watch drops the root on its next tick, and a
-// Watch of this library alone stops.
+// and an item left with no file is archived as root-removed with its pid, play state and
+// playlist entries, so AddRoot of the same path and a scan re-link it. The library's trash
+// journal goes too, its trashed files staying in the library's trash folder, which a scan
+// never reads, so an item the trash had archived reads purge once none of its entries is
+// left. The row is deleted with one library delta. A running Watch drops the root on its
+// next tick, and a Watch of this library alone stops.
 //
 // It runs as a "remove-root" job under the filesystem lease, so it is CodeConflict while a
 // scan, organize, import or delete runs, and while it runs AddRoot of the same path is a
@@ -1070,7 +1071,9 @@ func (l *Library) File(ctx context.Context, filePID model.PID) (*model.File, err
 }
 
 // GetMany returns item views for the given pids in input order, skipping any pid
-// with no matching item and collapsing a duplicate pid to its first position.
+// with no matching item and collapsing a duplicate pid to its first position. An
+// archived item's view says what archived it (ArchiveReason), which with
+// RestorableTrash tells a delta consumer a deleted item from one a root removal took.
 //
 // It is not an atomic snapshot: a pid array longer than the internal batch size is
 // read across several SELECTs, so a concurrent write between batches yields a mixed
@@ -1176,7 +1179,8 @@ func (l *Library) Stats(ctx context.Context, userPID model.PID, topN int) (*read
 // past the head (the catalog was replaced under it by a restore or a rebuild through
 // the maintenance hand-off) or behind the oldest row a prune left. A
 // model.ChangeCatalog row signals a replaced catalog while the new log is at least as
-// long as the cursor.
+// long as the cursor. A consumer placing items per library reads each row's LibraryPID
+// rather than the item's, which may have moved again since the row was written.
 func (l *Library) Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error) {
 	return l.store.ChangesSince(ctx, sinceSeq)
 }
@@ -3255,7 +3259,7 @@ func deleteReason(mode model.DeleteMode, opts []DeleteOption) (string, error) {
 // PlanDelete computes a dry-run deletion plan for the items matching q under a mode
 // (trash|prune|permanent). DeleteTrash moves files to the reversible per-library trash;
 // the other modes bypass it to reclaim space. Every mode keeps the logical item,
-// archived when it loses its last file.
+// archived when it loses its last file, as the mode's DeleteMode.ArchiveReason.
 //
 // Items in the internal podcast library are dropped before planning and counted as
 // SkippedPodcast, so a sweep over a mixed query does not fail because it matched an
@@ -3675,17 +3679,21 @@ func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([
 }
 
 // RestorableTrash returns the restorable trash entries for each of the given items,
-// keyed by item pid, newest first. An item with nothing restorable is absent, and so is
+// keyed by item pid, newest first, an entry listed under every item its file backed
+// (each track of a trashed rip). An item with nothing restorable is absent, and so is
 // an unknown pid, which is what makes it safe against an item purged between a delta
 // page and this lookup. It takes no limit deliberately: a bounded listing that missed
-// an item would read as permanently removed.
+// an item would read as permanently removed. The entries do not follow from the item's
+// ArchiveReason: one archived by a prune or a root removal can still hold a part
+// trashed before.
 func (l *Library) RestorableTrash(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.TrashEntry, error) {
 	return l.store.ActiveTrashForItems(ctx, itemPIDs)
 }
 
 // RestoreTrash undoes a delete: it moves the trashed file back to its original path and
-// re-scans it so the catalog re-links it, un-archiving its item. It refuses if the
-// original path is occupied.
+// re-scans it so the catalog re-links it, un-archiving its item. An item the rescan does
+// not bring back (a file changed in the trash reads as another item) stays archived, as
+// purge once no entry is left to restore it. It refuses if the original path is occupied.
 //
 // A file whose original path is in the internal podcast library is also refused. The
 // re-scan goes straight to the scanner and would generic-scan a library
@@ -3769,7 +3777,8 @@ type EmptyTrashOptions struct {
 // journal rows, reclaiming space. Options.OlderThan narrows the pass to entries
 // older than that window. It runs under a "delete"-scoped job. Each purged entry
 // announces itself on the change feed as an item update, so a client holding a copy
-// of an already-archived item learns those bytes are now unrecoverable.
+// of an already-archived item learns those bytes are now unrecoverable, and an item
+// left with nothing restorable reads purge (see PurgeTrash).
 func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*EmptyReport, error) {
 	if opts.OlderThan < 0 {
 		return nil, waxerr.New(waxerr.CodeInvalid, "Library.EmptyTrash", "older-than window cannot be negative")
@@ -3820,8 +3829,9 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 }
 
 // PurgeTrash permanently removes a single active trash entry (file and journal row),
-// returning the bytes reclaimed, and announces it on the change feed as an item update
-// (see DeleteTrashRow for why the item's own columns do not move). A pid that is
+// returning the bytes reclaimed, and announces it on the change feed as an item update.
+// An item the trash archived reads purge once its last restorable entry goes; for any
+// other item the update is the only sign that the entry's bytes are gone. A pid that is
 // unknown, already purged, or already restored is CodeNotFound. It runs under an
 // fs-mutate job and resolves the entry inside the lease, so a restore racing in cannot
 // slip between the check and the purge.
