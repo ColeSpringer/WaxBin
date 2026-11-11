@@ -20,10 +20,11 @@ type lyricLineJSON struct {
 // compares the desired lyrics against the stored row (source and provider included,
 // so a re-attribution is a real change) and writes only on a difference, so it can
 // run on every scan (catching an added/edited .lrc sidecar) without churning a no-op
-// rescan. Empty/nil lyrics delete any existing row so the
-// table stays sparse; synced lines are stored as a JSON array in time order. It
-// reports whether it changed the stored row, so the sidecar-update seam can emit a
-// delta only on a real change.
+// rescan. Empty/nil lyrics delete any existing row so the table stays sparse; synced
+// lines are stored as a JSON array in the order model.NormalizeSyncedLines gives them,
+// whatever order the writer sent, so every read is in time order and lines sent again
+// with their times in another order are no change. It reports whether it changed the
+// stored row, so the sidecar-update seam can emit a delta only on a real change.
 // preserveLock, when true, makes a would-be change to a user-locked lyrics row a
 // no-op, so a scan/enrich pass never overwrites a curated edit. SetItemLyrics passes
 // false (it is the authoritative user write). keepFill is a scan's: lyrics enrichment
@@ -46,7 +47,7 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 		if len(ly.Synced) > 0 {
 			wantSynced = 1
 			arr := make([]lyricLineJSON, len(ly.Synced))
-			for i, l := range ly.Synced {
+			for i, l := range model.NormalizeSyncedLines(ly.Synced) {
 				arr[i] = lyricLineJSON{MS: l.TimeMS, Text: l.Text}
 			}
 			b, err := json.Marshal(arr)

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -176,5 +177,82 @@ func TestCoverageCountsHeldLyrics(t *testing.T) {
 	}
 	if cov.Matched != 0 {
 		t.Errorf("Matched = %d, want 0 (the lyrics markers are not identity matches)", cov.Matched)
+	}
+}
+
+// TestEveryLyricsWriterStoresLinesInTimeOrder: whatever order a writer sends synced lines
+// in, they are stored in time order, lines at one time as sent, a time before the start
+// at 0 and one past the last an .lrc can name at that one, and the writer's slice is left
+// as it was.
+func TestEveryLyricsWriterStoresLinesInTimeOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	shuffled := func() []model.SyncedLine {
+		return []model.SyncedLine{{TimeMS: 1 << 50, Text: "far"}, {TimeMS: 3000, Text: "d"}, {TimeMS: 1000, Text: "b"},
+			{TimeMS: -200, Text: "late"}, {TimeMS: 1000, Text: "c"}, {TimeMS: -1500, Text: "early"}, {TimeMS: 0, Text: "a"}}
+	}
+	want := []model.SyncedLine{{TimeMS: 0, Text: "early"}, {TimeMS: 0, Text: "late"}, {TimeMS: 0, Text: "a"},
+		{TimeMS: 1000, Text: "b"}, {TimeMS: 1000, Text: "c"}, {TimeMS: 3000, Text: "d"}, {TimeMS: model.MaxSyncedLineMS, Text: "far"}}
+	for name, write := range map[string]func(t *testing.T, st *Store, libID int64, lines []model.SyncedLine) model.PID{
+		"scan": func(t *testing.T, st *Store, libID int64, lines []model.SyncedLine) model.PID {
+			return putWithLyrics(t, st, libID, "c1", &model.Lyrics{Source: model.SourceSidecar, Synced: lines})
+		},
+		"edit": func(t *testing.T, st *Store, libID int64, lines []model.SyncedLine) model.PID {
+			pid := putWithLyrics(t, st, libID, "c1", nil)
+			if err := st.SetItemLyrics(ctx, pid, &model.Lyrics{Synced: lines}, model.LockUnchanged, false); err != nil {
+				t.Fatal(err)
+			}
+			return pid
+		},
+		"enrichment": func(t *testing.T, st *Store, libID int64, lines []model.SyncedLine) model.PID {
+			pid := putWithLyrics(t, st, libID, "c1", nil)
+			if err := st.ApplyLyricsEnrichment(ctx, model.LyricsEnrichment{ItemID: itemID(t, st, "S"), PID: pid, Matched: true,
+				Provider: "lrclib", Lyrics: &model.Lyrics{Source: model.SourceEnrichment, Provider: "lrclib", Synced: lines}}); err != nil {
+				t.Fatal(err)
+			}
+			return pid
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			st, lib := entityFixture(t)
+			lines := shuffled()
+			pid := write(t, st, lib.ID, lines)
+			got, err := st.LyricsByItem(ctx, pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got.Synced, want) {
+				t.Errorf("stored lines = %+v, want %+v", got.Synced, want)
+			}
+			if !slices.Equal(lines, shuffled()) {
+				t.Errorf("the writer's slice was changed: %+v", lines)
+			}
+		})
+	}
+}
+
+// TestLyricsResentInAnotherOrderAreNotRewritten: the same lines sent again in another
+// order are the lyrics the row already holds, so the row keeps its updated_at.
+func TestLyricsResentInAnotherOrderAreNotRewritten(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	pid := putWithLyrics(t, st, lib.ID, "c1", nil)
+	set := func(lines ...model.SyncedLine) int64 {
+		t.Helper()
+		if err := st.SetItemLyrics(ctx, pid, &model.Lyrics{Synced: lines}, model.LockUnchanged, false); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.LyricsByItem(ctx, pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.UpdatedAt
+	}
+	a, b := model.SyncedLine{TimeMS: 100, Text: "a"}, model.SyncedLine{TimeMS: 900, Text: "b"}
+	first := set(a, b)
+	if again := set(b, a); again != first {
+		t.Errorf("updated_at moved from %d to %d on a re-send of the same lines", first, again)
 	}
 }

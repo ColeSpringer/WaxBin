@@ -801,6 +801,39 @@ func TestParseLRCIgnoresSectionHeaders(t *testing.T) {
 	}
 }
 
+// TestFormatLRCReadsBackThroughParseLRC: what FormatLRC prints is what ParseLRC reads,
+// a line break inside a line's text printed as a space so the line stays one line.
+func TestFormatLRCReadsBackThroughParseLRC(t *testing.T) {
+	t.Parallel()
+	lines := []model.SyncedLine{{TimeMS: 0, Text: "first"}, {TimeMS: 1500, Text: ""},
+		{TimeMS: 61234, Text: "past a minute"}, {TimeMS: 61234, Text: "same time"}, {TimeMS: 3723004, Text: "past an hour"}}
+	got, dropped := ParseLRC(FormatLRC(lines))
+	if !slices.Equal(got, lines) || len(dropped) != 0 {
+		t.Errorf("read back %+v (dropped %v), want %+v", got, dropped, lines)
+	}
+	text := FormatLRC([]model.SyncedLine{{TimeMS: 1000, Text: "two\nlines"}, {TimeMS: 2000, Text: "next"}})
+	got, dropped = ParseLRC(text)
+	want := []model.SyncedLine{{TimeMS: 1000, Text: "two lines"}, {TimeMS: 2000, Text: "next"}}
+	if !slices.Equal(got, want) || len(dropped) != 0 {
+		t.Errorf("%q read back as %+v (dropped %v), want %+v", text, got, dropped, want)
+	}
+	if FormatLRC(nil) != "" {
+		t.Errorf("no lines printed %q", FormatLRC(nil))
+	}
+	// The last time a stored line carries is one the parser reads, and a time no
+	// time.Duration holds prints there instead of wrapping around to the start.
+	last := []model.SyncedLine{{TimeMS: model.MaxSyncedLineMS, Text: "last"}}
+	if got, dropped := ParseLRC(FormatLRC(last)); !slices.Equal(got, last) || len(dropped) != 0 {
+		t.Errorf("the last time read back as %+v (dropped %v), want %+v", got, dropped, last)
+	}
+	for _, ms := range []int64{model.MaxSyncedLineMS + 60_000, 9223372036855, 18446744073710, 1 << 50} {
+		got, dropped := ParseLRC(FormatLRC([]model.SyncedLine{{TimeMS: ms, Text: "last"}}))
+		if !slices.Equal(got, last) || len(dropped) != 0 {
+			t.Errorf("a line at %d ms read back as %+v (dropped %v), want it at the last time", ms, got, dropped)
+		}
+	}
+}
+
 // TestCoverFromDocSkipsALinkedPicture: ID3 spells a URL as a picture with the "-->"
 // MIME, whose bytes are the URL text. The last-resort rule takes the first picture
 // with bytes whatever its format, so without the skip that URL would be stored as

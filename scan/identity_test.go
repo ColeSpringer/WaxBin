@@ -42,14 +42,34 @@ func TestIdentitiesSettleWhereEachItemEnded(t *testing.T) {
 }
 
 // TestIdentitiesScaleWithTheItemsTheyName: a scan that converts a whole library names each
-// item once, in time that grows with the library rather than with its square.
+// item once, in time that grows with the library rather than with its square. The time is
+// held against what filing the same pids in a map takes, timed before and after it, not
+// against a fixed budget: a loaded machine and the race detector slow both alike, while a
+// naming that looked through the items before it would cost thousands of times as much.
 func TestIdentitiesScaleWithTheItemsTheyName(t *testing.T) {
 	t.Parallel()
-	const n = 50_000
+	const n, allowed = 100_000, 40
+	pidOf := func(i int) model.PID { return model.PID(fmt.Sprintf("01M690PMPJ%016d", i)) }
+	filing := func() time.Duration {
+		start := time.Now()
+		seen := map[model.PID]bool{}
+		var pids []model.PID
+		for i := range n {
+			if pid := pidOf(i); !seen[pid] {
+				seen[pid] = true
+				pids = append(pids, pid)
+			}
+		}
+		if len(pids) != n {
+			t.Fatalf("filed %d pids, want %d", len(pids), n)
+		}
+		return time.Since(start)
+	}
+	before := filing()
 	start := time.Now()
 	l := &identities{}
 	for i := range n {
-		pid := model.PID(fmt.Sprintf("01M690PMPJ%016d", i))
+		pid := pidOf(i)
 		l.note(&model.ScanItemResult{ItemPID: pid, Rekinded: true})
 		l.note(&model.ScanItemResult{ItemPID: pid, Rekinded: true})
 	}
@@ -57,8 +77,9 @@ func TestIdentitiesScaleWithTheItemsTheyName(t *testing.T) {
 	l.fill(&res)
 	total.MergeIdentities(&res)
 	total.MergeIdentities(&res)
-	if took := time.Since(start); took > 2*time.Second {
-		t.Errorf("naming %d conversions took %v", n, took)
+	took := time.Since(start)
+	if filed := max(before, filing()); took > allowed*filed {
+		t.Errorf("naming %d conversions took %v, over %d times the %v filing their pids took", n, took, allowed, filed)
 	}
 	if len(total.Converted) != n {
 		t.Errorf("converted names %d items, want each of %d once", len(total.Converted), n)

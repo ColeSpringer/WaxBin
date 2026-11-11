@@ -1554,7 +1554,7 @@ func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*m
 				if meta.LRCPartial(synced, dropped) {
 					diags = append(diags, model.FileDiagnostic{
 						Code: model.DiagLyricsPartial, Severity: model.SeverityWarn,
-						Detail: lrcPartialDetail(synced, dropped),
+						Detail: meta.LRCPartialDetail(synced, dropped),
 					})
 				}
 				aux = append(aux, model.AuxObservation{
@@ -1638,24 +1638,6 @@ func sidecarSkippedDetail(kind string, size int64) string {
 		kind, size, int64(maxSidecarBytes))
 }
 
-// lrcPartialDetail summarizes a partly-timed .lrc as a count plus the first offending
-// line. It leaves the dropped list unserialized: the message needs to stay bounded
-// and actionable, and a mostly-untimed file would otherwise carry thousands of
-// numbers.
-//
-// It reports the dropped count and the timed count separately rather than as "N of M
-// lines", because the two do not share a denominator. Dropped counts input lines,
-// while one input line carrying several leading timestamps yields a timed entry per
-// tag, so adding them would state a line total the file does not have.
-func lrcPartialDetail(lines []model.SyncedLine, dropped []int) string {
-	first := 0
-	if len(dropped) > 0 {
-		first = dropped[0]
-	}
-	return fmt.Sprintf("%d line(s) had no usable timestamp (first at line %d); %d timed lyric(s) parsed",
-		len(dropped), first, len(lines))
-}
-
 // maxCueDropsShown bounds each list in a cue diagnostic, so a wholly malformed sheet
 // yields a readable line rather than a hundred clauses.
 const maxCueDropsShown = 3
@@ -1666,7 +1648,7 @@ const maxCueDropsShown = 3
 //
 // One row per finding would be wrong twice over: file_diagnostic is keyed by
 // (file_id, origin, code, tag_key), so rows sharing this code collide and all but one
-// silently vanish; and an unbounded list is what lrcPartialDetail already declines to
+// silently vanish; and an unbounded list is what meta.LRCPartialDetail already declines to
 // build for the same reason. Each list reports its count plus the first few.
 func cueSheetDiag(sheet *meta.CueSheet, dropped []string, refusal, disposition string) []model.FileDiagnostic {
 	var parts []string

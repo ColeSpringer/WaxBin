@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -180,50 +181,81 @@ func TestRecoverTrashFinishesWithoutTheFileRow(t *testing.T) {
 	f.checkFinished(t, st)
 }
 
-// TestRecoverTrashOfARipWithoutItsFileRowKeepsEveryTrack: a rip's trash move a crash cut
-// off, finished after its file row went, still lists the entry under each track the file
-// backed when the move was planned.
-func TestRecoverTrashOfARipWithoutItsFileRowKeepsEveryTrack(t *testing.T) {
+// TestRecoverTrashOfARipDescribesOneReadingOfTheFile: a rip's trash move a crash cut off
+// is journaled from one reading of the file, never half the plan and half the row. Between
+// the plan and the crash here the file was read again: other audio, its opening track gone
+// and a window moved. With the file row still there the entry is what TrashFile would have
+// written from it; with the row gone it is the plan, whole.
+func TestRecoverTrashOfARipDescribesOneReadingOfTheFile(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	dir := t.TempDir()
-	db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db"))
-	st, lib := openRootedStore(t, dir, db, "owner-a")
-	rips, paths := ripCopies(t, st, lib, dir, 1)
-	dst := filepath.Join(dir, model.TrashDirName, "01ENTRY", "album.flac")
-	pending := model.TrashPending{PID: model.NewPID(), FilePID: rips[0].FilePID, TrashPath: []byte(dst), TrashDisplay: dst}
-	if err := st.PlanTrash(ctx, pending); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(paths[0], dst); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.DetachFile(ctx, rips[0].FilePID, model.DeletePermanent); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = openRootedStore(t, dir, db, "owner-b")
-	tracks := vtItems(t, st)
-	var pids []model.PID
-	for _, tr := range tracks {
-		pids = append(pids, tr.PID)
-	}
-	m, err := st.ActiveTrashForItems(ctx, pids)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tracks) != 3 {
-		t.Fatalf("tracks = %d, want 3", len(tracks))
-	}
-	for _, tr := range tracks {
-		if len(m[tr.PID]) != 1 || m[tr.PID][0].PID != pending.PID {
-			t.Errorf("%s restorable from %+v, want the recovered entry %s", tr.Title, m[tr.PID], pending.PID)
+	for _, rowGone := range []bool{true, false} {
+		name := "file row there"
+		if rowGone {
+			name = "file row gone"
 		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			dir := t.TempDir()
+			db := testcatalog.Seed(t, filepath.Join(t.TempDir(), "c.db"))
+			st, lib := openRootedStore(t, dir, db, "owner-a")
+			rips, paths := ripCopies(t, st, lib, dir, 1)
+			planned := vtItems(t, st)
+			dst := filepath.Join(dir, model.TrashDirName, "01ENTRY", "album.flac")
+			pending := model.TrashPending{PID: model.NewPID(), FilePID: rips[0].FilePID, TrashPath: []byte(dst), TrashDisplay: dst}
+			if err := st.PlanTrash(ctx, pending); err != nil {
+				t.Fatal(err)
+			}
+			again := vtrackInput(lib.ID, paths[0], "sha256:VE", "sha256:VC1b", 600, [][2]int64{{0, 9}, {9, 25}, {27, 0}})
+			again.Tracks = again.Tracks[1:]
+			again.File.EssenceHash = "sha256:VE2"
+			if _, err := st.PutScannedVirtualTracks(ctx, again); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(paths[0], dst); err != nil {
+				t.Fatal(err)
+			}
+			if rowGone {
+				if _, err := st.DetachFile(ctx, rips[0].FilePID, model.DeletePermanent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := st.Close(); err != nil {
+				t.Fatal(err)
+			}
+			st, _ = openRootedStore(t, dir, db, "owner-b")
+			e, err := st.ActiveTrashByPID(ctx, pending.PID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			essence, items := "sha256:VE2", ripWindows(planned[1:], [][2]int64{{9, 25}, {27, 0}})
+			if rowGone {
+				essence, items = "sha256:VE", ripWindows(planned, [][2]int64{{0, 9}, {9, 27}, {27, 0}})
+			}
+			if e.EssenceHash != essence || !slices.Equal(e.Items, items) || e.ItemPID != items[0].ItemPID {
+				t.Errorf("entry: essence %q, item %s, items %+v; want %q, %s and %+v", e.EssenceHash, e.ItemPID, e.Items,
+					essence, items[0].ItemPID, items)
+			}
+			var pids []model.PID
+			for _, tr := range planned {
+				pids = append(pids, tr.PID)
+			}
+			m, err := st.ActiveTrashForItems(ctx, pids)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(m) != len(items) {
+				t.Errorf("the entry is listed under %d of the planned tracks, want %d", len(m), len(items))
+			}
+			for _, it := range items {
+				if len(m[it.ItemPID]) != 1 || m[it.ItemPID][0].PID != pending.PID {
+					t.Errorf("%s restorable from %+v, want the recovered entry %s", it.ItemPID, m[it.ItemPID], pending.PID)
+				}
+			}
+		})
 	}
 }
 

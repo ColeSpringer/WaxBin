@@ -588,8 +588,9 @@ type Catalog interface {
 	// FilesByEssence returns the cataloged files holding an audio essence, each saying
 	// whether it is on disk and which item it backs.
 	FilesByEssence(ctx context.Context, essence string) ([]FileOccupant, error)
-	// FileOwner returns a file's edge and the item it backs, the item it is the primary of
-	// first, or an empty item pid for a file that backs none.
+	// FileOwner returns the item a file backs and the file's edge on that item: for a
+	// rip's file the track that opens it, whatever role that edge has, and otherwise the
+	// item it is the primary of first. A file that backs none returns an empty item pid.
 	FileOwner(ctx context.Context, filePID PID) (PID, ItemFileRef, error)
 	// FilePIDsByPath returns the pid of the file the catalog holds at each path it holds,
 	// keyed by the path, in one read however many paths there are.

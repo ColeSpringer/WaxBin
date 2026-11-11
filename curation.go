@@ -19,8 +19,11 @@ import (
 
 // SetLyrics replaces an item's lyrics with a curated set. Passing nil clears them. The
 // lyrics carry their own provenance on the *model.Lyrics: an unstamped set is recorded
-// as a user edit. lock is the instruction for the "lyrics" field's lock, and its zero
-// value leaves whatever is stored alone.
+// as a user edit. Synced lines are stored in time order whatever order they are sent
+// in, lines sent at one time in the order sent, and a time outside 0 to
+// model.MaxSyncedLineMS at the nearer end (model.NormalizeSyncedLines). lock is the
+// instruction for the "lyrics" field's lock, and its zero value leaves whatever is
+// stored alone.
 func (l *Library) SetLyrics(ctx context.Context, itemPID model.PID, ly *model.Lyrics, lock model.LockChange, force bool) error {
 	return l.store.SetItemLyrics(ctx, itemPID, ly, lock, force)
 }

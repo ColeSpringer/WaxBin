@@ -116,8 +116,9 @@ type File struct {
 }
 
 // FileOccupant is a cataloged file as an import weighs it: what stands at a destination,
-// or what already holds a staged file's audio. ItemPID is the item the file backs, its
-// primary edge first (for a cue rip, its first track), with that item's Kind and State; all
+// or what already holds a staged file's audio. ItemPID is the item the file backs: for a
+// cue rip the track that opens the file, whatever role the file plays for it, and
+// otherwise the item it is the primary of first. Kind and State are that item's, and all
 // three are empty for a file that backs none. OnDisk says the file was there when the store
 // looked, and Reachable that its library root was, so a file not on disk under a reachable
 // root is gone, while one under a root that is not there (an unplugged drive) is only out of

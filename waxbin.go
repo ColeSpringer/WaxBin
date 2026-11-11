@@ -1050,8 +1050,9 @@ func (l *Library) GCStrandedTagKeys(ctx context.Context) (int, error) {
 
 // Lyrics returns an item's structured lyrics (synced timed lines and/or an
 // unsynchronized block), or CodeNotFound when it has none. Lyrics come from a
-// sibling .lrc sidecar or embedded USLT/SYLT tags, captured at scan time; the
-// catalog row is authoritative for reads.
+// sibling .lrc sidecar or embedded USLT/SYLT tags, captured at scan time, from
+// SetLyrics, or from a lyrics provider; Source says which, and the catalog row is
+// authoritative for reads. Synced lines are in time order from every one of them.
 func (l *Library) Lyrics(ctx context.Context, pid model.PID) (*model.Lyrics, error) {
 	return l.store.LyricsByItem(ctx, pid)
 }
@@ -3735,7 +3736,8 @@ func rawRoot(lib *model.Library) string {
 }
 
 // Trash lists trash journal entries, newest first. includeRestored controls
-// whether already-restored rows are shown; limit 0 returns all.
+// whether already-restored rows are shown; limit 0 returns all. Each entry carries
+// the audio its file held and the items it backed, as RestorableTrash describes.
 func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([]model.TrashEntry, error) {
 	return l.store.TrashEntries(ctx, includeRestored, 0, limit)
 }
@@ -3748,6 +3750,12 @@ func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([
 // an item would read as permanently removed. The entries do not follow from the item's
 // ArchiveReason: one archived by a prune or a root removal can still hold a part
 // trashed before.
+//
+// An entry says what audio it would bring back: EssenceHash is the file's, as
+// File.EssenceHash answered before the trash took it, and Items lists every item the
+// file backed with the window it played. So a value computed from an item's audio
+// (keyed by essence and, for a carved track, its frames) still stands for a trashed
+// item when an entry here carries that essence and, through Item(pid), that window.
 func (l *Library) RestorableTrash(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.TrashEntry, error) {
 	return l.store.ActiveTrashForItems(ctx, itemPIDs)
 }
@@ -3851,7 +3859,7 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 	}
 	rep := &EmptyReport{}
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "empty-trash", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
-		entries, err := l.store.TrashEntries(ctx, false, cutoff, 0)
+		entries, err := l.store.TrashJournal(ctx, false, cutoff, 0)
 		if err != nil {
 			return err
 		}
@@ -3943,7 +3951,7 @@ func (l *Library) sweepTrash(ctx context.Context, roots []string) {
 	if len(roots) == 0 {
 		return
 	}
-	entries, err := l.store.TrashEntries(ctx, true, 0, 0)
+	entries, err := l.store.TrashJournal(ctx, true, 0, 0)
 	if err != nil {
 		l.log.Warn("sweeping the trash", "err", err)
 		return

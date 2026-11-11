@@ -18,8 +18,9 @@ import (
 
 // SetItemLyrics replaces an item's lyrics with a curated set, recording the lock the
 // caller asked for on the "lyrics" field so a later scan/enrichment does not overwrite
-// it. Passing nil (or empty) lyrics clears the row. A locked lyrics is refused with
-// CodeLocked unless force is set.
+// it. Passing nil (or empty) lyrics clears the row. Synced lines are stored in time
+// order whatever order they are sent in, a time outside the stored range at its nearer
+// end (putLyricsTx). A locked lyrics is refused with CodeLocked unless force is set.
 //
 // The lyrics carry their own attribution on the *model.Lyrics: an unstamped set is
 // recorded as a user edit, and one that names an origin keeps it, so an embedder that

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1114,5 +1115,28 @@ func TestCommunityGenreFailureLeavesTheGroupQueued(t *testing.T) {
 	}
 	if g := scalarStr(t, db, `SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?`, string(item)); g != "art rock" {
 		t.Errorf("track.genre = %q, want the community tag", g)
+	}
+}
+
+// TestAProvidersLyricLinesAreStoredInTimeOrder: an injected provider may answer synced
+// lines in any order; the row a run stores is in time order and names the provider.
+func TestAProvidersLyricLinesAreStoredInTimeOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, _, lib := openStore(t)
+	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+	words := &enrich.Mock{ProviderName: "words", Caps: enrich.CapLyrics, Ret: &enrich.Candidate{Lyrics: &model.Lyrics{
+		Synced: []model.SyncedLine{{TimeMS: 2000, Text: "c"}, {TimeMS: 500, Text: "a"}, {TimeMS: 2000, Text: "d"}, {TimeMS: 900, Text: "b"}},
+	}}}
+	if res, err := lyricsService(st, words).Run(ctx, enrich.RunOptions{}, nil); err != nil || res.LyricsMatched != 1 {
+		t.Fatalf("run = %+v (err %v), want the lyrics matched", res, err)
+	}
+	ly, err := st.LyricsByItem(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []model.SyncedLine{{TimeMS: 500, Text: "a"}, {TimeMS: 900, Text: "b"}, {TimeMS: 2000, Text: "c"}, {TimeMS: 2000, Text: "d"}}
+	if !slices.Equal(ly.Synced, want) || ly.Source != model.SourceEnrichment || ly.Provider != "words" {
+		t.Errorf("lyrics = %+v, want %+v from the provider words", ly, want)
 	}
 }

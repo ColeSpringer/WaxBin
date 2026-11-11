@@ -82,6 +82,80 @@ func TestTrashRecordsBookPartItem(t *testing.T) {
 	}
 }
 
+// TestATrashEntryHoldsItsEssenceAndItems: an entry answers the audio its file's row carried
+// and the items the file backed, a whole-file item with no window, and keeps both once
+// restored.
+func TestATrashEntryHoldsItsEssenceAndItems(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	trashed := func(file model.PID, dst string) *model.TrashEntry {
+		t.Helper()
+		res, err := st.TrashFile(ctx, model.TrashFileInput{FilePID: file, TrashPath: []byte(dst), TrashDisplay: dst})
+		if err != nil {
+			t.Fatalf("TrashFile: %v", err)
+		}
+		e, err := st.ActiveTrashByPID(ctx, res.TrashPID)
+		if err != nil {
+			t.Fatalf("ActiveTrashByPID: %v", err)
+		}
+		return e
+	}
+	check := func(name string, e *model.TrashEntry, essence string, item model.PID) {
+		t.Helper()
+		if e.EssenceHash != essence || len(e.Items) != 1 || e.Items[0] != (model.TrashItem{ItemPID: item}) {
+			t.Errorf("%s: essence %q items %+v, want %q and %s with no window", name, e.EssenceHash, e.Items, essence, item)
+		}
+	}
+
+	track := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "ei1")
+	check("track", &track, "ei1", track.ItemPID)
+
+	book := putBookPart(t, st, lib.ID, "/lib/book/p1.m4b", "bk1", "e1", 0)
+	part2 := putBookPart(t, st, lib.ID, "/lib/book/p2.m4b", "bk1", "e2", 1)
+	check("book part", trashed(part2.FilePID, "/lib/t/p2.m4b"), "e2", book.ItemPID)
+
+	in := trackSpecInput(lib.ID, trackSpec{path: "/lib/bare.mp3", essence: "ei2", content: "c2", title: "Bare", artist: "A"})
+	in.File.EssenceHash = ""
+	bare, err := st.PutScannedTrack(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("no essence", trashed(bare.FilePID, "/lib/t/bare.mp3"), "", bare.ItemPID)
+
+	if err := st.MarkTrashRestored(ctx, track.PID); err != nil {
+		t.Fatal(err)
+	}
+	all, err := st.TrashEntries(ctx, true, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i := range all {
+		if all[i].PID == track.PID {
+			check("restored", &all[i], "ei1", track.ItemPID)
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the restored entry is not listed: %+v", all)
+	}
+
+	// The journal alone is the same rows in the same order, without their items.
+	journal, err := st.TrashJournal(ctx, true, 0, 0)
+	if err != nil || len(journal) != len(all) {
+		t.Fatalf("journal = %d rows (err %v), want %d", len(journal), err, len(all))
+	}
+	for i, e := range journal {
+		if e.PID != all[i].PID || e.EssenceHash != all[i].EssenceHash || e.TrashDisplay != all[i].TrashDisplay || e.Items != nil {
+			t.Errorf("journal row %d = %+v, want %s without items", i, e, all[i].PID)
+		}
+	}
+	if active, err := st.TrashJournal(ctx, false, 0, 1); err != nil || len(active) != 1 || active[0].RestoredAt != 0 {
+		t.Errorf("one active journal row = %+v (err %v)", active, err)
+	}
+}
+
 // TestPurgeEmitsItemDelta pins that dropping a trash row announces itself, including
 // for an item whose own columns do not move, and stays quiet where there is nothing
 // to announce. A dropped row is dropped in every case: the quiet paths are guards on

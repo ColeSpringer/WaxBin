@@ -31,8 +31,8 @@ type pendingTrash struct {
 // row belongs to a run that is gone. For each row:
 //
 //   - the file in the trash and not at its path: the move happened, so it is finished,
-//     the file row detached when it is still there and the journal row written from the
-//     pending row either way;
+//     the file row detached when it is still there and the journal row written either way
+//     (finishPendingTrashTx);
 //   - the file at its path and not in the trash, or in neither place: the move did not
 //     happen, and the row is dropped (a scan finds a file that is gone);
 //   - both: a move across filesystems copies and then removes, so a crash between, or a
@@ -151,9 +151,11 @@ func recoveryGate(log *slog.Logger, what string) *fsx.RootGate {
 }
 
 // finishPendingTrashTx writes the journal row a pending move planned, detaching its file
-// row when it is still there, as TrashFile would have. With the row gone, the items the
-// plan recorded are the ones its trash_item rows name. A plan no longer there finishes
-// nothing.
+// row when it is still there. Where the file was and where it went are the plan's. What it
+// held (its audio, its size, the item the journal names and each item's window) is one
+// reading of the file: the row's as the detach finds it, as TrashFile would have written
+// it, or with the row gone what the plan recorded, so the essence, the item and the
+// windows never come from two readings. A plan no longer there finishes nothing.
 func finishPendingTrashTx(ctx context.Context, tx *sql.Tx, p pendingTrash) error {
 	var trashID int64
 	err := tx.QueryRowContext(ctx, `INSERT INTO trash
@@ -178,11 +180,15 @@ func finishPendingTrashTx(ctx context.Context, tx *sql.Tx, p pendingTrash) error
 			if err := b.settleTx(ctx, tx); err != nil {
 				return err
 			}
-			return recordTrashItemsTx(ctx, tx, trashID, d.items)
+			if _, err := tx.ExecContext(ctx, "UPDATE trash SET item_pid = ?, item_kind = ?, essence_hash = ?, size = ? WHERE id = ?",
+				string(d.itemPID), d.itemKind, d.essence, d.size, trashID); err != nil {
+				return err
+			}
+			return recordTrashItemsTx(ctx, tx, "trash_item", "trash_id", trashID, d.edges)
 		}
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO trash_item(trash_id, item_pid)
-		SELECT ?, item_pid FROM trash_pending_item WHERE pending_pid = ?`, trashID, p.pid)
+	_, err = tx.ExecContext(ctx, `INSERT INTO trash_item(trash_id, item_pid, start_frames, end_frames)
+		SELECT ?, item_pid, start_frames, end_frames FROM trash_pending_item WHERE pending_pid = ?`, trashID, p.pid)
 	return err
 }
 

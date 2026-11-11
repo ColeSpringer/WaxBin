@@ -50,8 +50,7 @@ func (s *Store) UpdateImportBatch(ctx context.Context, b *model.ImportBatch) err
 }
 
 // fileOccupantsQ reads the files a where clause picks, each with its library's root and the
-// item it backs (its primary edge first), one row per edge; fileOccupants keeps a file's
-// first.
+// item it backs, one row per edge in openingEdgeOrder; fileOccupants keeps a file's first.
 const fileOccupantsQ = `SELECT f.id, f.path, f.display_path, f.pid, f.library_id, COALESCE(f.essence_hash, ''),
 		COALESCE(pi.pid, ''), COALESCE(pi.kind, ''), COALESCE(pi.state, ''), l.root
 	FROM file f
@@ -59,7 +58,7 @@ const fileOccupantsQ = `SELECT f.id, f.path, f.display_path, f.pid, f.library_id
 	LEFT JOIN item_file itf ON itf.file_id = f.id
 	LEFT JOIN playable_item pi ON pi.id = itf.item_id
 	WHERE %s
-	ORDER BY f.id, itf.role <> 'primary', itf.item_id`
+	ORDER BY f.id, ` + openingEdgeOrder
 
 var (
 	fileOccupantsByDisplayQ = fmt.Sprintf(fileOccupantsQ, "f.display_path = ? COLLATE NOCASE")

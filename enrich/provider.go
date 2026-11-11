@@ -283,7 +283,8 @@ type Candidate struct {
 	// Book fields.
 	Publisher string
 
-	// Recording fields.
+	// Recording fields. Synced lines may come in any order: the catalog stores them in
+	// time order (model.NormalizeSyncedLines).
 	Lyrics *model.Lyrics
 
 	// Fields carries scalar values keyed by the metadata vocabulary

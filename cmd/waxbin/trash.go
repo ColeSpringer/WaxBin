@@ -48,7 +48,12 @@ func newTrashListCmd(g *globals) *cobra.Command {
 				if e.RestoredAt != 0 {
 					restored = "yes"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", e.PID, e.Reason, e.ItemPID, e.OrigDisplay, restored)
+				// A file that backed more items than the one named (a rip's other tracks).
+				item := string(e.ItemPID)
+				if n := len(e.Items); n > 1 {
+					item += fmt.Sprintf(" +%d", n-1)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", e.PID, e.Reason, item, e.OrigDisplay, restored)
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -214,20 +219,35 @@ func daysAge(n int) time.Duration {
 }
 
 func trashEntriesJSON(entries []model.TrashEntry) any {
+	// The window fields read as an item view's do, omitted when zero.
+	type itemJSON struct {
+		ItemPID     string `json:"itemPid"`
+		Virtual     bool   `json:"virtual,omitempty"`
+		StartFrames int64  `json:"startFrames,omitempty"`
+		EndFrames   int64  `json:"endFrames,omitempty"`
+	}
 	type entryJSON struct {
-		PID        string `json:"pid"`
-		ItemPID    string `json:"itemPid"`
-		Orig       string `json:"origPath"`
-		Reason     string `json:"reason"`
-		Size       int64  `json:"size"`
-		TrashedAt  int64  `json:"trashedAt,string"`            // unix ns; a string, see playStateView
-		RestoredAt int64  `json:"restoredAt,string,omitempty"` // unix ns; 0 (never) omitted
+		PID         string     `json:"pid"`
+		ItemPID     string     `json:"itemPid"`
+		LibraryPID  string     `json:"libraryPid,omitempty"`
+		Orig        string     `json:"origPath"`
+		Reason      string     `json:"reason"`
+		Size        int64      `json:"size"`
+		EssenceHash string     `json:"essenceHash,omitempty"`
+		Items       []itemJSON `json:"items"`
+		TrashedAt   int64      `json:"trashedAt,string"`            // unix ns; a string, see playStateView
+		RestoredAt  int64      `json:"restoredAt,string,omitempty"` // unix ns; 0 (never) omitted
 	}
 	out := make([]entryJSON, 0, len(entries))
 	for _, e := range entries {
+		items := make([]itemJSON, 0, len(e.Items))
+		for _, it := range e.Items {
+			items = append(items, itemJSON{string(it.ItemPID), it.Virtual, it.StartFrames, it.EndFrames})
+		}
 		out = append(out, entryJSON{
-			PID: string(e.PID), ItemPID: string(e.ItemPID), Orig: e.OrigDisplay,
-			Reason: e.Reason, Size: e.Size, TrashedAt: e.TrashedAt, RestoredAt: e.RestoredAt,
+			PID: string(e.PID), ItemPID: string(e.ItemPID), LibraryPID: string(e.LibraryPID), Orig: e.OrigDisplay,
+			Reason: e.Reason, Size: e.Size, EssenceHash: e.EssenceHash, Items: items,
+			TrashedAt: e.TrashedAt, RestoredAt: e.RestoredAt,
 		})
 	}
 	return out

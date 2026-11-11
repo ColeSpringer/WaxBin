@@ -933,10 +933,12 @@ func itemLostEdgesTx(ctx context.Context, tx *sql.Tx, fileID int64, essence stri
 	return edges, books, rows.Err()
 }
 
-// FileOwner returns a file's edge as an ItemFileRef and the item it backs, preferring the
-// item it is the primary of (the rule the trash journal records), for deleting the file
-// on its own. A file backing no item returns an empty item pid; an unknown pid is
-// CodeNotFound.
+// FileOwner returns the item a file backs and the file's edge on that item as an
+// ItemFileRef, for deleting the file on its own. The item is the first by
+// openingEdgeOrder, the rule the trash journal records: of a rip's tracks the one that
+// opens the file, so a copy that is a later track's primary is named by its opening track
+// with the alternate edge it holds on it, and otherwise the item the file is the primary
+// of. A file backing no item returns an empty item pid; an unknown pid is CodeNotFound.
 func (s *Store) FileOwner(ctx context.Context, filePID model.PID) (model.PID, model.ItemFileRef, error) {
 	const op = "store.FileOwner"
 	var item model.PID
@@ -944,7 +946,7 @@ func (s *Store) FileOwner(ctx context.Context, filePID model.PID) (model.PID, mo
 	err := s.rdb().QueryRowContext(ctx, `SELECT f.path, f.display_path, COALESCE(pi.pid, ''), COALESCE(itf.role, ''),
 			COALESCE(itf.position, 0), `+fileFactCols+`
 		FROM file f LEFT JOIN item_file itf ON itf.file_id = f.id LEFT JOIN playable_item pi ON pi.id = itf.item_id
-		WHERE f.pid = ? ORDER BY itf.role = 'primary' DESC, itf.item_id LIMIT 1`, string(filePID)).
+		WHERE f.pid = ? ORDER BY `+openingEdgeOrder+` LIMIT 1`, string(filePID)).
 		Scan(append([]any{&ref.Path, &ref.DisplayPath, &item, &ref.Role, &ref.Position}, fileFactDests(&ref)...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ref, waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(filePID))

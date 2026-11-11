@@ -64,6 +64,31 @@ func TestEditFieldDBOnly(t *testing.T) {
 	}
 }
 
+// TestSetLyricsStoresLinesInTimeOrder: lines sent out of order are read back in time
+// order, lines at one time as sent, and the caller's slice is left alone.
+func TestSetLyricsStoresLinesInTimeOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	sent := []model.SyncedLine{{TimeMS: 2000, Text: "c"}, {TimeMS: 500, Text: "a"}, {TimeMS: 2000, Text: "d"}, {TimeMS: 900, Text: "b"}}
+	lines := slices.Clone(sent)
+	if err := lib.SetLyrics(ctx, pid, &model.Lyrics{Synced: lines}, model.LockUnchanged, false); err != nil {
+		t.Fatal(err)
+	}
+	ly, err := lib.Lyrics(ctx, pid)
+	want := []model.SyncedLine{{TimeMS: 500, Text: "a"}, {TimeMS: 900, Text: "b"}, {TimeMS: 2000, Text: "c"}, {TimeMS: 2000, Text: "d"}}
+	if err != nil || !slices.Equal(ly.Synced, want) {
+		t.Errorf("lyrics = %+v (err %v), want %+v", ly, err, want)
+	}
+	if !slices.Equal(lines, sent) {
+		t.Errorf("the caller's slice was reordered: %+v", lines)
+	}
+}
+
 // TestEditFieldWriteBack verifies --write-back mirrors the edit into the on-disk
 // tags, readable by re-parsing the file.
 func TestEditFieldWriteBack(t *testing.T) {

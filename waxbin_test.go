@@ -1220,6 +1220,69 @@ func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestATrashedRipAnswersTheAudioOfEveryTrack: what RestorableTrash answers for a track of
+// a trashed rip is the audio the track played, the file's essence and the track's window,
+// and a restore brings the tracks back over the same windows.
+func TestATrashedRipAnswersTheAudioOfEveryTrack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeCueRip(t, filepath.Join(root, "rip"), 7, "One", "Two")
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	pids := []model.PID{itemPIDByTitle(t, ctx, lib, "One"), itemPIDByTitle(t, ctx, lib, "Two")}
+	type audio struct {
+		essence    string
+		start, end int64
+	}
+	played := map[model.PID]audio{}
+	for _, pid := range pids {
+		it, err := lib.Get(ctx, pid)
+		if err != nil || !it.Virtual {
+			t.Fatalf("track %s = %+v (err %v), want a virtual track", pid, it, err)
+		}
+		f, err := lib.File(ctx, it.FilePID)
+		if err != nil || f.EssenceHash == "" {
+			t.Fatalf("file of %s = %+v (err %v), want its essence", pid, f, err)
+		}
+		played[pid] = audio{f.EssenceHash, it.StartFrames, it.EndFrames}
+	}
+	if played[pids[0]].end == 0 || played[pids[1]].start != played[pids[0]].end {
+		t.Fatalf("windows = %+v, want the first track ending where the second starts", played)
+	}
+	plan, err := lib.PlanDeletePIDs(ctx, pids, model.DeleteTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := lib.ApplyDelete(ctx, plan); err != nil || rep.Trashed != 1 {
+		t.Fatalf("apply = %+v (err %v), want the rip trashed once", rep, err)
+	}
+	restorable, err := lib.RestorableTrash(ctx, pids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range pids {
+		entries := restorable[pid]
+		if len(entries) != 1 {
+			t.Fatalf("restorable for %s = %+v, want the rip's entry", pid, entries)
+		}
+		want := played[pid]
+		got, ok := entries[0].Item(pid)
+		if entries[0].EssenceHash != want.essence || !ok || !got.Virtual || got.StartFrames != want.start || got.EndFrames != want.end {
+			t.Errorf("entry for %s: essence %q item %+v (found %v), want %+v", pid, entries[0].EssenceHash, got, ok, want)
+		}
+	}
+	if err := lib.RestoreTrash(ctx, restorable[pids[0]][0].PID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	for _, pid := range pids {
+		it, err := lib.Get(ctx, pid)
+		if err != nil || it.State != model.StatePresent || it.StartFrames != played[pid].start || it.EndFrames != played[pid].end {
+			t.Errorf("track %s after the restore = %+v (err %v), want it present over %+v", pid, it, err, played[pid])
+		}
+	}
+}
+
 // TestPruneBypassesTrash verifies pruning deletes from disk immediately, records
 // no undo entry, and still preserves the logical item.
 func TestPruneBypassesTrash(t *testing.T) {

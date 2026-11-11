@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -38,9 +37,7 @@ func newLyricsCmd(g *globals) *cobra.Command {
 			// B's first line of unsynchronized text. --json carries it in the payload.
 			fmt.Fprintln(errOut(cmd), "source: "+attribution(ly.Source, ly.Provider, ""))
 			if len(ly.Synced) > 0 {
-				for _, l := range ly.Synced {
-					fmt.Fprintf(out(cmd), "[%s] %s\n", fmtLyricTime(l.TimeMS), l.Text)
-				}
+				fmt.Fprintln(out(cmd), meta.FormatLRC(ly.Synced))
 				return nil
 			}
 			fmt.Fprintln(out(cmd), ly.Unsynced)
@@ -64,8 +61,9 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <pid> --file <lrc>",
 		Short: "Set (or clear) an item's lyrics from an .lrc file",
-		Long: "Sets curated lyrics on a track from an .lrc file (timed lines are parsed; " +
-			"plain lines become unsynchronized text), or --clear removes them. A set locks the " +
+		Long: "Sets curated lyrics on a track from an .lrc file, or --clear removes them. Timed " +
+			"lines are parsed; a file with none is stored whole as unsynchronized text, and " +
+			"untimed lyric lines in a file that has timed ones are left out, with a warning. A set locks the " +
 			"item's lyrics field by default so a scan does not overwrite it. The words are " +
 			"recorded as set by hand unless --source says otherwise, which is what a program " +
 			"that fetched them uses to record where they came from. There is no --source-url: " +
@@ -78,6 +76,7 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 				return err
 			}
 			var ly *model.Lyrics
+			var dropped []int
 			if !clear {
 				if filePath == "" {
 					return waxerr.New(waxerr.CodeInvalid, "lyrics set", "provide --file or --clear")
@@ -86,10 +85,13 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 				if err != nil {
 					return waxerr.Wrapf(waxerr.CodeIO, "lyrics set", err, "reading %s", filePath)
 				}
-				synced, _ := meta.ParseLRC(string(b))
+				synced, lost := meta.ParseLRC(string(b))
 				ly = &model.Lyrics{Source: attr.Source, Provider: attr.Provider, Synced: synced}
 				if len(synced) == 0 {
 					ly.Unsynced = string(b)
+				}
+				if meta.LRCPartial(synced, lost) {
+					dropped = lost
 				}
 			}
 			m, _, err := g.openMutator(cmd)
@@ -100,6 +102,9 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 			if err := m.SetLyrics(ctx(cmd), model.PID(args[0]), ly, lockChange(noLock, keepLock), force); err != nil {
 				return err
 			}
+			if len(dropped) > 0 {
+				fmt.Fprintf(errOut(cmd), "warning: %s: %s\n", filePath, meta.LRCPartialDetail(ly.Synced, dropped))
+			}
 			text := fmt.Sprintf("set lyrics for %s\n", args[0])
 			if clear {
 				text = fmt.Sprintf("cleared lyrics for %s\n", args[0])
@@ -107,7 +112,9 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 			return reply(cmd, g, struct {
 				ItemPID string `json:"itemPid"`
 				Cleared bool   `json:"cleared"`
-			}{args[0], clear}, text)
+				// The file's lines that carried no usable time, by 1-based number.
+				DroppedLines []int `json:"droppedLines,omitempty"`
+			}{args[0], clear, dropped}, text)
 		},
 	}
 	f := cmd.Flags()
@@ -125,13 +132,4 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 	cmd.MarkFlagsMutuallyExclusive("clear", "source")
 	cmd.MarkFlagsMutuallyExclusive("clear", "provider")
 	return cmd
-}
-
-// fmtLyricTime renders a millisecond offset as mm:ss.mmm for synced-lyric display.
-func fmtLyricTime(ms int64) string {
-	d := time.Duration(ms) * time.Millisecond
-	m := int(d / time.Minute)
-	s := int(d/time.Second) % 60
-	frac := ms % 1000
-	return fmt.Sprintf("%02d:%02d.%03d", m, s, frac)
 }

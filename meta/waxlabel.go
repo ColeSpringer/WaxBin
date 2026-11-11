@@ -3,11 +3,11 @@ package meta
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -577,10 +577,8 @@ func lyricsFromDoc(doc *waxlabel.Document, fields tag.Tags) *model.Lyrics {
 		}
 		break // first non-empty set; alternate-language sets are ignored
 	}
-	// model.Lyrics.Synced promises time order; a SYLT frame may arrive out of order,
-	// so sort defensively (the .lrc path is already sorted by ParseLRC). Stable, so
-	// equal-timestamp lines keep their authored order.
-	sort.SliceStable(synced, func(i, j int) bool { return synced[i].TimeMS < synced[j].TimeMS })
+	// A SYLT frame may arrive out of order (the .lrc path is already sorted by ParseLRC).
+	synced = model.NormalizeSyncedLines(synced)
 	if len(synced) == 0 && unsynced == "" {
 		return nil
 	}
@@ -656,6 +654,19 @@ func ParseLRC(text string) (lines []model.SyncedLine, dropped []int) {
 	return out, dropped
 }
 
+// FormatLRC prints synced lines as .lrc text, one line each, as the catalog stores them
+// (model.NormalizeSyncedLines), which is what ParseLRC reads back: a time outside the
+// stored range would print as a timestamp no parser takes, or wrap around. A line break
+// inside a line's text prints as a space.
+func FormatLRC(lines []model.SyncedLine) string {
+	lines = model.NormalizeSyncedLines(lines)
+	out := make([]waxlabel.SyncedLine, len(lines))
+	for i, ln := range lines {
+		out[i] = waxlabel.SyncedLine{Time: time.Duration(ln.TimeMS) * time.Millisecond, Text: ln.Text}
+	}
+	return waxlabel.FormatLRC(out)
+}
+
 // dropLRCSectionHeaders removes the 1-based line numbers naming a bare section
 // header from dropped. It numbers the lines exactly as the parser does, with the BOM
 // stripped and CR and CRLF read as LF, or the two counts would disagree.
@@ -700,6 +711,24 @@ func isLRCSectionHeader(line string) bool {
 // files.
 func LRCPartial(lines []model.SyncedLine, dropped []int) bool {
 	return len(lines) > 0 && len(dropped) > 0
+}
+
+// LRCPartialDetail summarizes a partly-timed .lrc as a count plus the first offending
+// line. It leaves the dropped list unserialized: the message needs to stay bounded
+// and actionable, and a mostly-untimed file would otherwise carry thousands of
+// numbers.
+//
+// It reports the dropped count and the timed count separately rather than as "N of M
+// lines", because the two do not share a denominator. Dropped counts input lines,
+// while one input line carrying several leading timestamps yields a timed entry per
+// tag, so adding them would state a line total the file does not have.
+func LRCPartialDetail(lines []model.SyncedLine, dropped []int) string {
+	first := 0
+	if len(dropped) > 0 {
+		first = dropped[0]
+	}
+	return fmt.Sprintf("%d line(s) had no usable timestamp (first at line %d); %d timed lyric(s) parsed",
+		len(dropped), first, len(lines))
 }
 
 // chaptersFromDoc projects a Document's embedded navigation chapters (M4B Nero/

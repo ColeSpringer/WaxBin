@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -19,17 +21,15 @@ type detachedFile struct {
 	display   string
 	size      int64
 	essence   sql.NullString
-	// itemPID is the item the file backed, for reporting and for the delta a later
-	// purge emits. It is the primary item when the file has a primary edge, and any
-	// linked item otherwise: a multi-file book's non-first parts are 'part' edges, so
-	// requiring 'primary' left every trashed book part with a blank item. itemKind is
-	// that item's kind, which the pid may not keep (a book carved into a rip hands its
-	// pid to a track), so a file put back stands only for an item of that kind.
+	// itemPID is the item the journal reports for the file (journalItemTx), for reporting
+	// and for the delta a later purge emits. itemKind is that item's kind, which the pid
+	// may not keep (a book carved into a rip hands its pid to a track), so a file put back
+	// stands only for an item of that kind.
 	itemPID  model.PID
 	itemKind string
-	// items is every item the file backed (each track of a rip), for the journal's
-	// trash_item rows.
-	items []int64
+	// edges is the edge the file held on each item it backed (each track of a rip), for
+	// the journal's trash_item rows.
+	edges map[int64]lostEdge
 	// promoted lists the alternates that took the file's place.
 	promoted []model.PromotedFile
 }
@@ -63,10 +63,12 @@ func (s *Store) PlanTrash(ctx context.Context, in model.TrashPending) error {
 			FROM file WHERE id = ?`,
 			string(in.PID), string(itemPID), itemKind, in.TrashPath, in.TrashDisplay, reasonOr(in.Reason),
 			string(in.JobPID), nowNS(), id)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		edges, _, err := itemLostEdgesTx(ctx, tx, id, "")
 		if err == nil {
-			_, err = tx.ExecContext(ctx, `INSERT INTO trash_pending_item(pending_pid, item_pid)
-				SELECT DISTINCT ?, pi.pid FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id WHERE itf.file_id = ?`,
-				string(in.PID), id)
+			err = recordTrashItemsTx(ctx, tx, "trash_pending_item", "pending_pid", string(in.PID), edges)
 		}
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	})
@@ -109,7 +111,7 @@ func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.
 		}
 		trashID, err := r.LastInsertId()
 		if err == nil {
-			err = recordTrashItemsTx(ctx, tx, trashID, d.items)
+			err = recordTrashItemsTx(ctx, tx, "trash_item", "trash_id", trashID, d.edges)
 		}
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -202,21 +204,15 @@ func (b *detachBatch) detachTx(ctx context.Context, tx *sql.Tx, fileID int64) (*
 		return nil, err
 	}
 
-	// Every item linked to this file, and the one the journal records, captured
-	// before the cascade removes the edges. The primary edge is preferred, and any
-	// linked item stands in when there is none: a book part is a 'part' edge, so
-	// insisting on 'primary' recorded a blank item for it. A part file has exactly
-	// one linked item; a single-file rip backing several virtual tracks has one per
-	// track, each of them primary, so that case already picks arbitrarily.
-	itemIDs, err := itemIDsForFile(ctx, tx, d.id)
-	if err != nil {
-		return nil, err
-	}
-	d.items = itemIDs
+	// Every item linked to this file with the edge it holds, and the one the journal
+	// records, captured before the cascade removes the edges. The items are walked in
+	// id order.
 	lost, books, err := itemLostEdgesTx(ctx, tx, d.id, d.essence.String)
 	if err != nil {
 		return nil, err
 	}
+	d.edges = lost
+	itemIDs := slices.Sorted(maps.Keys(lost))
 	if d.itemPID, d.itemKind, err = journalItemTx(ctx, tx, d.id); err != nil {
 		return nil, err
 	}
@@ -329,43 +325,40 @@ func (b *detachBatch) settleTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// journalItemTx returns the item a trash journal row records for a file: the item of its
-// primary edge, else any item it backs (a book's later parts are part edges), the lowest
-// id first; none for a file that backs no item.
+// openingEdgeOrder orders a file's edges (alias itf) so the first is on the item the file
+// is reported under. Of a rip's tracks that is the one whose window opens the file,
+// whatever role each edge has: a copy can hold one track as its primary and the rest as
+// alternates. A file its items hold whole has no window, so there it is the item the file
+// is the primary of, else the lowest id (a book's later parts are part edges, and
+// insisting on a primary once journaled a blank item for them). The trash journal,
+// FileOwner and fileOccupantsQ all read by it, so TrashEntry.ItemPID, a delete's owner
+// and an import's AlreadyPresentPID name the same item.
+const openingEdgeOrder = `itf.start_frames, itf.role = 'primary' DESC, itf.item_id`
+
+// journalItemTx returns the item a trash journal row records for a file and its kind, the
+// first by openingEdgeOrder, or none for a file that backs no item.
 func journalItemTx(ctx context.Context, tx *sql.Tx, fileID int64) (model.PID, string, error) {
 	var pid model.PID
 	var kind string
 	err := tx.QueryRowContext(ctx, `SELECT pi.pid, pi.kind FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
-		WHERE itf.file_id = ? ORDER BY itf.role = 'primary' DESC, itf.item_id LIMIT 1`, fileID).Scan(&pid, &kind)
+		WHERE itf.file_id = ? ORDER BY `+openingEdgeOrder+` LIMIT 1`, fileID).Scan(&pid, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
 	return pid, kind, err
 }
 
-// itemIDsForFile returns the distinct item ids linked to a file by any role, in id
-// order so a caller that picks one of them picks deterministically.
-func itemIDsForFile(ctx context.Context, tx *sql.Tx, fileID int64) ([]int64, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? ORDER BY item_id", fileID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-const trashCols = `trash.pid, trash.item_pid, trash.orig_path, trash.orig_display, trash.trash_path,
+const trashCols = `trash.id, trash.pid, trash.item_pid, trash.orig_path, trash.orig_display, trash.trash_path,
 	trash.trash_display, trash.reason, trash.size, trash.trashed_at, COALESCE(trash.restored_at, 0),
-	COALESCE((SELECT l.pid FROM library l WHERE l.id = trash.library_id), '')`
+	COALESCE((SELECT l.pid FROM library l WHERE l.id = trash.library_id), ''), COALESCE(trash.essence_hash, '')`
+
+// trashRow is a journal row as read: the entry, its row id for the items read after it,
+// and the item a by-item read listed it under.
+type trashRow struct {
+	model.TrashEntry
+	id   int64
+	item model.PID
+}
 
 // TrashEntries lists trash journal rows, newest first. includeRestored controls
 // whether already-restored rows are returned; trashedBefore, when nonzero, keeps
@@ -374,7 +367,17 @@ const trashCols = `trash.pid, trash.item_pid, trash.orig_path, trash.orig_displa
 // index on purpose: the journal is small and shrinks on purge. A lookup by item
 // pid is keyed rather than scanned; see ActiveTrashForItems.
 func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, trashedBefore int64, limit int) ([]model.TrashEntry, error) {
-	const op = "store.TrashEntries"
+	return s.trashListing(ctx, "store.TrashEntries", includeRestored, trashedBefore, limit, trashWithItems)
+}
+
+// TrashJournal is TrashEntries without each entry's Items, for a caller working on the
+// trashed files themselves (a purge, a sweep), which a read of every entry's items would
+// only slow down.
+func (s *Store) TrashJournal(ctx context.Context, includeRestored bool, trashedBefore int64, limit int) ([]model.TrashEntry, error) {
+	return s.trashListing(ctx, "store.TrashJournal", includeRestored, trashedBefore, limit, trashJournalOnly)
+}
+
+func (s *Store) trashListing(ctx context.Context, op string, includeRestored bool, trashedBefore int64, limit int, read trashRead) ([]model.TrashEntry, error) {
 	q := "SELECT " + trashCols + " FROM trash WHERE 1=1"
 	var args []any
 	if !includeRestored {
@@ -389,35 +392,29 @@ func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, trashedB
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.rdb().QueryContext(ctx, q, args...)
+	rows, err := s.trashRows(ctx, q, args, read)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	defer rows.Close()
 	var out []model.TrashEntry
-	for rows.Next() {
-		e, err := scanTrashEntry(rows)
-		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		out = append(out, *e)
+	for _, r := range rows {
+		out = append(out, r.TrashEntry)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ActiveTrashByPID returns an un-restored trash entry, or CodeNotFound.
 func (s *Store) ActiveTrashByPID(ctx context.Context, trashPID model.PID) (*model.TrashEntry, error) {
 	const op = "store.ActiveTrashByPID"
-	row := s.rdb().QueryRowContext(ctx,
-		"SELECT "+trashCols+" FROM trash WHERE pid = ? AND restored_at IS NULL", string(trashPID))
-	e, err := scanTrashEntry(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no active trash entry: "+string(trashPID))
-	}
+	rows, err := s.trashRows(ctx, "SELECT "+trashCols+" FROM trash WHERE pid = ? AND restored_at IS NULL",
+		[]any{string(trashPID)}, trashWithItems)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return e, nil
+	if len(rows) == 0 {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no active trash entry: "+string(trashPID))
+	}
+	return &rows[0].TrashEntry, nil
 }
 
 // ActiveTrashForItems returns the restorable trash entries for each of the given
@@ -436,35 +433,93 @@ func (s *Store) ActiveTrashForItems(ctx context.Context, itemPIDs []model.PID) (
 	if len(itemPIDs) == 0 {
 		return nil, nil
 	}
-	// chunkSlice splits the input as given, so without the dedup a repeated pid lands
-	// in two chunks and its entries are appended twice.
-	unique := uniquePIDs(itemPIDs)
+	rows, err := s.trashRows(ctx, "SELECT "+trashCols+", ti.item_pid FROM trash_item ti JOIN trash ON trash.id = ti.trash_id"+
+		" WHERE trash.restored_at IS NULL AND ti.item_pid IN "+inArray+
+		" ORDER BY ti.item_pid, trash.trashed_at DESC", []any{pidArray(itemPIDs)}, trashByItem)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	out := make(map[model.PID][]model.TrashEntry)
-	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
-		args := make([]any, 0, len(chunk))
-		for _, pid := range chunk {
-			args = append(args, string(pid))
-		}
-		rows, err := s.rdb().QueryContext(ctx,
-			"SELECT "+trashCols+", ti.item_pid FROM trash_item ti JOIN trash ON trash.id = ti.trash_id"+
-				" WHERE trash.restored_at IS NULL AND ti.item_pid IN "+placeholders(len(args))+
-				" ORDER BY ti.item_pid, trash.trashed_at DESC", args...)
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var item model.PID
-			e, err := scanTrashEntry(rows, &item)
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			out[item] = append(out[item], *e)
-		}
-		return waxerr.Wrap(waxerr.CodeIO, op, rows.Err())
-	})
+	for _, r := range rows {
+		out[r.item] = append(out[r.item], r.TrashEntry)
+	}
+	return out, nil
+}
+
+// trashRead is what a read of the journal fetches beside its rows.
+type trashRead int
+
+const (
+	trashJournalOnly trashRead = iota // the rows alone, Items left empty
+	trashWithItems                    // each row's Items
+	// trashByItem is trashWithItems for a query that adds the item each row is listed
+	// under, which repeats an entry under each of its items.
+	trashByItem
+)
+
+// trashRows runs a listing of trashCols and, unless it is the journal alone, reads each
+// row's items in the same read transaction, so an entry purged meanwhile cannot come back
+// without them. Every row has an Items slice of its own, in window order and then by
+// pid.
+func (s *Store) trashRows(ctx context.Context, q string, args []any, read trashRead) ([]trashRow, error) {
+	tx, err := s.rdb().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []trashRow
+	var ids []int64
+	for rows.Next() {
+		var r trashRow
+		var pid, itemPID, libPID string
+		dest := []any{&r.id, &pid, &itemPID, &r.OrigPath, &r.OrigDisplay, &r.TrashPath, &r.TrashDisplay,
+			&r.Reason, &r.Size, &r.TrashedAt, &r.RestoredAt, &libPID, &r.EssenceHash}
+		if read == trashByItem {
+			dest = append(dest, &r.item)
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		r.PID, r.ItemPID, r.LibraryPID = model.PID(pid), model.PID(itemPID), model.PID(libPID)
+		out = append(out, r)
+		ids = append(ids, r.id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if read == trashJournalOnly {
+		return out, nil
+	}
+	items := map[int64][]model.TrashItem{}
+	itemRows, err := tx.QueryContext(ctx, `SELECT trash_id, item_pid, start_frames, end_frames FROM trash_item
+		WHERE trash_id IN `+inArray+` ORDER BY trash_id, start_frames, item_pid`, idArray(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer itemRows.Close()
+	for itemRows.Next() {
+		var id int64
+		var it model.TrashItem
+		var start, end sql.NullInt64
+		if err := itemRows.Scan(&id, &it.ItemPID, &start, &end); err != nil {
+			return nil, err
+		}
+		it.Virtual, it.StartFrames, it.EndFrames = start.Valid, start.Int64, end.Int64
+		items[id] = append(items[id], it)
+	}
+	if err := itemRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Items = items[out[i].id]
+		if read == trashByItem {
+			out[i].Items = slices.Clone(out[i].Items)
+		}
 	}
 	return out, nil
 }
@@ -514,11 +569,13 @@ func (s *Store) DeleteTrashRow(ctx context.Context, trashPID model.PID) error {
 	})
 }
 
-// recordTrashItemsTx writes a journal row's trash_item rows: the items its file backed.
-func recordTrashItemsTx(ctx context.Context, tx *sql.Tx, trashID int64, items []int64) error {
-	for _, id := range items {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO trash_item(trash_id, item_pid)
-			SELECT ?, pid FROM playable_item WHERE id = ?`, trashID, id); err != nil {
+// recordTrashItemsTx writes the items a file backed, each with the window its edge gave
+// it, as a journal row's trash_item rows or a pending move's (table, and the column
+// holding key).
+func recordTrashItemsTx(ctx context.Context, tx *sql.Tx, table, keyCol string, key any, edges map[int64]lostEdge) error {
+	for id, e := range edges {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+`(`+keyCol+`, item_pid, start_frames, end_frames)
+			SELECT ?, pid, ?, ? FROM playable_item WHERE id = ?`, key, e.start, e.end, id); err != nil {
 			return err
 		}
 	}
@@ -534,20 +591,6 @@ func logTrashItemsTx(ctx context.Context, tx *sql.Tx, cond string, args ...any) 
 		JOIN playable_item pi ON pi.pid = ti.item_pid WHERE `+cond+` GROUP BY pi.id ORDER BY pi.id`,
 		append([]any{nowNS()}, args...)...)
 	return err
-}
-
-// scanTrashEntry reads a row of trashCols, then into extra any columns the query added.
-func scanTrashEntry(sc rowScanner, extra ...any) (*model.TrashEntry, error) {
-	var e model.TrashEntry
-	var pid, itemPID, libPID string
-	if err := sc.Scan(append([]any{&pid, &itemPID, &e.OrigPath, &e.OrigDisplay, &e.TrashPath, &e.TrashDisplay,
-		&e.Reason, &e.Size, &e.TrashedAt, &e.RestoredAt, &libPID}, extra...)...); err != nil {
-		return nil, err
-	}
-	e.PID = model.PID(pid)
-	e.ItemPID = model.PID(itemPID)
-	e.LibraryPID = model.PID(libPID)
-	return &e, nil
 }
 
 func reasonOr(reason string) string {

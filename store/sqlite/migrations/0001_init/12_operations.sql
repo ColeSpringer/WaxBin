@@ -95,10 +95,14 @@ CREATE INDEX trash_essence ON trash(essence_hash) WHERE restored_at IS NULL;
 
 -- Every item a trashed file backed: one for a track or a book part, each track of a rip
 -- carved into virtual tracks. trash.item_pid is the one the journal reports; whether an
--- item is restorable, and which items a purge announces, read these.
+-- item is restorable, and which items a purge announces, read these. The frames are the
+-- window the file's edge gave the item, as item_file holds them: a NULL start for a
+-- whole-file edge, a NULL end for a window running to the file's end.
 CREATE TABLE trash_item (
-  trash_id INTEGER NOT NULL REFERENCES trash(id) ON DELETE CASCADE,
-  item_pid TEXT    NOT NULL,
+  trash_id     INTEGER NOT NULL REFERENCES trash(id) ON DELETE CASCADE,
+  item_pid     TEXT    NOT NULL,
+  start_frames INTEGER,
+  end_frames   INTEGER,
   PRIMARY KEY (trash_id, item_pid)
 ) WITHOUT ROWID;
 CREATE INDEX trash_item_pid ON trash_item(item_pid);
@@ -121,11 +125,14 @@ CREATE TABLE trash_pending (
   job_pid       TEXT,
   created_at    INTEGER NOT NULL
 );
--- The items a pending move's file backed when it was planned, which the trash_item rows
--- take from a recovery that finds the file row gone.
+-- The items a pending move's file backed when it was planned, each with its window as
+-- trash_item holds it, which the trash_item rows take from a recovery that finds the file
+-- row gone.
 CREATE TABLE trash_pending_item (
-  pending_pid TEXT NOT NULL REFERENCES trash_pending(pid) ON DELETE CASCADE,
-  item_pid    TEXT NOT NULL,
+  pending_pid  TEXT NOT NULL REFERENCES trash_pending(pid) ON DELETE CASCADE,
+  item_pid     TEXT NOT NULL,
+  start_frames INTEGER,
+  end_frames   INTEGER,
   PRIMARY KEY (pending_pid, item_pid)
 ) WITHOUT ROWID;
 

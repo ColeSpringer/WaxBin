@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -149,8 +148,7 @@ func parseLRC(text string) []model.SyncedLine {
 			out = append(out, model.SyncedLine{TimeMS: t, Text: lineText})
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].TimeMS < out[j].TimeMS })
-	return out
+	return model.NormalizeSyncedLines(out)
 }
 
 // lrcTimestampMS converts an LRC timestamp's minute/second/fraction fields to

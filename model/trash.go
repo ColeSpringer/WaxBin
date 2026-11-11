@@ -83,7 +83,8 @@ type TrashEntry struct {
 	PID PID
 	// ItemPID is the item the journal reports for the file, the first track of a rip. A
 	// file backing several items restores all of them, and RestorableTrash lists the entry
-	// under each, so match an entry to an item by that key, never by this field.
+	// under each, so match an entry to an item by that key or through Items, never by this
+	// field.
 	ItemPID      PID
 	OrigPath     []byte
 	OrigDisplay  string
@@ -96,6 +97,36 @@ type TrashEntry struct {
 	// LibraryPID is the library the file was trashed from, empty when the journal row
 	// records none.
 	LibraryPID PID
+	// EssenceHash is the file's audio as its row read when the trash took it (what
+	// File.EssenceHash answered then, the catalog's last reading rather than a hash taken
+	// at the trash), empty when the row had none.
+	EssenceHash string
+	// Items is every item the file backed, each with the window this file gave it, in
+	// window order: one for a track or a book part, each track of a rip. It is empty for a
+	// file that backed no item, and a pid in it may no longer name an item.
+	Items []TrashItem
+}
+
+// Item returns what the entry records for one of the items its file backed.
+func (e TrashEntry) Item(pid PID) (TrashItem, bool) {
+	for _, it := range e.Items {
+		if it.ItemPID == pid {
+			return it, true
+		}
+	}
+	return TrashItem{}, false
+}
+
+// TrashItem is one item a trashed file backed and the part of the file it played. Virtual
+// and the frames read as ItemView's do: a whole-file item has none, and EndFrames is 0 for
+// a window running to the file's end. The window is the trashed file's own, so for a copy
+// of a rip it is the copy's sheet's, which the item's view does not show while the copy
+// is an alternate.
+type TrashItem struct {
+	ItemPID     PID
+	Virtual     bool
+	StartFrames int64
+	EndFrames   int64
 }
 
 // TrashFileInput records a file that was moved into the trash on disk so the
