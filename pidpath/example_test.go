@@ -2,23 +2,35 @@ package pidpath_test
 
 // The WaxFlow half of the pid: integration, kept here rather than in the package.
 //
-// pidpath names no transcoder. The forty-odd lines that do are a consequence of
-// choosing WaxFlow, and belong to whoever chose it. They live as Examples so
+// pidpath names no transcoder. The glue that does is a consequence of choosing
+// WaxFlow, and belongs to whoever chose it. It lives as Examples so
 // `go build ./...` and `go vet ./...` stop them rotting, and so waxbin_e2e_test.go
 // can drive this exact code against a real catalog: the documented integration is
 // then the one under test rather than a second copy of it.
 //
-// Read them cold. If the adapter and the URL builder are not obviously what a
+// There are two ways in. pidResolver is for a build that links WaxFlow's server and
+// hands it a resolver. lookupHandler is for a stock WaxFlow daemon, which asks a host
+// over HTTP what a pid names (its pidLookupURL setting) and opens the answer under
+// its own roots.
+//
+// Read them cold. If the adapters and the URL builder are not obviously what a
 // consumer would write unaided, the split is in the wrong place.
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
@@ -61,7 +73,8 @@ func (r *pidResolver) Resolve(ctx context.Context, ref string) (*source.File, er
 	}
 	// The cached path is gone: a rename landed between polls. Relocate drops the stale
 	// entry and re-asks the catalog, which heals it without waiting for the next tick.
-	// One retry is enough: a second failure is a real missing file.
+	// One retry is enough: a second failure is a real missing file. A library that is
+	// gone altogether is Relocate's own error, which mapErr answers as a wait.
 	loc, err = r.cache.Relocate(ctx, pid)
 	if err != nil {
 		return nil, mapErr(pid, err)
@@ -72,6 +85,11 @@ func (r *pidResolver) Resolve(ctx context.Context, ref string) (*source.File, er
 // mapErr translates WaxBin's error vocabulary into WaxFlow's, so it stops at this
 // boundary. It is the outbound mirror of waxbin/decode's inbound mapErr.
 func mapErr(pid model.PID, err error) error {
+	if errors.Is(err, pidpath.ErrLibraryDown) {
+		// The server answers this code as retryable, and a job holds until the drive
+		// is back.
+		return flowerr.New(flowerr.CodeRootUnavailable, fmt.Sprintf("source: the library holding %s is unavailable", pid))
+	}
 	switch waxerr.CodeOf(err) {
 	case waxerr.CodeNotFound:
 		return flowerr.New(flowerr.CodeNotFound, fmt.Sprintf("source: no catalog item %s", pid))
@@ -81,6 +99,66 @@ func mapErr(pid model.PID, err error) error {
 		return flowerr.Wrap(flowerr.CodeCanceled, "source: catalog lookup", err)
 	default:
 		return flowerr.Wrap(flowerr.CodeCatalogUnavailable, "source: catalog lookup", err)
+	}
+}
+
+// lookupHandler answers a stock WaxFlow daemon's pid lookups: GET /<ULID> returns
+// {"ref": "<root>/<path>"}, the item's file as a reference under one of the daemon's
+// roots. The daemon names each root after the library's pid, so the reference comes
+// from the Location alone and nothing here has to follow a relocated library. Like
+// pidResolver it names the whole file, and a virtual track's window rides on the
+// request.
+//
+// The statuses are the daemon's contract: 404 is no such item, 400 an id it should
+// not have asked about, and 401 or any 5xx this host being down for now, which the
+// daemon retries. No Cache-Control goes out, so the daemon asks every time and the
+// cache here is the only one a rename has to reach.
+type lookupHandler struct {
+	cache *pidpath.Cache
+	// key is the daemon's pidLookupKey, the bearer token it sends; empty takes any caller.
+	key string
+	// local says this host reads the library at the catalog's own paths. A path gone
+	// from its disk is then resolved again before it is answered, as pidResolver does
+	// on a failed open. Without it nothing here touches the library, and a rename is
+	// followed at the cache's next poll.
+	local bool
+}
+
+func (h *lookupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.key != "" {
+		sent, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(sent), []byte(h.key)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+	pid := model.PID(strings.TrimPrefix(r.URL.Path, "/"))
+	if r.Method != http.MethodGet || !pid.Valid() {
+		http.Error(w, "not a pid", http.StatusBadRequest)
+		return
+	}
+	loc, err := h.cache.Locate(r.Context(), pid)
+	if err == nil && h.local && loc.Path != "" {
+		if _, serr := os.Stat(loc.Path); errors.Is(serr, fs.ErrNotExist) {
+			// A library that is down keeps the reference it had: the daemon reads a
+			// mount of its own and answers for what it finds there.
+			if fresh, rerr := h.cache.Relocate(r.Context(), pid); !errors.Is(rerr, pidpath.ErrLibraryDown) {
+				loc, err = fresh, rerr
+			}
+		}
+	}
+	switch {
+	case waxerr.Is(err, waxerr.CodeNotFound), err == nil && (loc.RelPath == "" || !utf8.ValidString(loc.RelPath)):
+		// There is nothing to name for an item with no file (an episode not downloaded
+		// yet), and no way to name a file whose name is not UTF-8, which JSON cannot hold.
+		http.Error(w, "no such item", http.StatusNotFound)
+	case err != nil:
+		http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"ref": loc.LibraryPID.String() + "/" + filepath.ToSlash(loc.RelPath),
+		})
 	}
 }
 
@@ -150,6 +228,31 @@ func ExampleNew() {
 	defer srv.Close()
 
 	log.Fatal(http.ListenAndServe(":8080", srv))
+}
+
+// Answering a stock WaxFlow daemon from the process that holds the catalog. The
+// daemon needs one root per library, named by the library's pid, and its
+// pidLookupURL and pidLookupKey pointed here:
+//
+//	roots:        [{"name": "01J0...", "path": "/mnt/music"}]
+//	pidLookupURL: http://127.0.0.1:8090/pid
+//	pidLookupKey: ...
+//
+// Its path for a root is its own mount of the library, which need not be the path
+// the catalog knows it by. A host that does read the library at the catalog's paths
+// sets local on the handler.
+func ExampleOpen() {
+	ctx := context.Background()
+
+	cache, err := pidpath.Open(ctx, pidpath.Options{DBPath: "catalog.db"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cache.Close()
+
+	mux := http.NewServeMux()
+	mux.Handle("/pid/", http.StripPrefix("/pid", &lookupHandler{cache: cache, key: "..."}))
+	log.Fatal(http.ListenAndServe("127.0.0.1:8090", mux))
 }
 
 // Playing one item: Locate it, then let Span put the window on the request. A

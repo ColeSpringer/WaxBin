@@ -8,7 +8,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -22,8 +24,29 @@ func main() {
 	if err != nil {
 		// Cobra already prints the error; map it to a stable exit code.
 		fmt.Fprintln(os.Stderr, "waxbin: "+err.Error())
+		if hint := respelledPIDHint(err, os.Args[1:]); hint != "" {
+			fmt.Fprintln(os.Stderr, "waxbin: "+hint)
+		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// respelledPIDHint says how a pid among args should be spelled when a command found
+// nothing. A pid is matched as text in upper case, so one typed in lower case reads as
+// no such item, and nothing else tells the user why.
+func respelledPIDHint(err error, args []string) string {
+	if !waxerr.Is(err, waxerr.CodeNotFound) {
+		return ""
+	}
+	for _, a := range args {
+		if flag, v, ok := strings.Cut(a, "="); ok && strings.HasPrefix(flag, "-") {
+			a = v
+		}
+		if up := strings.ToUpper(a); up != a && model.PID(up).Valid() {
+			return "a pid is written in upper case: " + up
+		}
+	}
+	return ""
 }
 
 // Exit codes are part of the public contract (see the exit-codes command).

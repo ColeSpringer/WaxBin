@@ -152,10 +152,10 @@ func TestAuditProbeReportsToleratedDamage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a cut wavpack must not fail the probe; it decodes: %v", err)
 	}
-	if len(damage) == 0 {
+	if damage == "" {
 		t.Error("damage is empty for a wavpack cut at 60%; the decoder worked around the shortfall")
 	}
-	if damage, err = probe(ctx, good); err != nil || len(damage) != 0 {
+	if damage, err = probe(ctx, good); err != nil || damage != "" {
 		t.Errorf("intact wavpack = damage %q, err %v; want neither", damage, err)
 	}
 }

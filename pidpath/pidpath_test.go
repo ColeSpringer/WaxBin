@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,6 +34,9 @@ type fakeCatalog struct {
 	// batches records each GetMany's pid argument, so a test can assert exactly
 	// which pids a batch went to the catalog for (the cache hits must not).
 	batches [][]model.PID
+	// libs are the registered libraries, and libReads counts the reads of them.
+	libs     []*model.Library
+	libReads int
 }
 
 func newFakeCatalog() *fakeCatalog {
@@ -128,6 +132,27 @@ func (f *fakeCatalog) LatestChangeSeq(context.Context) (int64, error) {
 	return f.headLocked(), nil
 }
 
+func (f *fakeCatalog) Libraries(context.Context) ([]*model.Library, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.libReads++
+	return f.libs, nil
+}
+
+// setFiled catalogs a whole-file item under a library, which it registers at root.
+func (f *fakeCatalog) setFiled(pid, lib model.PID, root, path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.items[pid] = &model.ItemView{PID: pid, FilePID: model.NewPID(), LibraryPID: lib, Path: []byte(path)}
+	for _, l := range f.libs {
+		if l.PID == lib {
+			l.Root = []byte(root)
+			return
+		}
+	}
+	f.libs = append(f.libs, &model.Library{PID: lib, Root: []byte(root)})
+}
+
 func (f *fakeCatalog) headLocked() int64 {
 	var head int64
 	for _, ch := range f.rows {
@@ -204,6 +229,153 @@ func TestLocateCaches(t *testing.T) {
 	}
 	if fake.gets != 1 {
 		t.Fatalf("catalog queries = %d, want 1 (second locate must hit the cache)", fake.gets)
+	}
+}
+
+// TestLocationCarriesTheRootAndThePathBelowIt: a location names its library's root and
+// the path below it, read from the catalog with the item. A path the catalog does not
+// hold under that root has no relative path, and a fileless item asks for no roots.
+func TestLocationCarriesTheRootAndThePathBelowIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fake := newFakeCatalog()
+	root := filepath.Join(t.TempDir(), "lib")
+	lib, under, outside, fileless := model.NewPID(), model.NewPID(), model.NewPID(), model.NewPID()
+	fake.setFiled(under, lib, root, filepath.Join(root, "Artist", "Album", "01.flac"))
+	fake.setFiled(outside, lib, root, filepath.Join(filepath.Dir(root), "elsewhere", "02.flac"))
+	fake.setItem(fileless, "", "")
+	c := newTestCache(t, fake)
+
+	loc, err := c.Locate(ctx, under)
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if want := filepath.Join("Artist", "Album", "01.flac"); loc.Root != root || loc.RelPath != want || loc.LibraryPID != lib {
+		t.Errorf("location = %+v, want root %q and rel path %q in %s", loc, root, want, lib)
+	}
+	if loc, err = c.Locate(ctx, outside); err != nil || loc.Root != root || loc.RelPath != "" {
+		t.Errorf("a path outside its root = %+v (err %v), want the root and no rel path", loc, err)
+	}
+	reads := fake.libReads
+	if loc, err = c.Locate(ctx, fileless); err != nil || loc.Root != "" || loc.RelPath != "" {
+		t.Errorf("a fileless item = %+v (err %v), want neither", loc, err)
+	}
+	if fake.libReads != reads {
+		t.Error("a fileless item read the libraries; it has no root to look up")
+	}
+
+	// A batch reads the roots once for all its misses.
+	fake2 := newFakeCatalog()
+	a, b := model.NewPID(), model.NewPID()
+	fake2.setFiled(a, lib, root, filepath.Join(root, "a.flac"))
+	fake2.setFiled(b, lib, root, filepath.Join(root, "sub", "b.flac"))
+	got, err := newTestCache(t, fake2).LocateMany(ctx, []model.PID{a, b})
+	if err != nil || got[a].RelPath != "a.flac" || got[b].RelPath != filepath.Join("sub", "b.flac") {
+		t.Errorf("LocateMany = %+v (err %v), want both paths below the root", got, err)
+	}
+	if fake2.libReads != 1 {
+		t.Errorf("a batch read the libraries %d times, want once", fake2.libReads)
+	}
+}
+
+// TestRelocateRefusesALibraryThatIsDown: a path is gone when its whole library is, and
+// then nothing is stale. Relocate says so with ErrLibraryDown, keeps the entry, and
+// asks the catalog nothing, where a file gone from a library that is there is resolved
+// again.
+func TestRelocateRefusesALibraryThatIsDown(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fake := newFakeCatalog()
+	root := filepath.Join(t.TempDir(), "lib")
+	if err := os.MkdirAll(filepath.Join(root, "kept"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lib, pid := model.NewPID(), model.NewPID()
+	fake.setFiled(pid, lib, root, filepath.Join(root, "gone.flac"))
+	c := newTestCache(t, fake)
+	if _, err := c.Locate(ctx, pid); err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+
+	// The library is there and the file is not: a stale entry, resolved again.
+	fake.setFiled(pid, lib, root, filepath.Join(root, "moved.flac"))
+	loc, err := c.Relocate(ctx, pid)
+	if err != nil || loc.RelPath != "moved.flac" {
+		t.Fatalf("Relocate in a library that is there = %+v (err %v), want the fresh path", loc, err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		down func()
+		up   func()
+	}{
+		{"a folder that is gone",
+			func() { mustRename(t, root, root+".away") }, func() { mustRename(t, root+".away", root) }},
+		{"a mount point without its drive, a folder holding nothing",
+			func() { mustRename(t, root, root+".away"); mustMkdir(t, root) },
+			func() { mustRemove(t, root); mustRename(t, root+".away", root) }},
+		{"a file where the folder was",
+			func() { mustRename(t, root, root+".away"); mustWrite(t, root) },
+			func() { mustRemove(t, root); mustRename(t, root+".away", root) }},
+	} {
+		tc.down()
+		gets := fake.gets
+		_, err := c.Relocate(ctx, pid)
+		if !errors.Is(err, ErrLibraryDown) || waxerr.CodeOf(err) != waxerr.CodeIO {
+			t.Errorf("%s: Relocate = %v, want ErrLibraryDown as an io error", tc.name, err)
+		}
+		if _, ok := c.Cached(pid); !ok {
+			t.Errorf("%s: the entry was dropped; nothing about it is stale", tc.name)
+		}
+		if fake.gets != gets {
+			t.Errorf("%s: the catalog was asked; a retry while the drive is out must cost no query", tc.name)
+		}
+		tc.up()
+		if _, err := c.Relocate(ctx, pid); err != nil {
+			t.Errorf("%s: Relocate once the library is back = %v", tc.name, err)
+		}
+	}
+
+	// A fileless item has no library to be down.
+	fileless := model.NewPID()
+	fake.setItem(fileless, "", "")
+	if _, err := c.Relocate(ctx, fileless); err != nil {
+		t.Errorf("Relocate of a fileless item = %v", err)
+	}
+	// A canceled caller hears that, not a verdict on the library.
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	mustRename(t, root, root+".away")
+	if _, err := c.Relocate(canceled, pid); !waxerr.Is(err, waxerr.CodeCanceled) || errors.Is(err, ErrLibraryDown) {
+		t.Errorf("Relocate under a canceled context = %v, want a cancellation", err)
+	}
+}
+
+func mustRename(t *testing.T, from, to string) {
+	t.Helper()
+	if err := os.Rename(from, to); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustMkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustRemove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWrite(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

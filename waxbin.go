@@ -364,26 +364,26 @@ func libraryProfile(set *organize.ProfileSet, op string, lib *model.Library, ove
 // A parse that succeeds but reports the audio truncated fails the probe too, since
 // the decoder tolerates a tail the container's own header says is short. Damage the
 // decode did tolerate is returned rather than raised: the file plays, and the
-// auditor reports it at warn.
+// auditor reports it at warn, in the words the analyze pass would store for it.
 func auditProbe(r meta.Inspector, eng *decode.Engine) audit.AudioProbe {
-	return func(ctx context.Context, p string) ([]string, error) {
+	return func(ctx context.Context, p string) (string, error) {
 		fm, err := r.Inspect(ctx, p)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		for _, d := range fm.Diagnostics {
 			if d.Code == model.DiagCorruptAudio && d.Severity == model.SeverityError {
-				return nil, waxerr.New(waxerr.CodeInvalid, "audit probe", d.Detail)
+				return "", waxerr.New(waxerr.CodeInvalid, "audit probe", d.Detail)
 			}
 		}
 		m, err := eng.Measure(ctx, p, nil)
 		if err != nil {
 			if errors.Is(err, decode.ErrUnsupported) {
-				return nil, nil
+				return "", nil
 			}
-			return nil, err
+			return "", err
 		}
-		return m.InputDamage, nil
+		return m.DamageDetail(), nil
 	}
 }
 

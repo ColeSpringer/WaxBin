@@ -11,8 +11,8 @@
 //
 // This package deliberately does not open the file or speak any transcoder's
 // vocabulary. Locate returns a Location and the caller opens it. Naming a decoder
-// here would bless one, and the forty-odd lines of glue that name one belong to
-// whoever chose it; the Examples in this package's tests carry the WaxFlow version.
+// here would bless one, and the glue that names one belongs to whoever chose it; the
+// Examples in this package's tests carry the WaxFlow version.
 //
 // A consumer's own byte identity (a signed URL, a cache key) should stay independent
 // of catalog state: a rename must not kill URLs or cache entries for unchanged bytes.
@@ -20,16 +20,21 @@ package pidpath
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/colespringer/waxflow/cue"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/internal/fsx"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -57,6 +62,7 @@ type catalog interface {
 	DataVersion(ctx context.Context) (int64, error)
 	Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error)
 	LatestChangeSeq(ctx context.Context) (int64, error)
+	Libraries(ctx context.Context) ([]*model.Library, error)
 }
 
 // Location is where an item's audio lives: the containing file, plus the window
@@ -72,6 +78,14 @@ type Location struct {
 	// It goes stale on a different signal than Path does: a relocate rewrites every
 	// root's paths and leaves the pids alone.
 	LibraryPID model.PID
+	// Root is that library's folder as the catalog spells it, and RelPath is Path below
+	// it, both in the host's own separators. LibraryPID and RelPath name the file to a
+	// consumer that reaches the library through a mount of its own, where Path means
+	// nothing: a daemon in a container, or one that takes root-relative references and
+	// confines each open to its root. Both are empty for a fileless item, and RelPath
+	// for a path the catalog does not hold under its library's root.
+	Root    string
+	RelPath string
 
 	// Virtual reports that the item is a window into Path rather than the whole
 	// file. StartFrames/EndFrames are CD frames; EndFrames is 0 when the window
@@ -329,14 +343,81 @@ func (c *Cache) Locate(ctx context.Context, pid model.PID) (Location, error) {
 	return c.lookup(ctx, pid)
 }
 
+// ErrLibraryDown marks Relocate's refusal when the library an item's file sits in is
+// not there to read. Test for it with errors.Is.
+var ErrLibraryDown = errors.New("library is not available")
+
 // Relocate drops any cached entry for pid and resolves it fresh. Call it when
 // opening a Locate result failed because the path is gone: a rename that landed
 // between polls leaves a stale entry, and this heals it without waiting for the next
 // tick. One retry is enough, since a second failure means the file is really missing
 // rather than the cache being stale.
+//
+// A path is also gone when its whole library is, as an unplugged drive leaves it.
+// Nothing is stale or missing then, so Relocate keeps the entry and returns an error
+// matching ErrLibraryDown, which a consumer answers as a wait. The library counts as
+// down when its folder is absent, is not a folder, does not answer in time, or holds
+// nothing, which is how a mount point without its drive looks. A library emptied on
+// purpose looks the same, here as to a scan, which keeps the rows of a root it finds
+// empty.
 func (c *Cache) Relocate(ctx context.Context, pid model.PID) (Location, error) {
+	checked := ""
+	if loc, hit := c.cached(pid); hit {
+		// Asked first, so a down library costs no catalog query per retry.
+		if err := libraryDown(ctx, loc.Root); err != nil {
+			return Location{}, err
+		}
+		checked = loc.Root
+	}
 	c.drop(pid)
-	return c.lookup(ctx, pid)
+	loc, err := c.lookup(ctx, pid)
+	if err != nil {
+		return Location{}, err
+	}
+	if loc.Root != checked {
+		if err := libraryDown(ctx, loc.Root); err != nil {
+			return Location{}, err
+		}
+	}
+	return loc, nil
+}
+
+// libraryDown returns nil when root is a folder holding something, and otherwise an
+// error matching ErrLibraryDown, or ctx's own when ctx ended first. A fileless item
+// has no root and nothing to be down.
+func libraryDown(ctx context.Context, root string) error {
+	const op = "pidpath.Relocate"
+	if root == "" {
+		return nil
+	}
+	// The scan's own root test, bounded: a dead network mount can hold a stat for minutes.
+	err := fsx.RootUnreachableCtx(ctx, root, fsx.RootCheckTimeout)
+	if err == nil {
+		err = emptyFolder(root)
+	}
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return waxerr.FromContext(op, ctx.Err(), waxerr.CodeIO)
+	}
+	return waxerr.Wrapf(waxerr.CodeIO, op, fmt.Errorf("%w: %w", ErrLibraryDown, err), "library root %s", root)
+}
+
+// emptyFolder returns an error for a folder with no entry in it.
+func emptyFolder(root string) error {
+	d, err := os.Open(pathx.Long(root))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if _, err := d.Readdirnames(1); err != nil {
+		if errors.Is(err, io.EOF) {
+			return errors.New("the folder is empty")
+		}
+		return err
+	}
+	return nil
 }
 
 // lookup queries the catalog and caches the result.
@@ -351,13 +432,41 @@ func (c *Cache) lookup(ctx context.Context, pid model.PID) (Location, error) {
 	// on; bridge the lifetime context into this query.
 	stop := context.AfterFunc(c.queryCtx, cancel)
 	defer stop()
-	iv, err := c.catalog().Get(qctx, pid)
+	lib := c.catalog()
+	iv, err := lib.Get(qctx, pid)
 	if err != nil {
 		return Location{}, err
 	}
-	loc := locationOf(iv)
+	roots, err := libraryRoots(qctx, lib, iv)
+	if err != nil {
+		return Location{}, err
+	}
+	loc := locationOf(iv, roots)
 	c.store(pid, loc, gen)
 	return loc, nil
+}
+
+// libraryRoots maps each library the views sit in to its root, and reads nothing when
+// none of them has a file. It reads after the views, so a relocate that lands between
+// the two reads pairs an old path with the new root. That usually gives no RelPath,
+// and the poll drops the entry when it meets the library's change row.
+func libraryRoots(ctx context.Context, lib catalog, views ...*model.ItemView) (map[model.PID]string, error) {
+	filed := false
+	for _, iv := range views {
+		filed = filed || iv.LibraryPID != ""
+	}
+	if !filed {
+		return nil, nil
+	}
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	roots := make(map[model.PID]string, len(libs))
+	for _, l := range libs {
+		roots[l.PID] = string(l.Root)
+	}
+	return roots, nil
 }
 
 // LocateMany resolves a batch of item PIDs, keyed by pid in the result: cache
@@ -397,13 +506,18 @@ func (c *Cache) LocateMany(ctx context.Context, pids []model.PID) (map[model.PID
 	defer cancel()
 	stop := context.AfterFunc(c.queryCtx, cancel)
 	defer stop()
-	views, err := c.catalog().GetMany(qctx, misses)
+	lib := c.catalog()
+	views, err := lib.GetMany(qctx, misses)
+	if err != nil {
+		return nil, err
+	}
+	roots, err := libraryRoots(qctx, lib, views...)
 	if err != nil {
 		return nil, err
 	}
 	resolved := make([]batchLoc, 0, len(views))
 	for _, iv := range views {
-		loc := locationOf(iv)
+		loc := locationOf(iv, roots)
 		out[iv.PID] = loc
 		resolved = append(resolved, batchLoc{pid: iv.PID, loc: loc})
 	}
@@ -411,17 +525,33 @@ func (c *Cache) LocateMany(ctx context.Context, pids []model.PID) (map[model.PID
 	return out, nil
 }
 
-// locationOf projects a catalog item view onto the Location this package serves.
-func locationOf(iv *model.ItemView) Location {
+// locationOf projects a catalog item view onto the Location this package serves. roots
+// maps a library to its root (libraryRoots).
+func locationOf(iv *model.ItemView, roots map[model.PID]string) Location {
+	root := roots[iv.LibraryPID]
 	return Location{
 		Path:        string(iv.Path),
 		FilePID:     iv.FilePID,
 		LibraryPID:  iv.LibraryPID,
+		Root:        root,
+		RelPath:     relPath(root, string(iv.Path)),
 		SampleRate:  iv.SampleRate,
 		Virtual:     iv.Virtual,
 		StartFrames: iv.StartFrames,
 		EndFrames:   iv.EndFrames,
 	}
+}
+
+// relPath is p below root as a scan stores it, and "" when p does not sit under root.
+func relPath(root, p string) string {
+	if root == "" || !pathx.UnderRoot(root, p) {
+		return ""
+	}
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == "." {
+		return ""
+	}
+	return rel
 }
 
 // Poll runs one poll cycle: a cheap DataVersion read and, when it moved, a Changes
@@ -703,7 +833,7 @@ func (c *Cache) dropLocked(pid model.PID) int {
 }
 
 // evictOldestLocked is the cache bound: linear oldest-out, run only on insert at
-// capacity, over entries that are a path, two PIDs, and three ints each.
+// capacity, over entries that are three paths, two PIDs, and three ints each.
 func (c *Cache) evictOldestLocked() {
 	var oldest model.PID
 	minUsed := int64(math.MaxInt64)

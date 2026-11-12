@@ -11,15 +11,21 @@ import (
 // a ULID rendered as its 26-character Crockford base32 string at the boundary;
 // the storage layer may keep a BLOB(16) internal representation. A PID is
 // assigned once and preserved for the life of the entity (see package identity).
+//
+// A PID is matched as text, in the upper-case spelling NewPID writes. A ULID decodes
+// in either case, but nothing here decodes one, so the lower-case spelling of an
+// entity's PID names nothing.
 type PID string
 
 // String returns the PID as a plain string.
 func (p PID) String() string { return string(p) }
 
-// Valid reports whether p parses as a well-formed ULID.
+// Valid reports whether p is a PID as the catalog writes one: a well-formed ULID in
+// its upper-case spelling. Another spelling of the same ULID is not valid, since it
+// would match no entity and, adopted for a new one, would be a second id for the first.
 func (p PID) Valid() bool {
-	_, err := ulid.ParseStrict(string(p))
-	return err == nil
+	id, err := ulid.ParseStrict(string(p))
+	return err == nil && id.String() == string(p)
 }
 
 var (

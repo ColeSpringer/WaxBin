@@ -78,14 +78,14 @@ func TestEveryDiscriminatedFindingHasAReason(t *testing.T) {
 		}
 		return "fresh", nil
 	}
-	probe := func(_ context.Context, p string) ([]string, error) {
+	probe := func(_ context.Context, p string) (string, error) {
 		switch filepath.Base(p) {
 		case "kept.flac":
-			return []string{"frame sync lost"}, nil
+			return "frame sync lost", nil
 		case "rotted.flac":
-			return nil, os.ErrInvalid
+			return "", os.ErrInvalid
 		}
-		return nil, nil
+		return "", nil
 	}
 	for _, tc := range []struct {
 		name  string

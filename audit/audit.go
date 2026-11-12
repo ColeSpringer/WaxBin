@@ -56,9 +56,9 @@ type Store interface {
 type Hasher func(path string) (string, error)
 
 // AudioProbe reads a file's audio essence. A non-nil error means the file is
-// unreadable or corrupt; damage lists what the decoder tolerated on its way to the
-// end, which is a warning rather than a failure.
-type AudioProbe func(ctx context.Context, path string) (damage []string, err error)
+// unreadable or corrupt; damage says what the decoder tolerated on its way to the
+// end, "" for a clean read, which is a warning rather than a failure.
+type AudioProbe func(ctx context.Context, path string) (damage string, err error)
 
 // Config selects which checks run and tunes sampling.
 type Config struct {

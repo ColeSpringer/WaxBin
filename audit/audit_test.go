@@ -348,11 +348,11 @@ func TestAuditIntegrity(t *testing.T) {
 		{PID: "f2", Path: []byte(bitrot), DisplayPath: bitrot, Kind: model.FileAudio, ContentHash: "sha256:stale"},
 		{PID: "f3", Path: []byte(filepath.Join(dir, "gone.flac")), DisplayPath: "gone.flac", Kind: model.FileAudio, ContentHash: "x"},
 	}}
-	probeFail := func(_ context.Context, p string) ([]string, error) {
+	probeFail := func(_ context.Context, p string) (string, error) {
 		if filepath.Base(p) == "good.flac" {
-			return nil, nil
+			return "", nil
 		}
-		return nil, os.ErrInvalid
+		return "", os.ErrInvalid
 	}
 	rep, err := New(st, identity.ContentHash, probeFail, nil).Run(context.Background(), Config{
 		Only:      []model.AuditCheck{model.CheckIntegrity, model.CheckCorruptAudio},
@@ -399,11 +399,11 @@ func TestAuditReportsToleratedDamage(t *testing.T) {
 		{PID: "f1", Path: []byte(damaged), DisplayPath: damaged, Kind: model.FileAudio, ItemPID: "i1"},
 		{PID: "f2", Path: []byte(clean), DisplayPath: clean, Kind: model.FileAudio},
 	}}
-	probe := func(_ context.Context, p string) ([]string, error) {
+	probe := func(_ context.Context, p string) (string, error) {
 		if filepath.Base(p) == "damaged.wv" {
-			return []string{"frame sync lost", "3471 trailing bytes dropped"}, nil
+			return "frame sync lost; and 1 more", nil
 		}
-		return nil, nil
+		return "", nil
 	}
 	rep, err := New(st, nil, probe, nil).Run(context.Background(), Config{
 		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,
@@ -418,11 +418,8 @@ func TestAuditReportsToleratedDamage(t *testing.T) {
 	if got[0].Severity != model.SeverityWarn {
 		t.Errorf("severity = %q, want warn for a file that decodes", got[0].Severity)
 	}
-	if !strings.Contains(got[0].Message, "frame sync lost") {
-		t.Errorf("message %q does not name the first damage", got[0].Message)
-	}
-	if !strings.Contains(got[0].Message, "and 1 more") {
-		t.Errorf("message %q does not count the damage it did not show", got[0].Message)
+	if !strings.Contains(got[0].Message, "(frame sync lost; and 1 more)") {
+		t.Errorf("message %q does not carry what the probe said of the damage", got[0].Message)
 	}
 	if len(got[0].Entities) != 1 {
 		t.Errorf("entities = %+v, want the item the file belongs to", got[0].Entities)
@@ -544,9 +541,9 @@ func TestAuditCanceledProbeIsNotCorruption(t *testing.T) {
 		{PID: "f1", Path: []byte(f), DisplayPath: f, Kind: model.FileAudio},
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
-	probe := func(pctx context.Context, _ string) ([]string, error) {
+	probe := func(pctx context.Context, _ string) (string, error) {
 		cancel()
-		return nil, pctx.Err()
+		return "", pctx.Err()
 	}
 	rep, err := New(st, nil, probe, nil).Run(ctx, Config{
 		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,
@@ -582,9 +579,9 @@ func TestAuditCorruptDiagnosticsFromEveryWriter(t *testing.T) {
 		},
 	}
 	var probed []string
-	probe := func(_ context.Context, p string) ([]string, error) {
+	probe := func(_ context.Context, p string) (string, error) {
 		probed = append(probed, filepath.Base(p))
-		return nil, os.ErrInvalid
+		return "", os.ErrInvalid
 	}
 	rep, err := New(st, nil, probe, nil).Run(context.Background(), Config{
 		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,

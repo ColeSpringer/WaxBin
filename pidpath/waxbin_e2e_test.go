@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +119,9 @@ func buildCatalog(t *testing.T, files map[string][]byte) (lib *waxbin.Library, r
 		if filepath.Ext(name) == ".wav" {
 			audioFiles++
 		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(root, name), data, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -209,6 +213,65 @@ func serveCache(t *testing.T, cache *pidpath.Cache) *httptest.Server {
 	return ts
 }
 
+// lookupKey is the bearer token the lookup host asks of the daemon.
+const lookupKey = "lookup-key"
+
+// serveLookup stands up the other wiring: a stock WaxFlow resolver chain, the roots
+// under a pid lookup, asking example_test.go's lookupHandler over HTTP. Each root is
+// named after its library's pid, as the handler's references expect. key is what the
+// daemon sends, and local is the handler's.
+func serveLookup(t *testing.T, cache *pidpath.Cache, lib *waxbin.Library, key string, local bool) *httptest.Server {
+	t.Helper()
+	libs, err := lib.Libraries(context.Background())
+	if err != nil {
+		t.Fatalf("libraries: %v", err)
+	}
+	named := make([]source.Root, 0, len(libs))
+	for _, l := range libs {
+		named = append(named, source.Root{Name: l.PID.String(), Path: string(l.Root)})
+	}
+	roots, err := source.OpenRoots(named, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { roots.Close() })
+
+	host := httptest.NewServer(http.StripPrefix("/pid", &lookupHandler{cache: cache, key: lookupKey, local: local}))
+	t.Cleanup(host.Close)
+	lookup, err := source.NewPIDLookup(host.URL+"/pid", roots, source.PIDLookupOptions{Key: key})
+	if err != nil {
+		t.Fatalf("NewPIDLookup: %v", err)
+	}
+	t.Cleanup(func() { lookup.Close() })
+
+	srv, err := server.New(server.Config{
+		APIKeys:    []string{"test-key"},
+		Resolver:   lookup,
+		PIDSources: true,
+		CacheDir:   t.TempDir(),
+		Version:    "test",
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// envelopeCode reads the error code out of a WaxFlow error body.
+func envelopeCode(t *testing.T, body []byte) string {
+	t.Helper()
+	var envlp struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &envlp); err != nil {
+		t.Fatalf("error body %q: %v", body, err)
+	}
+	return envlp.Code
+}
+
 // get reads the whole body and closes it before returning, so no connection lingers
 // to the end of the test.
 func get(t *testing.T, ts *httptest.Server, url string) (*http.Response, []byte) {
@@ -296,6 +359,10 @@ func TestResolveAgainstRealCatalog(t *testing.T) {
 	}
 	if loc.LibraryPID != libs[0].PID {
 		t.Errorf("library pid = %q, want %q (the scanned root)", loc.LibraryPID, libs[0].PID)
+	}
+	// So do that root and the path below it, which joined are the path itself.
+	if loc.Root != string(libs[0].Root) || loc.RelPath != "alpha.wav" || filepath.Join(loc.Root, loc.RelPath) != loc.Path {
+		t.Errorf("root %q and rel path %q, want %q split at the library's root %q", loc.Root, loc.RelPath, loc.Path, libs[0].Root)
 	}
 	// A whole-file item has no window, so Span asks for no bounds.
 	if from, to, err := loc.Span(); from != 0 || to != 0 || err != nil {
@@ -613,6 +680,285 @@ func TestPIDStreamsE2E(t *testing.T) {
 	}
 }
 
+// TestPIDLookupHostE2E drives the lookup wiring end to end: a stock daemon asks the
+// host what each pid names and opens the answer under its own root. The ramp's length
+// tells the files apart, so serving the wrong one cannot pass.
+func TestPIDLookupHostE2E(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, root, db := buildCatalog(t, map[string][]byte{
+		"alpha.wav": rampWAV(t, 8000),
+		"beta.wav":  rampWAV(t, 12000),
+	})
+	pids := itemPIDs(t, lib)
+	cache := newCache(t, db)
+	ts := serveLookup(t, cache, lib, lookupKey, true)
+
+	stream := func(pid model.PID) (*http.Response, []byte) {
+		return get(t, ts, ts.URL+"/stream?src=pid:"+string(pid)+"&format=wav")
+	}
+	for name, frames := range map[string]int{"alpha.wav": 8000, "beta.wav": 12000} {
+		resp, body := stream(pids[name])
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream %s = %d %s", name, resp.StatusCode, body)
+		}
+		got := decodePCM(t, body)
+		if got.N != frames {
+			t.Fatalf("stream %s delivered %d samples, want its own %d", name, got.N, frames)
+		}
+		if out := got.ChanI(0); out[frames-1] != rampAtI(ripFormat, 0, int64(frames-1)) {
+			t.Fatalf("stream %s does not end on its own last sample", name)
+		}
+	}
+
+	// A pid the catalog does not hold is the host's 404, and the daemon's not-found.
+	resp, body := stream(model.NewPID())
+	if resp.StatusCode != http.StatusNotFound || envelopeCode(t, body) != string(flowerr.CodeNotFound) {
+		t.Fatalf("unknown pid = %d %s, want 404 not-found", resp.StatusCode, body)
+	}
+	// An id that is no ULID never reaches the catalog.
+	resp, body = get(t, ts, ts.URL+"/stream?src=pid:not-a-ulid&format=wav")
+	if resp.StatusCode != http.StatusBadRequest || envelopeCode(t, body) != string(flowerr.CodeInvalidRequest) {
+		t.Fatalf("malformed pid = %d %s, want 400 invalid-request", resp.StatusCode, body)
+	}
+
+	// Nor does a pid in lower case: a pid is matched as text, and that spelling is no item's.
+	resp, body = get(t, ts, ts.URL+"/probe?src=pid:"+strings.ToLower(string(pids["beta.wav"])))
+	if resp.StatusCode != http.StatusBadRequest || envelopeCode(t, body) != string(flowerr.CodeInvalidRequest) {
+		t.Fatalf("probe by a lower-case pid = %d %s, want 400 invalid-request", resp.StatusCode, body)
+	}
+
+	// A rename no poll has seen: this host reads the library, finds the cached path
+	// gone and asks the catalog again, so the daemon is not handed a stale reference.
+	pid := pids["alpha.wav"]
+	if err := os.Rename(filepath.Join(root, "alpha.wav"), filepath.Join(root, "omega.wav")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if stale, ok := cache.Cached(pid); !ok || filepath.Base(stale.Path) != "alpha.wav" {
+		t.Fatalf("cache = %+v, want the stale pre-rename path still held", stale)
+	}
+	if resp, body := stream(pid); resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream after an unpolled rename = %d %s, want 200", resp.StatusCode, body)
+	}
+	if healed, _ := cache.Cached(pid); healed.RelPath != "omega.wav" {
+		t.Fatalf("cache after the heal = %q, want omega.wav", healed.RelPath)
+	}
+}
+
+// TestAnUnmountedLibraryIsARetry: with the library's folder gone, as an unplugged drive
+// leaves it, the resolver answers a pid 503 root-unavailable, and plays it once the
+// folder is back. A 404 there would fail a job that only had to wait.
+//
+// The lookup host keeps answering the reference meanwhile, even one that reads the
+// library itself. The mount that matters to that wiring is the daemon's own, so the
+// verdict on it is the daemon's to give.
+//
+// Nothing is asked of the server before the folder moves, so no handle under it is
+// open when it does.
+func TestAnUnmountedLibraryIsARetry(t *testing.T) {
+	t.Parallel()
+	lib, root, db := buildCatalog(t, map[string][]byte{"alpha.wav": rampWAV(t, 8000)})
+	pid := itemPIDs(t, lib)["alpha.wav"]
+	cache := newCache(t, db)
+	ts := serveCache(t, cache)
+	probe := func() (*http.Response, []byte) {
+		return get(t, ts, ts.URL+"/probe?src=pid:"+string(pid))
+	}
+	lookup := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		(&lookupHandler{cache: cache, local: true}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+string(pid), nil))
+		return rec
+	}
+	mounted := lookup().Body.String()
+
+	away := root + ".away"
+	if err := os.Rename(root, away); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := probe()
+	if resp.StatusCode != http.StatusServiceUnavailable || envelopeCode(t, body) != string(flowerr.CodeRootUnavailable) {
+		t.Errorf("probe with the library gone = %d %s, want 503 root-unavailable", resp.StatusCode, body)
+	}
+	if rec := lookup(); rec.Code != http.StatusOK || rec.Body.String() != mounted {
+		t.Errorf("lookup with the library gone = %d %q, want the reference it gave before, %q", rec.Code, rec.Body, mounted)
+	}
+
+	if err := os.Rename(away, root); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := probe(); resp.StatusCode != http.StatusOK {
+		t.Errorf("probe with the library back = %d %s, want 200", resp.StatusCode, body)
+	}
+}
+
+// TestLookupHandlerFollowsARenameAtThePoll: a host that does not read the library
+// answers from the catalog alone. A rename reaches its answers when the cache's poll
+// sees it, and nothing before that is looked for on disk.
+func TestLookupHandlerFollowsARenameAtThePoll(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, root, db := buildCatalog(t, map[string][]byte{"alpha.wav": rampWAV(t, 8000)})
+	pid := itemPIDs(t, lib)["alpha.wav"]
+	cache := newCache(t, db)
+	ref := func() string {
+		rec := httptest.NewRecorder()
+		(&lookupHandler{cache: cache}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+string(pid), nil))
+		var answer struct {
+			Ref string `json:"ref"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &answer); rec.Code != http.StatusOK || err != nil {
+			t.Fatalf("lookup = %d %q (err %v), want a 200 JSON answer", rec.Code, rec.Body, err)
+		}
+		return answer.Ref
+	}
+	before := ref()
+
+	if err := os.Rename(filepath.Join(root, "alpha.wav"), filepath.Join(root, "omega.wav")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ref(); got != before {
+		t.Errorf("reference before the poll = %q, want the cached %q", got, before)
+	}
+	if err := cache.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := ref(); !strings.HasSuffix(got, "/omega.wav") {
+		t.Errorf("reference after the poll = %q, want the renamed file", got)
+	}
+}
+
+// TestAMissingFileUnderAMountedLibraryIsAMiss: one file gone from a library that is
+// there answers 404, since no wait brings it back.
+func TestAMissingFileUnderAMountedLibraryIsAMiss(t *testing.T) {
+	t.Parallel()
+	lib, root, db := buildCatalog(t, map[string][]byte{
+		"alpha.wav": rampWAV(t, 8000),
+		"beta.wav":  rampWAV(t, 12000),
+	})
+	pid := itemPIDs(t, lib)["alpha.wav"]
+	ts := serveCache(t, newCache(t, db))
+	if err := os.Remove(filepath.Join(root, "alpha.wav")); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := get(t, ts, ts.URL+"/probe?src=pid:"+string(pid))
+	if resp.StatusCode != http.StatusNotFound || envelopeCode(t, body) != string(flowerr.CodeNotFound) {
+		t.Fatalf("probe of a deleted file = %d %s, want 404 not-found", resp.StatusCode, body)
+	}
+}
+
+// TestLookupHandlerCannotNameANonUTF8File: the lookup answer is JSON, which holds no
+// name that is not UTF-8, so the handler answers 404 instead of a reference that names
+// nothing. The daemon itself opens the file from a request, which percent-encodes the
+// byte.
+func TestLookupHandlerCannotNameANonUTF8File(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		t.Skip("this platform's file names are Unicode, so none is invalid UTF-8")
+	}
+	const name = "caf\xe9.wav"
+	lib, _, db := buildCatalog(t, map[string][]byte{name: rampWAV(t, 8000)})
+	pid, ok := itemPIDs(t, lib)[name]
+	if !ok {
+		t.Fatal("the file with a non-UTF-8 name was not cataloged")
+	}
+	cache := newCache(t, db)
+	loc, err := cache.Locate(context.Background(), pid)
+	if err != nil || loc.RelPath != name {
+		t.Fatalf("Locate = %q (err %v), want the raw name", loc.RelPath, err)
+	}
+
+	rec := httptest.NewRecorder()
+	(&lookupHandler{cache: cache}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+string(pid), nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("lookup = %d %q, want 404", rec.Code, rec.Body)
+	}
+
+	ts := serveLookup(t, cache, lib, lookupKey, false)
+	resp, body := get(t, ts, ts.URL+"/probe?src="+loc.LibraryPID.String()+"/caf%E9.wav")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("probe by root-relative reference = %d %s, want 200", resp.StatusCode, body)
+	}
+}
+
+// TestPIDLookupHostRefusesAWrongKey: a daemon holding the wrong key gets the host's
+// 401, which it reads as the host being down for now rather than the item being gone.
+func TestPIDLookupHostRefusesAWrongKey(t *testing.T) {
+	t.Parallel()
+	lib, _, db := buildCatalog(t, map[string][]byte{"alpha.wav": rampWAV(t, 8000)})
+	pid := itemPIDs(t, lib)["alpha.wav"]
+	ts := serveLookup(t, newCache(t, db), lib, "some-other-key", false)
+
+	resp, body := get(t, ts, ts.URL+"/probe?src=pid:"+string(pid))
+	if resp.StatusCode != http.StatusServiceUnavailable || envelopeCode(t, body) != string(flowerr.CodeCatalogUnavailable) {
+		t.Fatalf("lookup with a wrong key = %d %s, want 503 catalog-unavailable", resp.StatusCode, body)
+	}
+}
+
+// TestLookupHandlerAnswers pins the handler's own half of the contract, the statuses
+// and the reference, without a daemon in between.
+func TestLookupHandlerAnswers(t *testing.T) {
+	t.Parallel()
+	sub := filepath.Join("Artist", "Album")
+	lib, _, db := buildCatalog(t, map[string][]byte{filepath.Join(sub, "alpha.wav"): rampWAV(t, 8000)})
+	pid := itemPIDs(t, lib)["alpha.wav"]
+	libs, err := lib.Libraries(context.Background())
+	if err != nil || len(libs) != 1 {
+		t.Fatalf("libraries = %d (err %v), want the one scanned root", len(libs), err)
+	}
+	h := &lookupHandler{cache: newCache(t, db), key: lookupKey}
+
+	ask := func(method, path, auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	bearer := "Bearer " + lookupKey
+	rec := ask(http.MethodGet, "/"+string(pid), bearer)
+	var answer struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); rec.Code != http.StatusOK || err != nil {
+		t.Fatalf("lookup = %d %q (err %v), want a 200 JSON answer", rec.Code, rec.Body, err)
+	}
+	// Forward slashes whatever the host's separator, under the library's pid.
+	if want := libs[0].PID.String() + "/Artist/Album/alpha.wav"; answer.Ref != want {
+		t.Errorf("ref = %q, want %q", answer.Ref, want)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "" {
+		t.Errorf("Cache-Control = %q, want none: the daemon would hold a renamed path for it", cc)
+	}
+
+	for _, tc := range []struct {
+		name, method, path, auth string
+		want                     int
+	}{
+		{"no key", http.MethodGet, "/" + string(pid), "", http.StatusUnauthorized},
+		{"wrong key", http.MethodGet, "/" + string(pid), "Bearer nope", http.StatusUnauthorized},
+		{"the key with no scheme", http.MethodGet, "/" + string(pid), lookupKey, http.StatusUnauthorized},
+		{"the pid in lower case", http.MethodGet, "/" + strings.ToLower(string(pid)), bearer, http.StatusBadRequest},
+		{"unknown pid", http.MethodGet, "/" + string(model.NewPID()), bearer, http.StatusNotFound},
+		{"WaxFlow's probe id", http.MethodGet, "/" + source.ProbePID, bearer, http.StatusNotFound},
+		{"not a ULID", http.MethodGet, "/alpha.wav", bearer, http.StatusBadRequest},
+		{"a path below a pid", http.MethodGet, "/" + string(pid) + "/x", bearer, http.StatusBadRequest},
+		{"not a GET", http.MethodPost, "/" + string(pid), bearer, http.StatusBadRequest},
+	} {
+		if rec := ask(tc.method, tc.path, tc.auth); rec.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
 // ripCue indexes a single-file rip at frames 0, 37, and 127.
 //
 // Both interior boundaries sit on frames not divisible by 3, which is the entire
@@ -651,7 +997,14 @@ func TestVirtualTrackStreamsItsOwnSamples(t *testing.T) {
 		t.Fatalf("catalog holds %d items, want 3 virtual tracks: %v", len(pids), pids)
 	}
 	cache := newCache(t, db)
-	ts := serveCache(t, cache)
+	// Both wirings resolve the pid to the whole rip, and the window rides on the request.
+	servers := []struct {
+		name string
+		ts   *httptest.Server
+	}{
+		{"resolver", serveCache(t, cache)},
+		{"lookup", serveLookup(t, cache, lib, lookupKey, false)},
+	}
 
 	// One CD frame is 588 samples at 44.1 kHz, exactly.
 	want := []struct {
@@ -663,54 +1016,57 @@ func TestVirtualTrackStreamsItsOwnSamples(t *testing.T) {
 		{"Three", 127 * 588, 0}, // the final track's end stays open
 	}
 
-	for _, w := range want {
-		t.Run(w.title, func(t *testing.T) {
-			pid, ok := pids[w.title]
-			if !ok {
-				t.Fatalf("no virtual track titled %q", w.title)
-			}
-			loc, err := cache.Locate(ctx, pid)
-			if err != nil {
-				t.Fatalf("Locate: %v", err)
-			}
-			if !loc.Virtual {
-				t.Fatal("a cue TRACK must read back as a virtual track")
-			}
-			from, to, err := loc.Span()
-			if err != nil {
-				t.Fatalf("Span: %v", err)
-			}
-			if from != w.from || to != w.to {
-				t.Fatalf("span = [%d, %d), want [%d, %d)", from, to, w.from, w.to)
-			}
-
-			// FLAC at the source rate keeps it bit-exact: no resampler means no state to
-			// prime, so the window's sample 0 is the source's sample `from` exactly.
-			u, err := streamURL(ctx, cache, ts.URL, pid, "flac")
-			if err != nil {
-				t.Fatalf("streamURL: %v", err)
-			}
-			resp, body := get(t, ts, u)
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("GET %s = %d, want 200", u, resp.StatusCode)
-			}
-			got := decodePCM(t, body)
-
-			end := to
-			if end == 0 {
-				end = totalSamples
-			}
-			if wantN := int(end - from); got.N != wantN {
-				t.Fatalf("window [%d, %d) delivered %d samples, want %d", from, end, got.N, wantN)
-			}
-			out := got.ChanI(0)
-			for i := range got.N {
-				if src := rampAtI(ripFormat, 0, from+int64(i)); out[i] != src {
-					t.Fatalf("window [%d, %d) sample %d = %d, want the rip's sample %d (%d): "+
-						"these are not this track's bytes", from, end, i, out[i], from+int64(i), src)
+	for _, srv := range servers {
+		ts := srv.ts
+		for _, w := range want {
+			t.Run(srv.name+"/"+w.title, func(t *testing.T) {
+				pid, ok := pids[w.title]
+				if !ok {
+					t.Fatalf("no virtual track titled %q", w.title)
 				}
-			}
-		})
+				loc, err := cache.Locate(ctx, pid)
+				if err != nil {
+					t.Fatalf("Locate: %v", err)
+				}
+				if !loc.Virtual {
+					t.Fatal("a cue TRACK must read back as a virtual track")
+				}
+				from, to, err := loc.Span()
+				if err != nil {
+					t.Fatalf("Span: %v", err)
+				}
+				if from != w.from || to != w.to {
+					t.Fatalf("span = [%d, %d), want [%d, %d)", from, to, w.from, w.to)
+				}
+
+				// FLAC at the source rate keeps it bit-exact: no resampler means no state to
+				// prime, so the window's sample 0 is the source's sample `from` exactly.
+				u, err := streamURL(ctx, cache, ts.URL, pid, "flac")
+				if err != nil {
+					t.Fatalf("streamURL: %v", err)
+				}
+				resp, body := get(t, ts, u)
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("GET %s = %d, want 200", u, resp.StatusCode)
+				}
+				got := decodePCM(t, body)
+
+				end := to
+				if end == 0 {
+					end = totalSamples
+				}
+				if wantN := int(end - from); got.N != wantN {
+					t.Fatalf("window [%d, %d) delivered %d samples, want %d", from, end, got.N, wantN)
+				}
+				out := got.ChanI(0)
+				for i := range got.N {
+					if src := rampAtI(ripFormat, 0, from+int64(i)); out[i] != src {
+						t.Fatalf("window [%d, %d) sample %d = %d, want the rip's sample %d (%d): "+
+							"these are not this track's bytes", from, end, i, out[i], from+int64(i), src)
+					}
+				}
+			})
+		}
 	}
 
 	// Consecutive tracks abut at the exact sample: no gap, no overlap, nothing of the

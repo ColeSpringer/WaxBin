@@ -596,11 +596,66 @@ func TestRunRecordsTheDecodeVerdict(t *testing.T) {
 	if d.Code != model.DiagCorruptAudio || (d.Severity != model.SeverityWarn && d.Severity != model.SeverityError) || d.Detail == "" {
 		t.Errorf("cut file verdict = %+v, want corrupt_audio at warn or error with a detail", d)
 	}
+	// A read that got to the end knows how much audio the cut took, and says so first.
+	if d.Severity == model.SeverityWarn {
+		if loss := measuredLoss(t, cut); !strings.HasPrefix(d.Detail, loss) {
+			t.Errorf("cut file detail = %q, want it to open with how much audio is missing, %q", d.Detail, loss)
+		}
+	}
 
 	in = store.puts[clean.PID]
 	if !in.Observed || len(in.Diagnostics) != 0 {
 		t.Errorf("clean file: observed=%v diagnostics=%+v, want an observed empty list", in.Observed, in.Diagnostics)
 	}
+}
+
+// TestRunMeasuresPastADamagedFrame: a FLAC with a bad frame inside it is measured to
+// its end, not to the frame, and the verdict says how much of that is silence. The
+// waveform keeps the file's length, so what follows the hole sits where it plays.
+func TestRunMeasuresPastADamagedFrame(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const rate, seconds = 8000, 8
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, seconds*time.Second))
+	for i := len(flac) / 2; i < len(flac)/2+64; i++ {
+		flac[i] ^= 0x5a
+	}
+	holed := writeFixture(t, dir, "holed.flac", 0, flac)
+	store := newFakeStore(holed)
+	if _, err := pureGoAnalyzer(t, store).Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	in, ok := store.puts[holed.PID]
+	if !ok {
+		t.Fatal("the holed file was not stored")
+	}
+	if !in.MeasureCompleted || in.Loudness == nil || in.Peaks == nil {
+		t.Fatalf("holed file: completed=%v loudness=%v peaks=%v, want a full measurement",
+			in.MeasureCompleted, in.Loudness, in.Peaks)
+	}
+	if in.Peaks.Frames != rate*seconds {
+		t.Errorf("waveform covers %d frames, want the file's %d", in.Peaks.Frames, rate*seconds)
+	}
+	if len(in.Diagnostics) != 1 || in.Diagnostics[0].Severity != model.SeverityWarn {
+		t.Fatalf("holed file diagnostics = %+v, want one warning", in.Diagnostics)
+	}
+	if d, loss := in.Diagnostics[0].Detail, measuredLoss(t, holed); !strings.HasPrefix(d, loss) || len(d) <= len(loss) {
+		t.Errorf("detail = %q, want the lost audio, %q, and then what the decoder found", d, loss)
+	}
+}
+
+// measuredLoss is the decoder's line for how much audio f lost, which a damaged
+// fixture must have.
+func measuredLoss(t *testing.T, f *model.File) string {
+	t.Helper()
+	m, err := decode.New(nil).Measure(context.Background(), string(f.Path), nil)
+	if err != nil {
+		t.Fatalf("measure %s: %v", f.DisplayPath, err)
+	}
+	if m.Loss == "" {
+		t.Fatalf("%s lost nothing the decoder counted", f.DisplayPath)
+	}
+	return m.Loss
 }
 
 // TestMeasureObserved pins which measure outcomes looked at the audio bytes, so that

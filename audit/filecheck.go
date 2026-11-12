@@ -365,15 +365,11 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 				Entities: nonEmpty(f.ItemPID),
 				Reason:   string(model.CorruptUndecodable),
 			})
-		case len(damage) > 0:
-			more := ""
-			if n := len(damage) - 1; n > 0 {
-				more = "; and " + strconv.Itoa(n) + " more"
-			}
+		case damage != "":
 			dc.emit(model.AuditFinding{
 				Check:    model.CheckCorruptAudio,
 				Severity: model.SeverityWarn,
-				Message:  "decoder worked around damage in: " + f.DisplayPath + " (" + damage[0] + more + ")",
+				Message:  "decoder worked around damage in: " + f.DisplayPath + " (" + damage + ")",
 				Path:     f.DisplayPath,
 				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),

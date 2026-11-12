@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -56,6 +57,44 @@ func TestPutScannedBookAdoptsPreferredPID(t *testing.T) {
 	}
 	if res2.ItemPID == want {
 		t.Fatal("a taken preferred PID must not be reused; expected a fresh PID")
+	}
+}
+
+// TestPutScannedBookRefusesARespelledPID: the stamp is text another tagger can have
+// rewritten, and a pid is matched as text. The lower-case spelling of a pid some item
+// already holds is not that item's, so the claim check passes it, and adopting it would
+// leave two items whose ids differ only in case. Only the spelling the catalog writes
+// is adopted.
+func TestPutScannedBookRefusesARespelledPID(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	held := model.NewPID()
+	if _, err := st.PutScannedBook(ctx, bookInputWithPID(lib.ID, "/lib/a.m4b", "e1", "Book One", "Author", held)); err != nil {
+		t.Fatalf("put book: %v", err)
+	}
+	lower := model.PID(strings.ToLower(string(held)))
+	res, err := st.PutScannedBook(ctx, bookInputWithPID(lib.ID, "/lib/b.m4b", "e2", "Book Two", "Author", lower))
+	if err != nil {
+		t.Fatalf("put book 2: %v", err)
+	}
+	if strings.EqualFold(string(res.ItemPID), string(held)) {
+		t.Fatalf("a second item took %s, the pid %s respelled", res.ItemPID, held)
+	}
+	if !res.ItemPID.Valid() {
+		t.Errorf("the item's pid %q is not one the catalog writes", res.ItemPID)
+	}
+
+	// An unclaimed pid is not adopted in lower case either: nothing would find the item
+	// by the id it was stamped with.
+	fresh := model.PID(strings.ToLower(string(model.NewPID())))
+	res, err = st.PutScannedBook(ctx, bookInputWithPID(lib.ID, "/lib/c.m4b", "e3", "Book Three", "Author", fresh))
+	if err != nil {
+		t.Fatalf("put book 3: %v", err)
+	}
+	if res.ItemPID == fresh || !res.ItemPID.Valid() {
+		t.Errorf("the item took %q, want a pid minted in the catalog's own spelling", res.ItemPID)
 	}
 }
 

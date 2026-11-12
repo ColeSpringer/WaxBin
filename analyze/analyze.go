@@ -13,7 +13,6 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/colespringer/waxbin/decode"
@@ -398,9 +397,9 @@ func (a *Analyzer) measure(ctx context.Context, f *model.File) (*model.LoudnessD
 		return nil, nil, nil, err
 	}
 	var diags []model.FileDiagnostic
-	if len(m.InputDamage) > 0 {
+	if m.Damaged() {
 		diags = []model.FileDiagnostic{{Code: model.DiagCorruptAudio, Severity: model.SeverityWarn,
-			Detail: model.CapDetail(strings.Join(m.InputDamage, "; "))}}
+			Detail: m.DamageDetail()}}
 	}
 	return loudnessData(loudness.FromMeasurement(m.IntegratedLUFS, m.SamplePeakDB)),
 		peaksData(acc.Peaks(), acc.Frames(), m.SampleRate, f.EssenceHash), diags, nil
@@ -417,7 +416,7 @@ func measureObserved(err error) bool {
 // bucketDuration is the length the fingerprint is bucketed by: the decoded length when
 // the measure read the file without damage, else the header's, else the analyzed
 // head's. A header can understate a file (a VBR MP3 with no info frame), and trusting it
-// would bucket the file away from its twins. A read that worked around damage decodes
+// would bucket the file away from its twins. A read that worked around damage can decode
 // less than the recording holds, so there the header is the better guess.
 func bucketDuration(pk *model.PeaksData, damaged bool, headerMS, analyzedMS int64) int64 {
 	if pk != nil && !damaged {

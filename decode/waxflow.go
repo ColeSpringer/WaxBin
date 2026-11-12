@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxflow"
@@ -20,6 +22,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	flowerr "github.com/colespringer/waxflow/waxerr"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -54,8 +57,23 @@ type Measurement struct {
 	// values above, and 0 everywhere else.
 	HeaderGainDB float64
 	// InputDamage lists what the tolerant read worked around (a truncated stream, a
-	// lost frame sync), complete because Measure reads to the end; nil when clean.
-	InputDamage []string
+	// lost frame sync) on its way to the end of the file; nil when clean. WaxFlow
+	// lists each finding once and stops at container.MaxWarnings without counting the
+	// rest, so DamageTruncated says the list is full and the file may hold more.
+	InputDamage     []string
+	DamageTruncated bool
+	// LostFrames counts the measured frames that are silence standing in for audio
+	// the damage took. FLAC, native or in Ogg, is the format that reads that way: its
+	// frames carry their own positions, so the read keeps the stream's length. A hole
+	// in a format whose packets do not shortens the read and counts nothing here.
+	LostFrames int64
+	// TruncatedFrames counts the frames the header declares past the end of what the
+	// file holds, none of them measured. It is 0 where the header states no length to
+	// fall short of, as in Ogg Vorbis and Opus.
+	TruncatedFrames int64
+	// Loss is WaxFlow's one line for the two counts, "" when both are 0. A damaged
+	// file can still lose nothing the read can count (see LostFrames).
+	Loss string
 	// SampleRate and Frames are the rate the tap's chunks arrive at (48000 for any
 	// Opus file, whatever its header says) and how many frames the meter measured.
 	SampleRate int
@@ -124,13 +142,57 @@ func (e *Engine) Measure(ctx context.Context, path string, tap func(chans [][]fl
 	}
 	// -Inf silence stays -Inf through the subtraction.
 	return &Measurement{
-		IntegratedLUFS: res.IntegratedLUFS - hg,
-		SamplePeakDB:   res.SamplePeakDB - hg,
-		HeaderGainDB:   hg,
-		InputDamage:    res.InputWarnings,
-		SampleRate:     res.Format.Rate,
-		Frames:         res.Samples,
+		IntegratedLUFS:  res.IntegratedLUFS - hg,
+		SamplePeakDB:    res.SamplePeakDB - hg,
+		HeaderGainDB:    hg,
+		InputDamage:     res.InputWarnings,
+		DamageTruncated: len(res.InputWarnings) >= container.MaxWarnings,
+		LostFrames:      res.LostSamples,
+		TruncatedFrames: res.TruncatedSamples,
+		Loss:            res.LossNote(),
+		SampleRate:      res.Format.Rate,
+		Frames:          res.Samples,
 	}, nil
+}
+
+// Damaged reports whether the read worked around anything.
+func (m *Measurement) Damaged() bool {
+	return len(m.InputDamage) > 0 || m.LostFrames > 0 || m.TruncatedFrames > 0
+}
+
+// DamageDetail is what the read worked around as one diagnostic detail, "" for a clean
+// read: how much audio the damage cost, the findings that fit under
+// model.MaxDetailBytes, and how many more there were. The analyze pass stores it and
+// the audit's probe reports it, so a file reads the same from either.
+func (m *Measurement) DamageDetail() string {
+	if !m.Damaged() {
+		return ""
+	}
+	var parts []string
+	if m.Loss != "" {
+		parts = append(parts, m.Loss)
+	}
+	shown := 0
+	for i, f := range m.InputDamage {
+		// The first finding is always shown, cut short if it has to be.
+		next := strings.Join(append(parts, f), "; ")
+		if i > 0 && len(next)+len(m.moreDamage(len(m.InputDamage)-i-1)) > model.MaxDetailBytes {
+			break
+		}
+		parts, shown = append(parts, f), i+1
+	}
+	return model.CapDetailWithTail(strings.Join(parts, "; "), m.moreDamage(len(m.InputDamage)-shown))
+}
+
+// moreDamage closes a detail that leaves n findings out.
+func (m *Measurement) moreDamage(n int) string {
+	switch {
+	case n <= 0:
+		return ""
+	case m.DamageTruncated:
+		return "; and at least " + strconv.Itoa(n) + " more"
+	}
+	return "; and " + strconv.Itoa(n) + " more"
 }
 
 // scaleChans writes chans times scale into dst, reusing its buffers, and returns it.
@@ -309,7 +371,7 @@ func openErr(ctx context.Context, src container.Source, ext string, err error) e
 	code := flowerr.CodeOf(err)
 	unsupported := code == flowerr.CodeUnsupportedFormat || code == flowerr.CodeUnsupportedSource
 	if !unsupported && ext != "" {
-		_, perr := format.Probe(container.BindContext(ctx, src), "", nil)
+		_, perr := format.Probe(ctx, container.BindContext(ctx, src), "", nil)
 		unsupported = flowerr.CodeOf(perr) == flowerr.CodeUnsupportedFormat
 	}
 	if unsupported {

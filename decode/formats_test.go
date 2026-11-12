@@ -86,6 +86,16 @@ func TestCoverageDecodesEveryCodec(t *testing.T) {
 		if pcm.Frames() == 0 {
 			t.Errorf("codec %q decoded to zero frames", fs.Codec)
 		}
+		// A sound file must not read as damaged: a codec whose healthy files state a
+		// length the decode falls short of would flag every one of them as corrupt.
+		m, err := eng.Measure(context.Background(), p, nil)
+		if err != nil {
+			t.Errorf("codec %q (fixture %q) does not measure: %v", fs.Codec, filepath.Base(p), err)
+			continue
+		}
+		if m.Damaged() {
+			t.Errorf("codec %q: a sound fixture measures as damaged: %s", fs.Codec, m.DamageDetail())
+		}
 	}
 }
 

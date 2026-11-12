@@ -34,11 +34,19 @@ const ReferenceLUFS = -18.0
 // G.711 and both ADPCM families, which fpcalc hosts had stamped with a fingerprint
 // and no measurement, as version 2 found for WavPack, Monkey's Audio and WMA.
 //
+// Version 4 is for what the WaxFlow bump to c9d9659 reads differently. A FLAC with
+// a bad frame within 16 MiB of its end was measured up to that frame and stamped as
+// measured (further back the read failed, and the file was retried), and one in Ogg
+// was measured with the damaged page's audio closed up. Both now read to their full
+// length, with silence where audio is lost. An Ogg Opus or Vorbis stream that starts
+// at a granule other than 0 changed in its length and its first samples, and nothing
+// stored marks those files, so no narrower re-selection would find them.
+//
 // It is not a cheap way to re-measure. The analyze pass has no measure-only path
 // and PutAnalysis rewrites the fingerprint and its index terms on every store, so
 // any bump here re-runs the whole pipeline. It is bumped because it names what
 // went stale.
-const AnalysisVersion = 3
+const AnalysisVersion = 4
 
 // Result is a track's measured loudness.
 type Result struct {
