@@ -57,12 +57,13 @@ CREATE TABLE file (
   -- the enrichment tag write-back has settled for this file, by landing it or by
   -- recording why it cannot land. A newer value is owed a write.
   enrich_settled_at INTEGER NOT NULL DEFAULT 0,
-  -- The front cover the file's last full read stated, in its tags or beside it, as the
-  -- hash the catalog stores that picture under: '' for a read that found none, NULL
-  -- while no read has said or since a write stripped its picture. A scan that finds a
-  -- file without a cover takes the item's cover back only when no other file of the
-  -- item states it, and reads these to tell.
+  -- The front cover the file states, as its last read or a write of its picture found
+  -- it: the hash the catalog stores that picture under (an art_source row, kept while a
+  -- file states it), '' for none, NULL while unknown. front_source says where a stated
+  -- picture is, 'tag' or 'sidecar'. An item's cover from disk is the one its files
+  -- state, the primary first.
   front_hash   TEXT,
+  front_source TEXT,
   container    TEXT,
   codec        TEXT,
   duration_ms  INTEGER,

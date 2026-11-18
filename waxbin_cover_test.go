@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/scan"
+	waxlabel "github.com/colespringer/waxlabel"
 )
 
 // folderCover is a decodable picture side pixels square, whose byte length grows with
@@ -211,5 +212,266 @@ func TestAnImportKeepsTheCoverItIsAboutToPlace(t *testing.T) {
 	}
 	if !fileExists(filepath.Join(album, "cover.png")) {
 		t.Error("the import did not place the folder's cover")
+	}
+}
+
+// frontOf is the hash of the cover a reference draws, empty for none.
+func frontOf(t *testing.T, ctx context.Context, lib *waxbin.Library, ref model.EntityRef) string {
+	t.Helper()
+	got, err := lib.ArtHashes(ctx, []model.EntityRef{ref})
+	if err != nil {
+		t.Fatalf("ArtHashes: %v", err)
+	}
+	return got[ref]
+}
+
+// TestAnImportedFolderCoverIsTheItemsAtOnce imports an album folder the catalog has
+// never held. The import catalogs the audio before it places the folder's cover, and
+// once the cover has landed the item draws it, with no scan to find it. A folder with no
+// cover leaves its file stating none. The scan that follows reads neither file again.
+func TestAnImportedFolderCoverIsTheItemsAtOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root, staging := t.TempDir(), t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	cover := folderCover(t, 4)
+	writeFile(t, filepath.Join(staging, "Covered", "01 - Song.mp3"),
+		testaudio.BuildMP3WithAudio("Song", "Artist", "Covered", 1, testaudio.AudioWithSeed(60)))
+	writeFile(t, filepath.Join(staging, "Covered", "cover.png"), cover)
+	writeFile(t, filepath.Join(staging, "Bare", "01 - Tune.mp3"),
+		testaudio.BuildMP3WithAudio("Tune", "Artist", "Bare", 1, testaudio.AudioWithSeed(61)))
+
+	lib := openManaged(t, ctx, db, root)
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: staging})
+	if err != nil || plan.Importable() != 2 {
+		t.Fatalf("plan = %+v (err %v), want both files importable", plan, err)
+	}
+	if rep, err := lib.ApplyImport(ctx, plan); err != nil || rep.Imported != 2 {
+		t.Fatalf("import = %+v (err %v), want both files imported", rep, err)
+	}
+	song, tune := itemPIDByTitle(t, ctx, lib, "Song"), itemPIDByTitle(t, ctx, lib, "Tune")
+	if got := frontOf(t, ctx, lib, model.EntityRef{Type: model.ArtTrack, PID: song}); got != art.Hash(cover) {
+		t.Errorf("front = %q after the import, want the folder cover it placed", got)
+	}
+	if got := frontOf(t, ctx, lib, model.EntityRef{Type: model.ArtTrack, PID: tune}); got != "" {
+		t.Errorf("the file with no cover beside it draws %s", got)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM file WHERE kind = 'audio' AND front_hash IS NULL"); n != 0 {
+		t.Errorf("%d imported files are left with their cover unknown", n)
+	}
+	rep, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if rep.Total.Unchanged != 2 || rep.Total.Reread != 0 {
+		t.Errorf("the scan after the import = %+v, want both files unchanged and unread", rep.Total)
+	}
+}
+
+// TestACopysCoverSurvivesTheTrash is the item two files back, its primary in a folder
+// with no cover and a copy in one that has a cover. The item draws the copy's cover,
+// loses it when the copy is trashed, with no read of the primary, and has it back when
+// the copy is restored.
+func TestACopysCoverSurvivesTheTrash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	audio := testaudio.BuildMP3WithAudio("Song", "Artist", "Album", 1, testaudio.AudioWithSeed(62))
+	bare, covered := filepath.Join(root, "A", "song.mp3"), filepath.Join(root, "B", "song.mp3")
+	cover := folderCover(t, 4)
+	writeFile(t, bare, audio)
+	writeFile(t, covered, audio)
+	writeFile(t, filepath.Join(root, "B", "cover.png"), cover)
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+	files, err := lib.ItemFiles(ctx, pid)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("item files = %+v (err %v), want the two copies", files, err)
+	}
+	if string(files[0].Path) != bare {
+		t.Fatalf("the primary is %s, want the file with no cover beside it", files[0].Path)
+	}
+	if got := frontOf(t, ctx, lib, ref); got != art.Hash(cover) {
+		t.Fatalf("front = %q, want the cover beside the copy", got)
+	}
+
+	plan, err := lib.PlanDeleteFiles(ctx, []model.PID{files[1].FilePID}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := frontOf(t, ctx, lib, ref); got != "" {
+		t.Errorf("front = %s with the file that stated it in the trash", got)
+	}
+	entries, err := lib.Trash(ctx, false, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("trash = %+v (err %v), want the one entry", entries, err)
+	}
+	if err := lib.RestoreTrash(ctx, entries[0].PID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := frontOf(t, ctx, lib, ref); got != art.Hash(cover) {
+		t.Errorf("front = %q once the file is restored, want its cover back", got)
+	}
+}
+
+// TestAnAlbumCoverWrittenBackIsItsTracksOwn sets an album cover with write-back over
+// tracks that drew their folder's cover. Each file embeds the new picture then, which a
+// read of it would put ahead of the folder's, so each track's own cover is the one
+// written, and a forced scan finds nothing left to change.
+func TestAnAlbumCoverWrittenBackIsItsTracksOwn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for n, title := range []string{"One", "Two"} {
+		writeFile(t, filepath.Join(root, "Album", title+".mp3"),
+			testaudio.BuildMP3WithAudio(title, "Artist", "Album", n+1, testaudio.AudioWithSeed(byte(63+n))))
+	}
+	writeFile(t, filepath.Join(root, "Album", "cover.png"), folderCover(t, 4))
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("query: %d items (err %v), want 2", len(items), err)
+	}
+	album := model.EntityRef{Type: model.ArtAlbum, PID: items[0].AlbumPID}
+	if err := lib.SetEntityArt(ctx, model.ArtAlbum, album.PID, model.ArtRoleFront, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("set album art: %v", err)
+	}
+	want := frontOf(t, ctx, lib, album)
+	own := func(when string) {
+		t.Helper()
+		for _, it := range items {
+			prov, err := lib.ArtProvenance(ctx, it.ArtRef(), model.ArtRoleFront)
+			if err != nil || prov.Level != model.ArtTrack || prov.SourceHash != want || prov.Source != model.SourceTag {
+				t.Errorf("%s: %s draws %+v (err %v), want the written cover as its own, from its tags", when, it.Title, prov, err)
+			}
+		}
+	}
+	own("after the write")
+	rep, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true})
+	if err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	if rep.Total.SidecarsUpdated != 0 || rep.Total.ItemsUpdated != 0 {
+		t.Errorf("the forced scan = %+v, want nothing left for it to change", rep.Total)
+	}
+	own("after a forced scan")
+}
+
+// TestAClearedCoverWrittenBackLeavesTheFoldersCover strips a file's embedded picture
+// beside a folder cover. The file states the folder's cover from then on, which the
+// catalog records without a scan, and an item whose cover is not held empty draws it.
+func TestAClearedCoverWrittenBackLeavesTheFoldersCover(t *testing.T) {
+	t.Parallel()
+	for _, lock := range []model.LockChange{model.LockOn, model.LockOff} {
+		ctx := context.Background()
+		root := t.TempDir()
+		db := filepath.Join(t.TempDir(), "catalog.db")
+		writeFile(t, filepath.Join(root, "Album", "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+		beside := folderCover(t, 4)
+		writeFile(t, filepath.Join(root, "Album", "cover.png"), beside)
+		lib := openManaged(t, ctx, db, root)
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		pid := itemPIDByTitle(t, ctx, lib, "Song")
+		ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+		if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t),
+			waxbin.ArtEditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+			t.Fatalf("set item art: %v", err)
+		}
+		embedded := frontOf(t, ctx, lib, ref)
+		stated := func() string {
+			t.Helper()
+			return catalogScalar[string](t, ctx, db, "SELECT COALESCE(front_hash, 'unknown') FROM file WHERE kind = 'audio'")
+		}
+		if embedded == art.Hash(beside) || stated() != embedded {
+			t.Fatalf("lock %v: the file states %q and the item draws %q, want the embedded cover for both", lock, stated(), embedded)
+		}
+		if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, nil, waxbin.ArtEditOptions{Lock: lock, WriteBack: true}); err != nil {
+			t.Fatalf("lock %v: clear item art: %v", lock, err)
+		}
+		if got := stated(); got != art.Hash(beside) {
+			t.Errorf("lock %v: after the strip the file states %q, want the folder's cover", lock, got)
+		}
+		want := ""
+		if lock == model.LockOff {
+			want = art.Hash(beside)
+		}
+		if got := frontOf(t, ctx, lib, ref); got != want {
+			t.Errorf("lock %v: front = %q after the clear, want %q", lock, got, want)
+		}
+	}
+}
+
+// TestAClearThatLeavesABackCoverStatesIt strips the front cover from a file that also
+// embeds a back cover. A read of the file falls back to the back cover, so that is what
+// the file states after the write and what the catalog records, and a forced scan finds
+// nothing left to change. Recording the file as bare would hold until the next forced
+// scan and then flip the item's cover.
+func TestAClearThatLeavesABackCoverStatesIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	song := filepath.Join(root, "Album", "song.mp3")
+	writeFile(t, song, testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+		t.Fatalf("set item art: %v", err)
+	}
+	back := folderCover(t, 6)
+	doc, err := waxlabel.ParseFile(ctx, song)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	plan, err := doc.Edit().AddPicture(waxlabel.Picture{Type: waxlabel.PicBackCover, Data: back}).Prepare(waxlabel.WithVerifyEssence())
+	if err != nil {
+		t.Fatalf("prepare the back cover: %v", err)
+	}
+	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		t.Fatalf("embed the back cover: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got := frontOf(t, ctx, lib, ref); got == art.Hash(back) || got == "" {
+		t.Fatalf("front = %q with both pictures embedded, want the front cover", got)
+	}
+
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, nil, waxbin.ArtEditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+		t.Fatalf("clear item art: %v", err)
+	}
+	stated := catalogScalar[string](t, ctx, db, "SELECT COALESCE(front_hash, 'unknown') FROM file WHERE kind = 'audio'")
+	if stated != art.Hash(back) {
+		t.Errorf("after the strip the file states %q, want the back cover a read falls back to", stated)
+	}
+	front := frontOf(t, ctx, lib, ref)
+	rep, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true})
+	if err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	if rep.Total.SidecarsUpdated != 0 || rep.Total.ItemsUpdated != 0 || frontOf(t, ctx, lib, ref) != front {
+		t.Errorf("the forced scan = %+v and the cover moved from %q to %q, want nothing left for it to change",
+			rep.Total, front, frontOf(t, ctx, lib, ref))
 	}
 }

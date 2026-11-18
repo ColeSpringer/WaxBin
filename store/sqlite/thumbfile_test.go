@@ -183,7 +183,7 @@ func TestGCArtSweepsThumbnailsOfAGoneSource(t *testing.T) {
 	if rep, err := st.VerifyDerived(ctx); err != nil || rep.OrphanThumbnails != 1 {
 		t.Fatalf("verify = %+v (err %v), want the stray row orphaned", rep, err)
 	}
-	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM art_map"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM art_map; UPDATE file SET front_hash = '', front_source = NULL"); err != nil {
 		t.Fatalf("drop the cover: %v", err)
 	}
 	sources, thumbs, err := st.GCArt(ctx)

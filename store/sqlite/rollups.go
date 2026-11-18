@@ -394,6 +394,9 @@ func (s *Store) RefreshRollups(ctx context.Context) (*model.RefreshReport, error
 		if rep.ReleaseYears, err = refreshAllReleaseYearsTx(ctx, tx); err != nil {
 			return err
 		}
+		if rep.Covers, err = refreshAllFrontsTx(ctx, tx); err != nil {
+			return err
+		}
 		if rep.PlaylistsCompacted, err = compactAllPlaylistsTx(ctx, tx); err != nil {
 			return err
 		}

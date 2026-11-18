@@ -668,7 +668,9 @@ type FileOptions struct {
 	ReResolve bool
 	// CoverPending says the file's folder cover has yet to arrive, as an import's does,
 	// placed once the audio has landed. A read that finds no cover then says nothing
-	// about the item's cover, where it would otherwise say the file has none.
+	// about the item's cover, where it would otherwise say the file has none, and the
+	// import says what stands beside the file once its covers are placed
+	// (SettleFolderCovers).
 	CoverPending bool
 }
 
@@ -735,9 +737,13 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 				// directory cover changed) still needs the full path, which
 				// reconcileFastPathSidecars reports.
 				if !s.reconcileFastPathSidecars(path, known, sc.cache) {
-					res.Unchanged++
+					counted := &res.Unchanged
+					if s.settleUnknownCover(ctx, path, known, sc) {
+						counted = &res.SidecarsUpdated
+					}
+					*counted++
 					if f := sc.folderState(bookFolder(root, path), true); f != nil {
-						f.unread = append(f.unread, unreadFile{path: path, known: known})
+						f.unread = append(f.unread, unreadFile{path: path, known: known, counted: counted})
 					}
 					return nil
 				}
@@ -877,9 +883,10 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 
 	cover, looked := resolveCover(path, fm.CoverArt, sc.cache)
-	// A container the reader has no parser for had no tags read, so its having no
-	// picture is not a finding either.
-	noCover := cover == nil && looked && !sc.coverPending && !unsupportedFormat(fm.Diagnostics)
+	noCover := cover == nil && looked && !sc.coverPending
+	// A container the reader has no parser for had no tags read, so what the read found
+	// is what stands beside the file and no more.
+	tagsUnread := unsupportedFormat(fm.Diagnostics)
 	lyrics, aux, sidecarDiags := scanSidecars(path, fm.Lyrics, sc.cache)
 
 	// The reader's own observations (unsupported container, legacy-tag fallback,
@@ -999,7 +1006,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		// TRACK is its own virtual track with an offset window, rather than the whole
 		// file cataloged as one track.
 		out, err = s.cat.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
-			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, NoCover: noCover, AuxObservations: aux,
+			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, NoCover: noCover, TagsUnread: tagsUnread, AuxObservations: aux,
 			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
 			DeferRollups: sc.rollups != nil, Job: sc.job,
 		})
@@ -1016,7 +1023,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		if len(cueChapters) > 0 {
 			bin.Chapters, bin.ChapterSource = cueChapters, "cue"
 		}
-		bin.AuxObservations, bin.NoCover = aux, noCover
+		bin.AuxObservations, bin.NoCover, bin.TagsUnread = aux, noCover, tagsUnread
 		bin.PreferredItemPID = adoptedPID(sc, fm)
 		bin.Diagnostics = diags
 		bin.PreserveLocks = sc.preserveLocks
@@ -1026,7 +1033,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		in := trackInput(lib.ID, file, tags, essenceHash)
-		in.Lyrics, in.CoverArt, in.NoCover, in.AuxObservations = lyrics, cover, noCover, aux
+		in.Lyrics, in.CoverArt, in.NoCover, in.TagsUnread, in.AuxObservations = lyrics, cover, noCover, tagsUnread, aux
 		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
 		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
 		in.DeferRollups, in.ReResolve, in.Job = sc.rollups != nil, sc.reResolve, sc.job
@@ -1981,6 +1988,82 @@ func resolveCover(path string, embedded *model.ArtImage, cache *artCache) (cover
 		return embedded, true
 	}
 	return nil, looked
+}
+
+// settleUnknownCover tells the catalog what stands beside a file it fast-paths whose cover
+// it does not know, and reports whether an item's cover moved. Such a file has no picture
+// in its tags, so the folders are all it states and its audio need not be read. The file
+// is unchanged whatever comes of it, so a failure is logged and the next scan settles it.
+func (s *Scanner) settleUnknownCover(ctx context.Context, path string, known model.ScopedFile, sc *scanCtx) bool {
+	if !known.CoverUnknown {
+		return false
+	}
+	moved, err := s.putFolderCover(ctx, PlacedFile{FilePID: known.FilePID, Path: path}, sc.cache, sc.preserveLocks)
+	if err != nil {
+		s.log.Warn("settling a folder cover", "path", path, "err", err)
+	}
+	return moved
+}
+
+// PlacedFile is a cataloged file and the path it is at on disk.
+type PlacedFile struct {
+	FilePID model.PID
+	Path    string
+}
+
+// putFolderCover states the cover beside a file with no picture in its tags, when the
+// folders say what it is.
+func (s *Scanner) putFolderCover(ctx context.Context, f PlacedFile, cache *artCache, preserveLocks bool) (bool, error) {
+	cover, looked := resolveCover(f.Path, nil, cache)
+	if cover == nil && !looked {
+		return false, nil
+	}
+	return s.cat.PutFolderCover(ctx, model.FolderCoverInput{
+		FilePID: f.FilePID, Cover: model.FileCover{Art: cover, None: cover == nil}, Observed: coverObservation(f.Path, cache),
+		PreserveLocks: preserveLocks,
+	})
+}
+
+// SettleFolderCovers tells the catalog what stands beside each of a library's files whose
+// cover it does not know, and returns how many items' covers moved. An import calls it
+// once its covers are placed, for the files it cataloged before them. A file is named by
+// its row, since a folder respelled after it landed moves the path the catalog holds. A
+// file the catalog knows the cover of is left as it is, and a failure is logged and
+// skipped: the next scan settles the file.
+func (s *Scanner) SettleFolderCovers(ctx context.Context, lib *model.Library, files []PlacedFile) int {
+	cache := artCacheAt(string(lib.Root))
+	moved := 0
+	for _, f := range files {
+		changed, err := s.putFolderCover(ctx, f, cache, true)
+		if err != nil {
+			s.log.Warn("settling a folder cover", "path", f.Path, "err", err)
+			continue
+		}
+		if changed {
+			moved++
+		}
+	}
+	return moved
+}
+
+// Covers answers what cover a file states from outside a scan, for a write that changed
+// the picture in a file's tags. It keeps the folder lookups of one run.
+type Covers struct{ caches map[string]*artCache }
+
+// NewCovers returns an empty lookup.
+func NewCovers() *Covers { return &Covers{caches: map[string]*artCache{}} }
+
+// Stated is the cover the file at path, in the library rooted at root, states with
+// embedded as the picture in its tags (nil for none): what a read of the file would find,
+// by the rule a scan applies (resolveCover).
+func (c *Covers) Stated(root, path string, embedded *model.ArtImage) model.FileCover {
+	cache := c.caches[root]
+	if cache == nil {
+		cache = artCacheAt(root)
+		c.caches[root] = cache
+	}
+	cover, looked := resolveCover(path, embedded, cache)
+	return model.FileCover{Art: cover, None: cover == nil && looked}
 }
 
 // coverFilesByLower lists dir once and returns a lowercase-name -> actual-name map of

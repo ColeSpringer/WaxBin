@@ -176,7 +176,7 @@ func sameAcquisition(cur, in model.AcquisitionInput) bool {
 // putAcquisitionTx writes the acquisition row and emits an item update delta so a
 // delta-sync consumer refreshes the now-attributed item. It is one of three writers
 // behind two gates: this one and insertAcquisitionIfAbsentTx are automatic, so a
-// standing lock makes them skip in silence the way attachArtRespectingLockTx does,
+// standing lock makes them skip in silence the way settleFrontTx does,
 // while the curation pair (SetAcquisition/ClearAcquisition) refuses a lock out loud
 // with CodeLocked unless forced.
 //

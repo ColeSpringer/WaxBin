@@ -593,7 +593,12 @@ func lyricsFromDoc(doc *waxlabel.Document, fields tag.Tags) *model.Lyrics {
 // A linked picture ("-->" MIME, whose bytes are a URL) is skipped in both passes, or
 // the last-resort pass would store the URL as the cover.
 func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
-	pics := doc.Pictures()
+	return coverFromPictures(doc.Pictures())
+}
+
+// coverFromPictures is coverFromDoc over a file's pictures, which a picture write also
+// applies to the pictures it leaves, to say what a read of the written file will take.
+func coverFromPictures(pics []waxlabel.Picture) *model.ArtImage {
 	// Prefer a non-empty front cover; otherwise the first picture with bytes. A
 	// zero-length entry (e.g. an empty front-cover frame) must not shadow a real one.
 	var best *waxlabel.Picture

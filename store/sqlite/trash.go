@@ -277,6 +277,10 @@ func (b *detachBatch) settleTx(ctx context.Context, tx *sql.Tx) error {
 			if p != nil {
 				b.promoted = append(b.promoted, *p)
 			}
+			// The cover follows the files the item keeps.
+			if err := settleFrontAfterLeaveTx(ctx, tx, b.affected, iid, true); err != nil {
+				return err
+			}
 			if marked, err = markUnreachableMissingTx(ctx, tx, iid, nil); err != nil {
 				return err
 			}

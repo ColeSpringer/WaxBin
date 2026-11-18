@@ -348,7 +348,10 @@ func TestGCArtMultiRole(t *testing.T) {
 		t.Fatalf("live multi-role sources reported orphaned: %+v (err %v)", rep, err)
 	}
 
-	// The entity vanishes without art cleanup; both roles' sources become orphans.
+	// The entity and its file vanish without art cleanup; both roles' sources become orphans.
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM file"); err != nil {
+		t.Fatalf("delete files: %v", err)
+	}
 	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM playable_item"); err != nil {
 		t.Fatalf("delete items: %v", err)
 	}
@@ -915,7 +918,7 @@ func rescanCover(ctx context.Context, st *Store, pid model.PID, img *model.ArtIm
 		if err := tx.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid=?", string(pid)).Scan(&itemID); err != nil {
 			return err
 		}
-		_, err := attachArtTxChanged(ctx, tx, itemID, pic)
+		_, err := attachEntityArtTxChanged(ctx, tx, "track", itemID, pic)
 		return err
 	})
 }

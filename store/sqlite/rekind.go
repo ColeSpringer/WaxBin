@@ -184,10 +184,18 @@ func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID, job model.PI
 		if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		// The file was not read, so the cover its row holds is what it brings, as a read
+		// of it would.
+		if _, err := settleFrontTx(ctx, tx, affected, itemID, examinedArt{}, true, true); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+		}
+		if err := affected.announceFrontsTx(ctx, tx); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return waxerr.Wrap(waxerr.CodeIO, op, appendItemUpdateTx(ctx, tx, itemID))
 	})

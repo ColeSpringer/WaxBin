@@ -201,6 +201,23 @@ func TestApplyPictureRoundTrip(t *testing.T) {
 	if !res.Changed || res.ContentHash == "" {
 		t.Fatalf("picture write result = %+v, want changed", res)
 	}
+	// The write says what a read of the file takes as its cover from here on.
+	sameAsARead := func(when string, said *model.ArtImage) {
+		t.Helper()
+		fm, err := r.Read(ctx, path)
+		if err != nil {
+			t.Fatalf("%s: read: %v", when, err)
+		}
+		switch {
+		case said == nil || fm.CoverArt == nil:
+			if said != nil || fm.CoverArt != nil {
+				t.Errorf("%s: the write says cover %v and a read finds %v", when, said != nil, fm.CoverArt != nil)
+			}
+		case !bytes.Equal(said.Data, fm.CoverArt.Data) || said.Source != model.SourceTag:
+			t.Errorf("%s: the write names another picture than the one a read finds", when)
+		}
+	}
+	sameAsARead("after the embed", res.Cover)
 
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
@@ -244,13 +261,25 @@ func TestApplyPictureRoundTrip(t *testing.T) {
 	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
 		t.Fatalf("embed back cover: %v", err)
 	}
-	if _, err := w.ApplyPicture(ctx, path, PictureEdit{Clear: true}); err != nil {
+	cleared, err := w.ApplyPicture(ctx, path, PictureEdit{Clear: true})
+	if err != nil {
 		t.Fatalf("clear picture: %v", err)
 	}
 	pics2 := mustPictures(t, ctx, path)
 	if len(pics2) != 1 || pics2[0].Type != waxlabel.PicBackCover {
 		t.Errorf("pictures after front-cover clear = %+v, want only the back cover to survive", pics2)
 	}
+	// A read falls back to the back cover, and the write says so, where taking the file
+	// for bare would leave the catalog recording a cover no read finds.
+	if cleared.Cover == nil {
+		t.Error("the clear says the file holds no picture a read would take, with a back cover left in it")
+	}
+	sameAsARead("after the clear", cleared.Cover)
+	again, err := w.ApplyPicture(ctx, path, PictureEdit{Clear: true})
+	if err != nil || again.Changed {
+		t.Fatalf("a second clear = %+v (err %v), want a no-op", again, err)
+	}
+	sameAsARead("after a clear that changed nothing", again.Cover)
 }
 
 func mustPictures(t *testing.T, ctx context.Context, path string) []waxlabel.Picture {

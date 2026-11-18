@@ -233,15 +233,10 @@ func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: refPID, Edits: edits}
-	// What each written file states from here on, for the catalog's record of it.
-	front := ""
-	if !pedit.Clear {
-		front = art.Hash(pedit.Data)
-	}
 	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil, []string{owed},
 		func(w *meta.Writer, path string) (fileWrite, error) {
 			res, err := w.ApplyPicture(ctx, path, pedit)
-			return fileWrite{res: res, front: &front}, err
+			return fileWrite{res: res, picture: true}, err
 		}); err != nil {
 		return err
 	}

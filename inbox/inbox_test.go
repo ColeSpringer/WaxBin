@@ -459,6 +459,25 @@ func (failingCataloger) ScanFileWith(context.Context, *model.Library, string, sc
 	return nil, nil, waxerr.New(waxerr.CodeIO, "test", "catalog unavailable")
 }
 
+func (failingCataloger) SettleFolderCovers(context.Context, *model.Library, []scan.PlacedFile) int {
+	return 0
+}
+func (foldingCataloger) SettleFolderCovers(context.Context, *model.Library, []scan.PlacedFile) int {
+	return 0
+}
+func (mintingCataloger) SettleFolderCovers(context.Context, *model.Library, []scan.PlacedFile) int {
+	return 0
+}
+func (landingCataloger) SettleFolderCovers(context.Context, *model.Library, []scan.PlacedFile) int {
+	return 0
+}
+func (cancelingCataloger) SettleFolderCovers(context.Context, *model.Library, []scan.PlacedFile) int {
+	return 0
+}
+func (ripCataloger) SettleFolderCovers(context.Context, *model.Library, []scan.PlacedFile) int {
+	return 0
+}
+
 // TestAFailureAfterTheMoveNamesWhereTheFileLanded: an import whose file was placed but
 // could not be cataloged says where the file now is, beside the error.
 func TestAFailureAfterTheMoveNamesWhereTheFileLanded(t *testing.T) {

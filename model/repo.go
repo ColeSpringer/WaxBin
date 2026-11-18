@@ -19,17 +19,24 @@ type PutScannedTrackInput struct {
 	// Lyrics is the track's structured lyrics (sidecar .lrc or embedded), or nil.
 	// The store writes them alongside the item; a nil value clears any prior row.
 	Lyrics *Lyrics
-	// CoverArt is the track's front-cover image (embedded or directory), or nil.
-	// The store dedups it into the content-addressed art store and maps it onto the
-	// track. Album art is derived from current track covers at read time.
+	// CoverArt is the front-cover image the file states (embedded or directory), or
+	// nil. The store dedups it into the content-addressed art store, and it is the
+	// track's cover while no file ahead of this one among the item's files states one,
+	// the primary first. Album art is derived from current track covers at read time.
 	CoverArt *ArtImage
-	// NoCover says the scan read this file's tags and looked in the folders beside it,
-	// and there is no cover. It takes back a front the catalog holds from a tag or a
-	// sidecar once no other file of the item states that picture; a front set any other
-	// way stays. With CoverArt nil and NoCover unset the put says nothing about the
-	// cover: a scan that could not read the tags, a cover folder or a cover file, or an
-	// import whose cover follows the audio.
+	// NoCover says the scan looked in this file's tags, where it could read them, and in
+	// the folders beside it, and there is no cover. A front the catalog holds from a tag
+	// or a sidecar then passes to the item's next file that states one, or goes when none
+	// does; a front set any other way stays. With CoverArt nil and NoCover unset the tags
+	// hold no picture and the folders did not say: a scan that could not read a cover
+	// folder or a cover file, or an import whose cover follows the audio. The file's
+	// cover is unknown from then on, and the item keeps the cover it has.
 	NoCover bool
+	// TagsUnread says the reader had no parser for the file, so CoverArt and NoCover
+	// speak for the folders beside it alone. A picture its tags stated at an earlier
+	// read then stands: the file may hold it still. With neither set the put says
+	// nothing about the cover.
+	TagsUnread bool
 	// AuxObservations records the on-disk state of this file's sidecars (a sibling
 	// .lrc, the directory cover) so a later rescan can stat-compare them and re-parse
 	// only a changed one instead of re-reading every sidecar every scan.
@@ -112,11 +119,13 @@ type PutScannedBookInput struct {
 	// the chapter rows' source so embedded chapters stay authoritative over cue ones.
 	// Empty defaults to "embedded".
 	ChapterSource string
-	// CoverArt is the book's cover image (embedded or directory), or nil, and NoCover
-	// says the scan looked and found none, as on PutScannedTrackInput. The book takes its
-	// primary part's cover.
-	CoverArt *ArtImage
-	NoCover  bool
+	// CoverArt is the book's cover image (embedded or directory), or nil, NoCover says
+	// the scan looked and found none, and TagsUnread that it could not read the tags, as
+	// on PutScannedTrackInput. The book takes the cover of its primary part, or of the
+	// first part after it that states one.
+	CoverArt   *ArtImage
+	NoCover    bool
+	TagsUnread bool
 	// AuxObservations records the on-disk state of this file's sidecars for the scan
 	// fast-path (see PutScannedTrackInput.AuxObservations).
 	AuxObservations []AuxObservation
@@ -182,10 +191,11 @@ type PutScannedVirtualTracksInput struct {
 	// per-track and album-level display metadata.
 	Tracks []VirtualTrack
 	// CoverArt is the rip's cover image (embedded or directory), mapped onto each
-	// virtual track on every put, or nil, and NoCover says the scan looked and found
-	// none, as on PutScannedTrackInput.
-	CoverArt *ArtImage
-	NoCover  bool
+	// virtual track on every put, or nil, NoCover says the scan looked and found none,
+	// and TagsUnread that it could not read the tags, as on PutScannedTrackInput.
+	CoverArt   *ArtImage
+	NoCover    bool
+	TagsUnread bool
 	// AuxObservations records this file's sidecar state (the .cue, a directory cover)
 	// for the scan fast-path, exactly as the track/book inputs do.
 	AuxObservations []AuxObservation
@@ -408,6 +418,9 @@ type ScopedFile struct {
 	ItemPID    PID
 	Kind       Kind
 	KindLocked bool
+	// CoverUnknown says the catalog does not know what cover the file states. Such a file
+	// has no picture in its tags, so a look beside it settles that (PutFolderCover).
+	CoverUnknown bool
 }
 
 // FileStanding is what the catalog holds behind a file a scan reads: the item it backs
@@ -570,10 +583,30 @@ type FileStateUpdate struct {
 	NewSize         int64
 	NewMTimeNS      int64
 	NewContentHash  string
-	// Front is set by a write that changed the picture the file embeds: the hash of the
-	// cover it now carries, or the empty string for a write that stripped it. Nil is
-	// every other write, which leaves the picture as the last read found it.
-	Front *string
+	// Cover is set by a write that changed the picture the file embeds, and is what the
+	// file states from then on, as a read of it would find: the picture written, or after
+	// a strip the one beside the file or none. A set Cover that says neither leaves the
+	// file's cover unknown. Nil is every other write, which leaves the cover as the last
+	// read found it.
+	Cover *FileCover
+}
+
+// FileCover is the cover a file states, in its tags or beside it: a picture, or none.
+// With neither set it says nothing.
+type FileCover struct {
+	Art  *ArtImage
+	None bool
+}
+
+// FolderCoverInput is what stands beside a file as its cover, found without reading its
+// audio. Observed is the cover file as it was seen, kept with the file's other sidecar
+// observations so the next scan does not take it for a cover newly arrived.
+type FolderCoverInput struct {
+	FilePID  PID
+	Cover    FileCover
+	Observed *AuxObservation
+	// PreserveLocks keeps a locked cover as it is, as on a scan's puts.
+	PreserveLocks bool
 }
 
 // Catalog is the persistence port for the catalog. store/sqlite implements it;
@@ -642,6 +675,10 @@ type Catalog interface {
 	// concurrency), so an on-disk tag write can record its own result without
 	// clobbering a concurrent scan/move. Returns whether the row was updated.
 	UpdateFileStateIfUnchanged(ctx context.Context, in FileStateUpdate) (bool, error)
+	// PutFolderCover records what stands beside a file as the cover it states, for a
+	// file whose cover the catalog does not know, and settles the items it backs. It
+	// reports whether an item's cover changed.
+	PutFolderCover(ctx context.Context, in FolderCoverInput) (bool, error)
 	// PutFileDiagnostics replaces one writer's diagnostics for a file. Each writer
 	// owns its own origin's rows, so writers never clear each other's findings and a
 	// clean re-run clears the writer's own stale rows. It is keyed by FilePID because

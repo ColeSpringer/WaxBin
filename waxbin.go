@@ -538,15 +538,6 @@ func (l *Library) SetLibraryFolderFallback(ctx context.Context, pid model.PID, o
 	return l.store.SetLibraryFolderFallback(ctx, pid, on)
 }
 
-// readOnlyLibraries returns the rowids of the libraries flagged read-only.
-func (l *Library) readOnlyLibraries(ctx context.Context) (map[int64]bool, error) {
-	libs, err := l.store.Libraries(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return readOnlyIDs(libs), nil
-}
-
 // readOnlyIDs returns the rowids of the libraries in libs flagged read-only.
 func readOnlyIDs(libs []*model.Library) map[int64]bool {
 	out := map[int64]bool{}
@@ -2407,8 +2398,9 @@ type fileWrite struct {
 	res     *meta.WriteResult
 	refused []keyRefusal
 	settles []string
-	// front is set by a write of the file's picture (model.FileStateUpdate.Front).
-	front *string
+	// picture is set by a write of the file's picture, after which the catalog is told
+	// what the file states now (model.FileStateUpdate.Cover).
+	picture bool
 }
 
 type keyRefusal struct {
@@ -2440,7 +2432,13 @@ func wholeFile(apply func(w *meta.Writer, path string) (*meta.WriteResult, error
 func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals, settles []string, apply func(w *meta.Writer, path string) (fileWrite, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
-	readOnly, roErr := l.readOnlyLibraries(ctx)
+	libs, roErr := l.store.Libraries(ctx)
+	readOnly := readOnlyIDs(libs)
+	roots := make(map[int64]string, len(libs))
+	for _, lib := range libs {
+		roots[lib.ID] = string(lib.Root)
+	}
+	covers := scan.NewCovers()
 	for _, ref := range files {
 		if ref.FilePID != "" {
 			if seen[ref.FilePID] {
@@ -2599,12 +2597,30 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			NewSize:         res.Size,
 			NewMTimeNS:      res.MTimeNS,
 			NewContentHash:  res.ContentHash,
-			Front:           fw.front,
+			Cover:           coverAfterWrite(covers, roots, file, fw),
 		}); err != nil {
 			l.log.Warn("edit file-state update", "path", path, "err", err)
 		}
 	}
 	return nil
+}
+
+// coverAfterWrite is the cover a file states once a write changed the picture in its
+// tags, nil for a write that touched no picture: the picture a read of the written file
+// takes from its tags (meta.WriteResult.Cover), or with none there whatever stands beside
+// the file. roots holds the library roots by rowid. A file whose library is not among
+// them cannot be looked beside: it states the picture in its tags, and with none there
+// its cover is left unknown, which the next scan settles.
+func coverAfterWrite(covers *scan.Covers, roots map[int64]string, file *model.File, fw fileWrite) *model.FileCover {
+	if !fw.picture {
+		return nil
+	}
+	root, ok := roots[file.LibraryID]
+	if !ok {
+		return &model.FileCover{Art: fw.res.Cover}
+	}
+	c := covers.Stated(root, string(file.Path), fw.res.Cover)
+	return &c
 }
 
 // writeBackFields mirrors committed catalog field edits into the backing files' tags.

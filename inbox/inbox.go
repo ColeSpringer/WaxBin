@@ -52,6 +52,9 @@ type Store interface {
 // import's folder rule found a file with no album a part of.
 type Cataloger interface {
 	ScanFileWith(ctx context.Context, lib *model.Library, path string, opts scan.FileOptions) (*scan.Result, *model.ScanItemResult, error)
+	// SettleFolderCovers says what stands beside files cataloged before their folder's
+	// cover was placed.
+	SettleFolderCovers(ctx context.Context, lib *model.Library, files []scan.PlacedFile) int
 }
 
 // Service plans and applies imports.
@@ -269,6 +272,8 @@ type FileOutcome struct {
 	// one brought back, set only when the file landed on that item, its verdict saying what
 	// else the put did.
 	Restores model.PID
+	// filePID is the file's row, for the cover settled once the batch's covers are placed.
+	filePID model.PID
 }
 
 // Failure records one import that could not be applied. Dst names where the file landed
@@ -699,7 +704,17 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	// already landed, so a staging directory emptied before the cancel would otherwise
 	// keep a cover with nothing to hold it. The staging folders the import emptied are
 	// then removed; a copier still writing into one has a file there, which keeps it.
+	//
+	// Each file was cataloged before its folder's cover landed, so a read that found no
+	// picture in the tags said nothing of the cover. Once the covers are placed the
+	// catalog is told what stands beside each file, a cover or none.
 	var placed []organize.SidecarMove
+	type landing struct {
+		lib   *model.Library
+		files []scan.PlacedFile
+	}
+	var landed []landing
+	landedAt := map[int64]int{}
 	placeCovers := func() {
 		if plan.Acquired {
 			return
@@ -710,6 +725,9 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 		}
 		rep.Sidecars += s.placeCovers(organize.CoverMoves(placed, organize.PruneOptions(root, nil)), plan.Copy)
 		rep.DirsPruned += s.pruneStaging(plan.Source, placed)
+		for _, l := range landed {
+			s.cataloger.SettleFolderCovers(context.WithoutCancel(ctx), l.lib, l.files)
+		}
 	}
 	sib := organize.NewSiblings()
 	spellers := map[int64]*fsx.Speller{}
@@ -755,6 +773,13 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Bytes += a.Size
 			rep.Sidecars += sidecars
 			placed = append(placed, organize.SidecarMove{Src: a.Src, Dst: a.Dst})
+			at, ok := landedAt[lib.ID]
+			if !ok {
+				at = len(landed)
+				landedAt[lib.ID] = at
+				landed = append(landed, landing{lib: lib})
+			}
+			landed[at].files = append(landed[at].files, scan.PlacedFile{FilePID: outcome.filePID, Path: a.Dst})
 		}
 	}
 	placeCovers()
@@ -835,7 +860,7 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	settled := context.WithoutCancel(ctx)
 	var made []model.PID
 	if out != nil {
-		outcome.ItemPID, outcome.AttachedAsCopy = out.ItemPID, out.AttachedAsCopy
+		outcome.ItemPID, outcome.AttachedAsCopy, outcome.filePID = out.ItemPID, out.AttachedAsCopy, out.FilePID
 		outcome.Verdict, outcome.Relinked, outcome.Promoted = scan.VerdictOf(out), out.Relinked, out.Promoted
 		outcome.Restores = s.restored(settled, a, out)
 		made = out.Made

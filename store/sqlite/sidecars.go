@@ -19,22 +19,6 @@ func replaceFileAuxTx(ctx context.Context, tx *sql.Tx, fileID int64, obs []model
 	return putFileAuxTx(ctx, tx, fileID, obs)
 }
 
-// recordFileFrontTx keeps what a file's read stated about its cover (file.front_hash):
-// the picture's hash as the catalog stores it, or the empty string for a read that found
-// none. A read that says nothing leaves the column as it was, and one that says what it
-// said before writes nothing.
-func recordFileFrontTx(ctx context.Context, tx *sql.Tx, fileID int64, c scannedCover) error {
-	if !c.pic.present() && !c.none {
-		return nil
-	}
-	hash := ""
-	if c.pic.present() {
-		hash = c.pic.img.Hash
-	}
-	_, err := tx.ExecContext(ctx, "UPDATE file SET front_hash = ? WHERE id = ? AND front_hash IS NOT ?", hash, fileID, hash)
-	return err
-}
-
 // putFileAuxTx upserts a file's sidecar observations (one row per (file_id, kind)),
 // so the scanner can stat-compare a sidecar on the next scan and skip re-parsing an
 // unchanged one.

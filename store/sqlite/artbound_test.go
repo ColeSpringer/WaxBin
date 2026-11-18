@@ -206,6 +206,13 @@ func TestGCArtDropsTheResizedMemo(t *testing.T) {
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("SetItemArt: %v", err)
 	}
+	// The file still states the picture, which keeps it, until a read finds it gone.
+	if sources, _, err := st.GCArt(ctx); err != nil || sources != 0 {
+		t.Fatalf("GCArt collected %d sources (err %v), want the picture the file states kept", sources, err)
+	}
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE file SET front_hash = '', front_source = NULL"); err != nil {
+		t.Fatal(err)
+	}
 	sources, _, err := st.GCArt(ctx)
 	if err != nil || sources != 1 {
 		t.Fatalf("GCArt collected %d sources (err %v), want the bounded picture", sources, err)
@@ -310,8 +317,9 @@ func TestExaminingOnAClosedStoreAnswersAsAWriteWould(t *testing.T) {
 }
 
 // TestALockedItemsOversizedCoverIsExaminedOnce: a cover the lock keeps from being
-// attached leaves no art_resized row, and the pictures examined lately in this process
-// answer the next arrival without a decode.
+// attached is still the one its file states, so it is stored with its art_resized row,
+// and the pictures examined lately in this process answer the next arrival without a
+// decode.
 func TestALockedItemsOversizedCoverIsExaminedOnce(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
@@ -329,8 +337,11 @@ func TestALockedItemsOversizedCoverIsExaminedOnce(t *testing.T) {
 	if _, err := st.PutScannedTrack(ctx, in); err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_resized"); n != 0 {
-		t.Fatalf("art_resized rows = %d, want none for a cover the lock kept out", n)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_resized"); n != 1 {
+		t.Fatalf("art_resized rows = %d, want the one for the cover the file states", n)
+	}
+	if got := frontHash(t, st, model.ArtTrack, pid); got == scalarStr(t, st, "SELECT front_hash FROM file") {
+		t.Fatal("the locked item took the file's cover")
 	}
 	if _, ok := st.examined.get(art.Hash(raw), model.Attribution{}); !ok {
 		t.Error("the examined picture was not remembered in the process")

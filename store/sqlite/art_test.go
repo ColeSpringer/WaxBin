@@ -299,7 +299,11 @@ func TestGCArtRemovesOrphans(t *testing.T) {
 	}
 
 	// Simulate the backing entities vanishing without art cleanup (white-box: this
-	// is what a future delete primitive must not leave behind).
+	// is what a future delete primitive must not leave behind). The file goes too, since
+	// the cover a file states is kept for it.
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM file"); err != nil {
+		t.Fatalf("delete files: %v", err)
+	}
 	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM playable_item"); err != nil {
 		t.Fatalf("delete items: %v", err)
 	}

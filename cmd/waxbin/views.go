@@ -619,6 +619,7 @@ type derivedView struct {
 	BookISBNKeyDrift        int `json:"bookIsbnKeyDrift"`
 	AlbumYearDrift          int `json:"albumYearDrift"`
 	ReleaseYearDrift        int `json:"releaseYearDrift"`
+	CoverDrift              int `json:"coverDrift"`
 	SortSpellingDrift       int `json:"sortSpellingDrift"`
 	PlaylistPositionDrift   int `json:"playlistPositionDrift"`
 	RollupsPending          int `json:"rollupsPending"`
@@ -652,6 +653,7 @@ type refreshView struct {
 	ISBNKeys           int `json:"isbnKeys"`
 	AlbumYears         int `json:"albumYears"`
 	ReleaseYears       int `json:"releaseYears"`
+	Covers             int `json:"covers"`
 	PlaylistsCompacted int `json:"playlistsCompacted"`
 	SortSpellings      int `json:"sortSpellings"`
 	SortSpellingKeys   int `json:"sortSpellingKeys"`
@@ -671,7 +673,8 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
-		AlbumYearDrift: r.AlbumYearDrift, ReleaseYearDrift: r.ReleaseYearDrift, SortSpellingDrift: r.SortSpellingDrift,
+		AlbumYearDrift: r.AlbumYearDrift, ReleaseYearDrift: r.ReleaseYearDrift, CoverDrift: r.CoverDrift,
+		SortSpellingDrift:     r.SortSpellingDrift,
 		PlaylistPositionDrift: r.PlaylistPositionDrift, RollupsPending: r.RollupsPending,
 		OrphanArtSources:            r.OrphanArtSources,
 		OrphanThumbnails:            r.OrphanThumbnails,

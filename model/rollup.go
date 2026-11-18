@@ -16,13 +16,16 @@ type RollupSettle struct {
 // ISBN key had drifted, the albums and items whose year moved, and the static playlists
 // renumbered.
 type RefreshReport struct {
-	Artists            int
-	ReleaseGroups      int
-	Genres             int
-	BookDurations      int
-	ISBNKeys           int
-	AlbumYears         int
-	ReleaseYears       int
+	Artists       int
+	ReleaseGroups int
+	Genres        int
+	BookDurations int
+	ISBNKeys      int
+	AlbumYears    int
+	ReleaseYears  int
+	// Covers counts the items whose cover from disk it settled to the one their files
+	// state.
+	Covers             int
 	PlaylistsCompacted int
 	// SortSpellings counts the albums, release groups and artists whose derived sort
 	// spelling it rewrote, and SortSpellingKeys the ones whose sort key it moved, which

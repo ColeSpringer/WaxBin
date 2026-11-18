@@ -31,8 +31,8 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 		var fpid, ipid, kind string
 		var path []byte
 		var size, mtime int64
-		var locked bool
-		if err := rows.Scan(&id, &fpid, &path, &size, &mtime, &ipid, &kind, &locked); err != nil {
+		var locked, coverUnknown bool
+		if err := rows.Scan(&id, &fpid, &path, &size, &mtime, &ipid, &kind, &locked, &coverUnknown); err != nil {
 			rows.Close()
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -43,7 +43,7 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 			continue
 		}
 		byID[id] = &model.ScopedFile{FilePID: model.PID(fpid), Size: size, MTimeNS: mtime,
-			ItemPID: model.PID(ipid), Kind: model.Kind(kind), KindLocked: locked}
+			ItemPID: model.PID(ipid), Kind: model.Kind(kind), KindLocked: locked, CoverUnknown: coverUnknown}
 		pathByID[id] = string(path)
 	}
 	if err := rows.Err(); err != nil {
@@ -109,7 +109,8 @@ func scopedFileIndexQueries(libraryID int64, lo, hi []byte) (files string, fargs
 	// mtime must take the full path to flip its item back to present. Such a file, if still
 	// gone, is simply not reconciled again (it is already missing).
 	files, fargs = scope(`SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid, ''), COALESCE(pi.kind, ''),
-			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1)
+			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1),
+			f.front_hash IS NULL
 		FROM file f
 		LEFT JOIN item_file itf ON itf.file_id = f.id
 		LEFT JOIN playable_item pi ON pi.id = itf.item_id
@@ -306,6 +307,9 @@ func settleMissingTx(ctx context.Context, tx *sql.Tx, missing map[int64]bool, it
 		if err := refreshBookDuration(ctx, tx, itemID); err != nil {
 			return err
 		}
+		if err := settleFrontAfterLeaveTx(ctx, tx, affected, itemID, true); err != nil {
+			return err
+		}
 		if !marked {
 			if err := appendItemUpdateTx(ctx, tx, itemID); err != nil {
 				return err
@@ -488,6 +492,14 @@ func allFilesInSet(ctx context.Context, tx *sql.Tx, itemID int64, missing map[in
 func (s *Store) UpdateFileStateIfUnchanged(ctx context.Context, in model.FileStateUpdate) (bool, error) {
 	const op = "store.UpdateFileStateIfUnchanged"
 	var updated bool
+	var seen scannedCover
+	if in.Cover != nil {
+		pic, err := s.examineArt(ctx, in.Cover.Art)
+		if err != nil {
+			return false, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		seen = scanned(pic, in.Cover.None, false)
+	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE file SET size = ?, mtime_ns = ?, content_hash = ?, last_seen = ?
@@ -503,16 +515,25 @@ func (s *Store) UpdateFileStateIfUnchanged(ctx context.Context, in model.FileSta
 		}
 		if n > 0 {
 			updated = true
-			// A write that changed the file's picture leaves it stating that picture, with
-			// no read to say so. One that stripped it leaves a folder cover or none, which
-			// only a read can tell, so the column goes back to unknown.
-			if in.Front != nil {
-				if _, err := tx.ExecContext(ctx, "UPDATE file SET front_hash = NULLIF(?, '') WHERE pid = ?",
-					*in.Front, string(in.FilePID)); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+			if err := appendChange(ctx, tx, "file", in.FilePID, model.OpUpdate); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			return appendChange(ctx, tx, "file", in.FilePID, model.OpUpdate)
+			// A write that changed the file's picture changed what the file states, with no
+			// read to say so. A cover the disk gave an item the file backs follows it. The
+			// write put the catalog's own picture in the file, so it replaces no cover a
+			// user or a provider set, as a read of the file could.
+			if in.Cover == nil {
+				return nil
+			}
+			var fileID int64
+			if err := tx.QueryRowContext(ctx, "SELECT id FROM file WHERE pid = ?", string(in.FilePID)).Scan(&fileID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			_, err := settleFileFrontsTx(ctx, tx, fileID, seen.pic, false, true)
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return nil
 	})

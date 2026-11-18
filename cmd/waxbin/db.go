@@ -398,7 +398,8 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			"artists take from their members, book durations and ISBN keys, album and release " +
 			"years and playlist positions are compared against a fresh recompute from the " +
 			"source rows. Reports drift; --fix recomputes the maintained rollups, sort spellings, book " +
-			"durations and ISBN keys, and album and release years, renumbers playlist " +
+			"durations and ISBN keys, and album and release years, settles covers from disk to the " +
+			"ones the files state, renumbers playlist " +
 			"positions, refolds stale sort keys and rebuilds stale search rows first, reporting " +
 			"how much each rewrote. Rollups a running scan has yet to settle are reported " +
 			"as pending, not as drift, since the scan settles them as it goes. With no scan " +
@@ -507,6 +508,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "book-isbn-key drift:      %d\n", rep.BookISBNKeyDrift)
 				fmt.Fprintf(w, "album-year drift:         %d\n", rep.AlbumYearDrift)
 				fmt.Fprintf(w, "release-year drift:       %d\n", rep.ReleaseYearDrift)
+				fmt.Fprintf(w, "cover drift:              %d\n", rep.CoverDrift)
 				fmt.Fprintf(w, "sort-spelling drift:      %d\n", rep.SortSpellingDrift)
 				fmt.Fprintf(w, "playlist-position drift:  %d\n", rep.PlaylistPositionDrift)
 				fmt.Fprintf(w, "rollups pending:          %d\n", rep.RollupsPending)
@@ -525,6 +527,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 						r.Artists, r.ReleaseGroups, r.Genres)
 					fmt.Fprintf(w, "books rewritten:          %d durations, %d ISBN keys\n", r.BookDurations, r.ISBNKeys)
 					fmt.Fprintf(w, "years rewritten:          %d albums, %d items\n", r.AlbumYears, r.ReleaseYears)
+					fmt.Fprintf(w, "covers settled:           %d\n", r.Covers)
 					fmt.Fprintf(w, "playlists renumbered:     %d\n", r.PlaylistsCompacted)
 					fmt.Fprintf(w, "sort keys rewritten:      %d\n", resorted+r.SortSpellingKeys)
 					fmt.Fprintf(w, "sort spellings rewritten: %d\n", r.SortSpellings)
@@ -557,6 +560,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return verdict
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and ISBN keys, and album and release years, renumber playlist positions, refold stale sort keys, reclaim orphaned art and tag provenance, and rebuild stale search rows before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and ISBN keys, and album and release years, settle covers from disk, renumber playlist positions, refold stale sort keys, reclaim orphaned art and tag provenance, and rebuild stale search rows before verifying (takes the write lock)")
 	return cmd
 }

@@ -338,6 +338,10 @@ type WriteResult struct {
 	MTimeNS     int64
 	ContentHash string
 	Warnings    []model.TagWriteWarning
+	// Cover is set by ApplyPicture: the picture in the file's tags a read takes as its
+	// cover once the write is in, nil for none. After a clear that is a back cover or a
+	// booklet scan the file still holds, which a read falls back to.
+	Cover *model.ArtImage
 }
 
 // unrepresentedCodes are the WaxLabel warning codes that mean the write was lossy:
@@ -844,7 +848,15 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 	// ClearPictures(): that would delete pictures the catalog's front-cover "art" field
 	// does not model.
 	ed.RemovePictures(func(p waxlabel.Picture) bool { return p.Type == waxlabel.PicFrontCover })
+	// The pictures the file holds once the write is in, in the order a read meets them.
+	var left []waxlabel.Picture
+	for _, p := range doc.Pictures() {
+		if p.Type != waxlabel.PicFrontCover {
+			left = append(left, p)
+		}
+	}
 	if !edit.Clear {
+		left = append(left, waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: edit.Data})
 		ed.AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: edit.Data})
 		if !waxlabel.IsRecognizedImage(edit.Data) {
 			// The sniffer has known HEIF, AVIF and JPEG XL since 1.7, so this now covers
@@ -860,9 +872,14 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 	}
 	warnings := writeWarnings(plan.Report().Warnings)
 	if plan.IsNoOp() {
-		return &WriteResult{Changed: false, Warnings: warnings}, nil
+		return &WriteResult{Changed: false, Warnings: warnings, Cover: coverFromPictures(left)}, nil
 	}
-	return commitPlan(ctx, plan, op, path, "cover", warnings)
+	res, err := commitPlan(ctx, plan, op, path, "cover", warnings)
+	if err != nil {
+		return nil, err
+	}
+	res.Cover = coverFromPictures(left)
+	return res, nil
 }
 
 // MergeKeylessDiagnostics folds diagnostics that share a code and name no tag key into

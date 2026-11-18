@@ -399,8 +399,8 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 //
 // Every writer that clears a track's front calls it. SetItemArt is the item surface the
 // CLI uses and SetEntityArt accepts a track type from the proxy, so a rule living in only
-// one of them would fire for one client and not the other, and a scan that finds the
-// cover gone from disk (dropUnstatedFrontTx) opens the same vacancy.
+// one of them would fire for one client and not the other, and a cover gone from disk
+// (settleFrontTx) opens the same vacancy.
 func memberFrontClearedTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	var albumID sql.NullInt64
 	err := tx.QueryRowContext(ctx, "SELECT album_id FROM track WHERE item_id = ?", itemID).Scan(&albumID)
@@ -772,24 +772,46 @@ func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, enti
 		if err := insertArtSourceTx(ctx, tx, pic); err != nil {
 			return "", err
 		}
-		img := pic.img
-		// A plain INSERT, not OR IGNORE: the DELETE above already removed the only primary
-		// key this can collide with, so the IGNORE has nothing left to absorb except a
-		// genuine failure (a missing art_source under foreign_keys=ON, a rejected value).
-		// Swallowing one of those would delete the old mapping and store no new one, and
-		// report success.
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
-			 VALUES (?,?,?,?,?,?,?,?)`,
-			entityType, entityID, img.Hash, role, string(img.Source), img.Provider, img.SourceURL, nowNS()); err != nil {
+		if err := insertArtMapTx(ctx, tx, entityType, entityID, role, pic.img.Hash, pic.img.Attribution); err != nil {
 			return "", err
 		}
-		hash = img.Hash
+		hash = pic.img.Hash
 	}
 	if inherited && hash != prior {
 		return hash, nameFrontHeirsTx(ctx, tx, entityType, entityID)
 	}
 	return hash, nil
+}
+
+// insertArtMapTx writes one (entity, role) mapping onto a source the store holds, after
+// the caller cleared the slot. A plain INSERT, not OR IGNORE: the slot's old row is gone,
+// so an IGNORE has nothing left to absorb except a genuine failure (a missing art_source
+// under foreign_keys=ON, a rejected value), and swallowing one of those would leave the
+// slot empty and report success.
+func insertArtMapTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role, hash string, attr model.Attribution) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		entityType, entityID, hash, role, string(attr.Source), attr.Provider, attr.SourceURL, nowNS())
+	return err
+}
+
+// mapStoredArtTx points an item's art slot at a picture the store already holds, by its
+// hash, without reading the picture, and reports whether the store holds it. It is for
+// the track and episode slots, whose fronts nothing inherits.
+func mapStoredArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role, hash string, attr model.Attribution) (bool, error) {
+	var held bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM art_source WHERE hash = ?)", hash).Scan(&held); err != nil || !held {
+		return false, err
+	}
+	if err := checkAttribution(attr, attr.ValidForArt, "store.mapStoredArt"); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM art_map WHERE entity_type=? AND entity_id=? AND role=?", entityType, entityID, role); err != nil {
+		return false, err
+	}
+	return true, insertArtMapTx(ctx, tx, entityType, entityID, role, hash, attr)
 }
 
 // frontHeirs selects, by type and pid, the cards that draw their cover from one release
@@ -932,7 +954,7 @@ func lyricsAttribution(ly *model.Lyrics) model.Attribution {
 // the front lock beside it. It exists because the lock has to sit where the writer that
 // must respect it already looks, and the two art writers look in different places: a
 // track or book item's cover is re-derived by the scan through
-// attachArtRespectingLockTx, which reads field_provenance, while every other entity's
+// settleFrontTx, which reads field_provenance, while every other entity's
 // cover is written by enrichment or a feed sync, which read entity_curation.
 //
 // An episode is deliberately not item-scoped even though it is a playable_item: "art"
@@ -1113,62 +1135,6 @@ func itemIDForArtSlotTx(ctx context.Context, q queryer, slot model.ArtEntity, pi
 	return id, nil
 }
 
-// attachArtRespectingLockTx maps an item's scanned front cover unless the "art" field
-// is locked and preserveLock is set (a scan/enrich pass must not overwrite a user
-// cover). It goes through artFillBlockedTx, the one gate every automatic art writer
-// shares, so a track's lock is read from the table it is written to.
-func attachArtRespectingLockTx(ctx context.Context, tx *sql.Tx, itemID int64, pic examinedArt, preserveLock bool) (bool, error) {
-	if preserveLock && pic.present() {
-		locked, err := artFillBlockedTx(ctx, tx, model.ArtTrack, itemID, model.ArtRoleFront)
-		if err != nil {
-			return false, err
-		}
-		if locked {
-			return false, nil
-		}
-	}
-	return attachArtTxChanged(ctx, tx, itemID, pic)
-}
-
-// scannedCover is what one read of a file said about its cover: a picture, none (the
-// scan looked in the tags and beside the file and found no cover), or nothing at all.
-type scannedCover struct {
-	pic  examinedArt
-	none bool
-}
-
-// scanned reads a put's two cover fields as one statement: the picture when there is
-// one, else the finding of none when the scan made it.
-func scanned(pic examinedArt, noCover bool) scannedCover {
-	return scannedCover{pic: pic, none: noCover && !pic.present()}
-}
-
-// settleScannedFrontTx applies one file's read to the front its item draws, the one in
-// the track slot. Only the owner's picture is attached: the item's primary file, a
-// book's primary part. A finding of none, from any of the item's files, takes back a
-// front the disk gave once no file of the item states it (dropUnstatedFrontTx). It
-// reports whether the front changed.
-//
-// A track's front is what its album borrows, so the album is watched before the write
-// (affectedRollups.watchAlbumOf) and the put names it once the write is done, if what the
-// album draws moved.
-func settleScannedFrontTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, itemID, fileID int64, c scannedCover, owner, preserveLock bool) (bool, error) {
-	if !(c.pic.present() && owner) && !c.none {
-		return false, nil
-	}
-	if err := aff.watchAlbumOf(ctx, tx, itemID); err != nil {
-		return false, err
-	}
-	if c.none {
-		return dropUnstatedFrontTx(ctx, tx, itemID, fileID, preserveLock)
-	}
-	changed, err := attachArtRespectingLockTx(ctx, tx, itemID, c.pic, preserveLock)
-	if err != nil || !changed {
-		return changed, err
-	}
-	return true, yieldAlbumEnrichmentFrontTx(ctx, tx, itemID, c.pic.img.Hash)
-}
-
 // yieldAlbumEnrichmentFrontTx takes away the front enrichment gave a track's album, now
 // that the track states a cover of its own. Enrichment fills an album only while it
 // resolves no cover (fillAlbumArtTx), the file's own artwork being the first claim, and a
@@ -1195,41 +1161,4 @@ func yieldAlbumEnrichmentFrontTx(ctx context.Context, tx *sql.Tx, itemID int64, 
 	}
 	_, err = setEntityArtRoleTx(ctx, tx, string(model.ArtAlbum), albumID, string(model.ArtRoleFront), examinedArt{})
 	return err
-}
-
-// dropUnstatedFrontTx takes back a front the disk gave and no longer states, after a read
-// of fileID found no cover. Only a front from a tag or a sidecar is the disk's to take
-// back, and only once no other file of the item might still state it: one whose last
-// read gave that picture, or one whose file.front_hash is unknown. So a front an
-// alternate or a later part still carries stays, and where the catalog cannot tell, it
-// stays as well. The lock gates it as it gates the attach.
-func dropUnstatedFrontTx(ctx context.Context, tx *sql.Tx, itemID, fileID int64, preserveLock bool) (bool, error) {
-	var hash, source string
-	err := tx.QueryRowContext(ctx,
-		"SELECT source_hash, source FROM art_map WHERE entity_type = 'track' AND entity_id = ? AND role = 'front'", itemID).Scan(&hash, &source)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if source != string(model.SourceTag) && source != string(model.SourceSidecar) {
-		return false, nil
-	}
-	var stating int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM item_file e JOIN file f ON f.id = e.file_id
-		WHERE e.item_id = ? AND e.file_id <> ? AND (f.front_hash IS NULL OR f.front_hash = ?)`,
-		itemID, fileID, hash).Scan(&stating); err != nil || stating > 0 {
-		return false, err
-	}
-	if preserveLock {
-		locked, err := artFillBlockedTx(ctx, tx, model.ArtTrack, itemID, model.ArtRoleFront)
-		if err != nil || locked {
-			return false, err
-		}
-	}
-	if _, err := setEntityArtRoleTx(ctx, tx, string(model.ArtTrack), itemID, string(model.ArtRoleFront), examinedArt{}); err != nil {
-		return false, err
-	}
-	return true, memberFrontClearedTx(ctx, tx, itemID)
 }

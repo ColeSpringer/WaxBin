@@ -62,11 +62,12 @@ type looseFile struct {
 }
 
 // unreadFile is a file the walk passed without reading, unchanged since the last scan, or
-// one of the folder's outside a sub-path walk.
+// one of the folder's outside a sub-path walk. counted is the outcome the walk counted it
+// under, nil for a file outside the walk, which took no count.
 type unreadFile struct {
 	path    string
 	known   model.ScopedFile
-	outside bool
+	counted *int
 }
 
 // folderState is what a walk knows of one album folder: the books its reads made there,
@@ -398,7 +399,7 @@ func (s *Scanner) settleFolder(ctx context.Context, lib *model.Library, root, wa
 		}
 		for _, st := range standing {
 			if p := string(st.Path); !pathx.UnderRoot(walkRoot, p) {
-				unread = append(unread, unreadFile{path: p, known: model.ScopedFile{ItemPID: st.ItemPID, KindLocked: st.KindLocked}, outside: true})
+				unread = append(unread, unreadFile{path: p, known: model.ScopedFile{ItemPID: st.ItemPID, KindLocked: st.KindLocked}})
 			}
 		}
 	}
@@ -420,11 +421,7 @@ func (s *Scanner) settleFolder(ctx context.Context, lib *model.Library, root, wa
 			continue
 		}
 		if b := settled(album, PartShaped(&fm.Tags, u.path), u.known.ItemPID); b != nil && b.ItemPID != u.known.ItemPID && (!track || s.strong(ctx, b)) {
-			counted := &res.Unchanged
-			if u.outside {
-				counted = nil
-			}
-			s.rejoin(ctx, lib, root, u.path, sc, res, counted, false)
+			s.rejoin(ctx, lib, root, u.path, sc, res, u.counted, false)
 		}
 	}
 }

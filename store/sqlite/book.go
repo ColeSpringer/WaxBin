@@ -29,7 +29,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	seen := scanned(cover, in.NoCover)
+	seen := scanned(cover, in.NoCover, in.TagsUnread)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -362,11 +362,12 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 
 		// Cover art comes from the primary part (like the rest of the book's metadata),
-		// so a later, differently-covered part can't replace it. It runs every scan
-		// (idempotent) to still catch a directory cover added later, and for every part,
-		// since any part's read can be the one that shows the cover is gone from all of
-		// them. Its changed flag feeds the item delta so a cover-only change is not silent.
-		artChanged, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, ownsMeta, in.PreserveLocks)
+		// so a later, differently-covered part can't replace it, and from the first part
+		// after it that states one when it states none. It runs every scan (idempotent)
+		// to still catch a directory cover added later, and for every part, since any
+		// part's read can be the one that shows the cover is gone from all of them. Its
+		// changed flag feeds the item delta so a cover-only change is not silent.
+		artChanged, err := settleFrontTx(ctx, tx, affected, itemID, seen.pic, seen.read(), in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -942,11 +943,11 @@ func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, p
 }
 
 // attachBookCopyTx is PutScannedBook's copy branch: the file is an alternate of the part
-// it copies, so the book's metadata, chapters, cover and acquisition are left alone,
-// save that its read finding no cover can be what shows the book's front is on disk
-// nowhere. Any chapters a former part edge stored for the file go, and the owed rows its
+// it copies, so the book's metadata, chapters and acquisition are left alone. Its cover
+// is the book's only while no file ahead of it states one, and its read finding none can
+// be what shows the book's front is on disk nowhere. Any chapters a former part edge stored for the file go, and the owed rows its
 // tags pay are settled against the stored book. The book emits an update when the edge
-// changed, the put brought it back from missing (stateChanged), or its front went.
+// changed, the put brought it back from missing (stateChanged), or its front moved.
 func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedBookInput, fileID int64, filePID model.PID,
 	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title itemTitle, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64, seen scannedCover) error {
 	const op = "store.PutScannedBook"
@@ -981,7 +982,7 @@ func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutSc
 		}
 	}
 	// Ahead of the owed rows, which read the front as the put leaves it.
-	front, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, false, in.PreserveLocks)
+	front, err := settleFrontTx(ctx, tx, affected, itemID, seen.pic, seen.read(), in.PreserveLocks)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

@@ -23,6 +23,9 @@ type DerivedReport struct {
 	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
 	AlbumYearDrift          int // albums whose year != their members' most common year
 	ReleaseYearDrift        int // items whose release_year != their track's or book's year
+	// Items whose cover from disk is not the one their files state (settleFrontTx), which
+	// a write that moved a file and settled no cover leaves behind.
+	CoverDrift int
 	// Albums, release groups and artists whose derived sort spelling is not the one their
 	// live members state (sortSpellings).
 	SortSpellingDrift int
@@ -35,7 +38,7 @@ type DerivedReport struct {
 	// settle that failed, or a crash the next read-write open settles, and they read as
 	// drift.
 	RollupsPending   int
-	OrphanArtSources int // art_source images with no live art_map references
+	OrphanArtSources int // art_source images no live art_map row references and no file states
 	OrphanThumbnails int // thumbnails whose source is unreferenced
 	// ThumbnailsDamaged says the thumbnail file could not be read whole, so
 	// OrphanThumbnails is not counted. A read-write store marks such a file, and its
@@ -63,7 +66,8 @@ func (r DerivedReport) Consistent() bool {
 	return r.SortKeyDrift == 0 && r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
 		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0 &&
-		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0 && r.ReleaseYearDrift == 0 && r.SortSpellingDrift == 0
+		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0 && r.ReleaseYearDrift == 0 && r.SortSpellingDrift == 0 &&
+		r.CoverDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` would reclaim space: orphaned art
@@ -117,6 +121,7 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		// cannot disagree.
 		{&rep.AlbumYearDrift, "SELECT COUNT(*) FROM (" + albumYears + ")"},
 		{&rep.ReleaseYearDrift, releaseYearDriftQ},
+		{&rep.CoverDrift, "SELECT COUNT(*) FROM (" + coverDriftQ + ")"},
 		{&rep.PlaylistPositionDrift, "SELECT COUNT(*) FROM (" + playlistPositionDriftQ + ")"},
 		// A map row pointing at a deleted entity does not count as a reference here,
 		// matching GCArt, which removes the stale map before deleting the source.
@@ -243,12 +248,16 @@ WHERE (COALESCE(gr.track_count, -1) <>
         (SELECT COALESCE(SUM(` + itemDurationExpr + `), 0) FROM item_genre ig ` + liveGenreMembers + itemDurationJoins + `
          WHERE ig.genre_id = g.id))`
 
-// liveArtSourceQ selects the source hashes still reachable from a live entity: an
-// art_map row whose (entity_type, entity_id) exists in its table. A source not in
-// this set is referenced only by dead-entity map rows, or none, so it and its
-// thumbnails are reclaimable. The arms must mirror GCArt's slot list exactly, or
-// verify reports as orphaned what GC correctly keeps.
-const liveArtSourceQ = `SELECT source_hash FROM art_map m WHERE
+// statedArtSourceQ selects the source hashes files state as their covers. The comparison
+// leaves out a file that states none and one whose cover is unknown.
+const statedArtSourceQ = `SELECT front_hash FROM file WHERE front_hash <> ''`
+
+// liveArtSourceQ selects the source hashes still reachable: a picture a file states,
+// and one a live entity maps, an art_map row whose (entity_type, entity_id) exists in
+// its table. A source not in this set is referenced only by dead-entity map rows, or
+// none, so it and its thumbnails are reclaimable. The arms must mirror GCArt's slot list
+// exactly, or verify reports as orphaned what GC correctly keeps.
+const liveArtSourceQ = statedArtSourceQ + ` UNION ALL SELECT source_hash FROM art_map m WHERE
     (m.entity_type='track'         AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))
  OR (m.entity_type='episode'       AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))
  OR (m.entity_type='album'         AND EXISTS (SELECT 1 FROM album e         WHERE e.id = m.entity_id))

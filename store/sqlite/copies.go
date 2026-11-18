@@ -430,10 +430,10 @@ func dropCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64) error 
 // does not take over, as an alternate. None of the item's writers run, since the
 // primary's tags own the item; the file keeps its own row, sidecar observations and
 // diagnostics, and the owed rows its tags already pay are settled against the catalog.
-// Its cover is not the item's, though its read finding none can be what shows the item's
-// front is on disk nowhere (settleScannedFrontTx). A missing item the file belongs to is
-// present again, its primary being on disk. The item emits one update when the edge is
-// new, it came back, or its front went.
+// Its cover is the item's only while no file ahead of it states one, and its read finding
+// none can be what shows the item's front is on disk nowhere (settleFrontTx). A missing
+// item the file belongs to is present again, its primary being on disk. The item emits
+// one update when the edge is new, it came back, or its front moved.
 func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, fileID int64, filePID model.PID,
 	itemID int64, primary *standingPrimary, fileTitle itemTitle, fileTrack model.Track, res *model.ScanItemResult, now int64, seen scannedCover) error {
 	const op = "store.PutScannedTrack"
@@ -483,7 +483,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	}
 
 	// Ahead of the owed rows, which read the front as the put leaves it.
-	front, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, false, in.PreserveLocks)
+	front, err := settleFrontTx(ctx, tx, affected, itemID, seen.pic, seen.read(), in.PreserveLocks)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -541,7 +541,8 @@ func absorbedInto(folded []model.PID, into model.PID) map[model.PID]model.PID {
 // reconcileOrphansTx settles the items a link detached a file from. One that still has a
 // file puts an alternate in the place the file left (promoteLostTx: a copy of a book's
 // part fills its gap) or otherwise keeps a primary, its rollups and book total are
-// recomputed, and it emits an update, marked missing when none of its files is on disk;
+// recomputed, its cover is settled from the files it keeps (settleFrontTx), and it emits
+// an update, marked missing when none of its files is on disk;
 // one left with none folds into the item the file joined (foldItemIntoTx) and is deleted.
 func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) (orphaned, error) {
 	var promoted []model.PromotedFile
@@ -614,6 +615,9 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 				}
 			}
 			if err := refreshBookDuration(ctx, tx, oid); err != nil {
+				return orphaned{}, err
+			}
+			if err := settleFrontAfterLeaveTx(ctx, tx, affected, oid, dep.preserveLocks); err != nil {
 				return orphaned{}, err
 			}
 			marked, err := markUnreachableMissingTx(ctx, tx, oid, nil)

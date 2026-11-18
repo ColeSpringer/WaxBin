@@ -33,7 +33,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	seen := scanned(cover, in.NoCover)
+	seen := scanned(cover, in.NoCover, in.TagsUnread)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -112,7 +112,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			if err := affected.collect(ctx, tx, ex.itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			p, kept, err := handVirtualTrackOverTx(ctx, tx, ex.itemID, fileID, lostEdges[ex.itemID])
+			p, kept, err := handVirtualTrackOverTx(ctx, tx, ex.itemID, fileID, lostEdges[ex.itemID], affected, in.PreserveLocks)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -141,7 +141,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		// container, so those whole-file edges must go, and an item left with no file folds
 		// into the tracks once they are written (foldIntoRipTx). This is the forward
 		// conversion plain-track -> virtual-tracks; it is a no-op on every later scan.
-		detached, promoted, gone, err := detachWholeFileItems(ctx, tx, fileID, in.File.EssenceHash, affected)
+		detached, promoted, gone, err := detachWholeFileItems(ctx, tx, fileID, in.File.EssenceHash, affected, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -158,7 +158,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 
 		// A copy of a rip backs its tracks through alternate edges; one the sheet no longer
 		// declares goes.
-		dropped, err := dropUndeclaredVirtualAlternatesTx(ctx, tx, fileID, desired)
+		dropped, err := dropUndeclaredVirtualAlternatesTx(ctx, tx, fileID, desired, affected, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -195,7 +195,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 					if err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
-					front, err := settleScannedFrontTx(ctx, tx, affected, primary.itemID, fileID, seen, false, in.PreserveLocks)
+					front, err := settleFrontTx(ctx, tx, affected, primary.itemID, seen.pic, seen.read(), in.PreserveLocks)
 					if err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
@@ -243,7 +243,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				}
 				// The cover is read on every scan of the rip, as a plain track's is, so
 				// one that changed or went while the sheet stood still still lands.
-				artChanged, err := settleScannedFrontTx(ctx, tx, affected, ex.itemID, fileID, seen, true, in.PreserveLocks)
+				artChanged, err := settleFrontTx(ctx, tx, affected, ex.itemID, seen.pic, seen.read(), in.PreserveLocks)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
@@ -295,19 +295,20 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 
-			// The rip's cover maps onto every virtual track (idempotent), so each browses
-			// with its album art. It respects a locked cover like the whole-file scan
-			// paths do (catalog.go, book.go), so re-reading the .cue does not undo a
-			// chosen cover on one of its tracks.
-			if _, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, true, in.PreserveLocks); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
 			// Origin provenance from the file's tags, recorded per track when absent.
 			if _, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition, in.PreserveLocks); err != nil {
 				return err
 			}
 
 			if _, err := linkVirtualTrackFile(ctx, tx, itemID, fileID, vt.StartFrames, vt.EndFrames); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			// The rip's cover maps onto every virtual track (idempotent), so each browses
+			// with its album art. It respects a locked cover like the whole-file scan
+			// paths do (catalog.go, book.go), so re-reading the .cue does not undo a
+			// chosen cover on one of its tracks. It follows the link, which is what makes
+			// this file the track's first.
+			if _, err := settleFrontTx(ctx, tx, affected, itemID, seen.pic, seen.read(), in.PreserveLocks); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 
@@ -496,9 +497,10 @@ func (s *Store) RipTracks(ctx context.Context, filePID model.PID) ([]model.ItemR
 
 // handVirtualTrackOverTx gives a track its rip no longer declares to another file that
 // backs it, a copy of the rip whose sheet still does: this file's edge goes and an
-// alternate takes its place (promoteLostTx, then ensurePrimary). It reports false, with
-// nothing changed, when no other file backs the track.
-func handVirtualTrackOverTx(ctx context.Context, tx *sql.Tx, itemID, fileID int64, lost lostEdge) (*model.PromotedFile, bool, error) {
+// alternate takes its place (promoteLostTx, then ensurePrimary), and the track's cover is
+// settled from the files it keeps. It reports false, with nothing changed, when no other
+// file backs the track.
+func handVirtualTrackOverTx(ctx context.Context, tx *sql.Tx, itemID, fileID int64, lost lostEdge, affected *affectedRollups, preserveLocks bool) (*model.PromotedFile, bool, error) {
 	var others int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_file WHERE item_id = ? AND file_id <> ?",
 		itemID, fileID).Scan(&others); err != nil || others == 0 {
@@ -512,6 +514,9 @@ func handVirtualTrackOverTx(ctx context.Context, tx *sql.Tx, itemID, fileID int6
 		p, err = ensurePrimary(ctx, tx, itemID)
 	}
 	if err != nil {
+		return nil, false, err
+	}
+	if err := settleFrontAfterLeaveTx(ctx, tx, affected, itemID, preserveLocks); err != nil {
 		return nil, false, err
 	}
 	marked, err := markUnreachableMissingTx(ctx, tx, itemID, nil)
@@ -578,9 +583,9 @@ func linkVirtualAlternateFile(ctx context.Context, tx *sql.Tx, itemID, fileID, s
 }
 
 // dropUndeclaredVirtualAlternatesTx drops the alternate edges a rip copy holds on tracks
-// its sheet no longer declares, each track emitting an update. It reports whether it
-// dropped any.
-func dropUndeclaredVirtualAlternatesTx(ctx context.Context, tx *sql.Tx, fileID int64, desired map[string]bool) (bool, error) {
+// its sheet no longer declares, each track settling its cover and emitting an update. It
+// reports whether it dropped any.
+func dropUndeclaredVirtualAlternatesTx(ctx context.Context, tx *sql.Tx, fileID int64, desired map[string]bool, affected *affectedRollups, preserveLocks bool) (bool, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT pi.id, pi.pid, COALESCE(pi.identity_key, '')
 		FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE itf.file_id = ? AND itf.role = 'alternate' AND itf.start_frames IS NOT NULL`, fileID)
@@ -611,6 +616,9 @@ func dropUndeclaredVirtualAlternatesTx(ctx context.Context, tx *sql.Tx, fileID i
 		if _, err := tx.ExecContext(ctx, "DELETE FROM item_file WHERE item_id = ? AND file_id = ? AND role = 'alternate'", h.id, fileID); err != nil {
 			return false, err
 		}
+		if err := settleFrontAfterLeaveTx(ctx, tx, affected, h.id, preserveLocks); err != nil {
+			return false, err
+		}
 		if err := appendChange(ctx, tx, "item", h.pid, model.OpUpdate); err != nil {
 			return false, err
 		}
@@ -627,13 +635,13 @@ func dropUndeclaredVirtualAlternatesTx(ctx context.Context, tx *sql.Tx, fileID i
 // (foldIntoRipTx). The affected entities are collected so their rollups stay current. It
 // reports whether it removed anything, so the caller can count the conversion as a
 // change, and the files promoted in place of a lost primary.
-func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence string, affected *affectedRollups) (bool, []model.PromotedFile, []int64, error) {
+func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence string, affected *affectedRollups, preserveLocks bool) (bool, []model.PromotedFile, []int64, error) {
 	prev, err := queryInt64sTx(ctx, tx,
 		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID)
 	if err != nil || len(prev) == 0 {
 		return false, nil, nil, err
 	}
-	dep, err := departingTx(ctx, tx, fileID, essence, 0, false)
+	dep, err := departingTx(ctx, tx, fileID, essence, 0, preserveLocks)
 	if err != nil {
 		return false, nil, nil, err
 	}

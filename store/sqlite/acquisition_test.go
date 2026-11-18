@@ -494,7 +494,7 @@ func TestAcquisitionLockSurvivesRescan(t *testing.T) {
 }
 
 // TestPutAcquisitionSkipsLockedItem: the automatic writers skip in silence, the way
-// attachArtRespectingLockTx does, rather than refusing an import outright.
+// settleFrontTx does, rather than refusing an import outright.
 func TestPutAcquisitionSkipsLockedItem(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

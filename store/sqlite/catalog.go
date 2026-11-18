@@ -353,7 +353,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	seen := scanned(cover, in.NoCover)
+	seen := scanned(cover, in.NoCover, in.TagsUnread)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -558,18 +558,12 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// so a freshly resolved album_id is available to map art onto; an unchanged
 		// rescan reuses the album_id persisted by a prior scan. Their changed flags feed
 		// the item delta below so a lyrics/cover-only change is not silent to consumers.
+		// The cover waits for the link below, since which of the item's files gives it
+		// its cover is read off their edges.
 		lyricsChanged, err := putLyricsTx(ctx, tx, itemID, in.Lyrics, in.PreserveLocks, true)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		artChanged, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, true, in.PreserveLocks)
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		// Surfaced to the caller, not just used for the delta below: a sidecar-only
-		// change leaves the audio bytes (and so ContentChanged) untouched, so without
-		// this the scanner's counters would all read zero for it.
-		res.SidecarsChanged = lyricsChanged || artChanged
 
 		// Origin evidence carried by the file's own tags, recorded only when the item
 		// has no acquisition row yet (an event-recorded origin always wins).
@@ -620,6 +614,14 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		artChanged, err := settleFrontTx(ctx, tx, affected, itemID, seen.pic, seen.read(), in.PreserveLocks)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// Surfaced to the caller, not just used for the delta below: a sidecar-only
+		// change leaves the audio bytes (and so ContentChanged) untouched, so without
+		// this the scanner's counters would all read zero for it.
+		res.SidecarsChanged = lyricsChanged || artChanged
 
 		// Recompute touched rollups from the final base tables, keeping browse
 		// counts current without a whole-catalog rebuild.

@@ -221,14 +221,6 @@ func (c *thumbCall) result() (*model.ArtBlob, error) {
 	return &b, nil
 }
 
-// attachArtTxChanged maps a track/book item's cover onto the 'track' art slot
-// (keyed by the item id) and reports whether the mapping changed, for the
-// music/audiobook write paths that emit a delta only on a real change. See
-// attachEntityArtTxChanged for the shared body.
-func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, pic examinedArt) (bool, error) {
-	return attachEntityArtTxChanged(ctx, tx, "track", itemID, pic)
-}
-
 // storableArt fills whatever an ingest carrier left empty from the bytes it already
 // holds: the content address, the format, and the dimensions, each independently of the
 // others. Independently, because zero dimensions read as undecodable to ResolveArt,
@@ -350,10 +342,9 @@ const examinedMemMax = 8
 
 // examinedMem remembers the last few oversized pictures this process examined, keyed by
 // the arriving bytes' hash, for the arrivals that reach no write and so leave no
-// art_resized row: a copy's cover, or the cover of an item whose art is locked. Without
-// it every rescan of such a file decoded the picture again. The attribution is the
-// arrival's, not the first examiner's, so it is dropped on the way in and restored on
-// the way out.
+// art_resized row, such as a fetched cover a lock kept out. Without it each such
+// arrival decoded the picture again. The attribution is the arrival's, not the first
+// examiner's, so it is dropped on the way in and restored on the way out.
 type examinedMem struct {
 	mu    sync.Mutex
 	byKey map[string]*list.Element
@@ -1178,8 +1169,9 @@ func deleteEntityArtLockTx(ctx context.Context, tx *sql.Tx, entityType string, e
 	return err
 }
 
-// GCArt reclaims orphaned art: map rows whose entity is gone, source images no longer
-// referenced by any map, and the thumbnails of every source the catalog no longer holds.
+// GCArt reclaims orphaned art: map rows whose entity is gone, source images no map
+// references and no file states as its cover (file.front_hash, which settleFrontTx maps
+// from), and the thumbnails of every source the catalog no longer holds.
 // It returns the number of source images and thumbnails removed. It is the repair for
 // the orphan counts VerifyDerived reports.
 func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) {
@@ -1203,8 +1195,8 @@ func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) 
 				return e
 			}
 		}
-		r, e := tx.ExecContext(ctx,
-			"DELETE FROM art_source WHERE hash NOT IN (SELECT source_hash FROM art_map)")
+		r, e := tx.ExecContext(ctx, `DELETE FROM art_source WHERE hash NOT IN (SELECT source_hash FROM art_map)
+			AND hash NOT IN (`+statedArtSourceQ+`)`)
 		if e != nil {
 			return e
 		}
