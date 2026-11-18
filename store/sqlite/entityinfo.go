@@ -109,7 +109,29 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 		}
 		info.Aliases = aliases[id]
 	}
+	if err := s.fillEntityArt(ctx, kind, []model.PID{pid}, func(model.PID) *read.EntityInfo { return info }, op); err != nil {
+		return nil, err
+	}
 	return info, nil
+}
+
+// fillEntityArt sets ArtHash on the entity summaries of one kind. A kind that holds no
+// art is left alone.
+func (s *Store) fillEntityArt(ctx context.Context, kind read.EntityKind, pids []model.PID, infoOf func(model.PID) *read.EntityInfo, op string) error {
+	typ, ok := kind.ArtEntity()
+	if !ok || len(pids) == 0 {
+		return nil
+	}
+	hashes, err := s.frontHashes(ctx, typ, pids, op)
+	if err != nil {
+		return err
+	}
+	for pid, hash := range hashes {
+		if info := infoOf(pid); info != nil {
+			info.ArtHash = hash
+		}
+	}
+	return nil
 }
 
 // artistAliases lists the other names of each artist, by name, keyed by artist id.
@@ -495,9 +517,9 @@ func (s *Store) namesByKey(ctx context.Context, op, stmt string, keys []string) 
 // EntityInfo.LibraryPIDs. An unknown or repeated pid is dropped (a repeat collapses
 // to one entry). The caller batches within a single kind. Like ItemsByPIDs it reads
 // at most idBatchSize pids a statement, so a larger set spans several statements and
-// is NOT an atomic snapshot. It runs the same three reads EntityByPID
+// is NOT an atomic snapshot. It runs the same reads EntityByPID
 // does, each batched: the base identity/rollup row, the live album/series aggregate,
-// and the member libraries. Field-for-field it matches EntityByPID (an
+// the member libraries, and the art walk. Field-for-field it matches EntityByPID (an
 // entities-by-pids parity test pins that).
 func (s *Store) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []model.PID) (map[model.PID]*read.EntityInfo, error) {
 	const op = "store.EntityByPIDs"
@@ -550,7 +572,7 @@ func (s *Store) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []m
 				}
 			}
 		}
-		return nil
+		return s.fillEntityArt(ctx, kind, chunk, func(pid model.PID) *read.EntityInfo { return out[pid] }, op)
 	})
 	if err != nil {
 		return nil, err

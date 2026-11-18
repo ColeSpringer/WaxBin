@@ -23,6 +23,10 @@ type Bucket struct {
 	// so a consumer walking buckets generically has to switch on GroupBy rather than
 	// assume every EntityPID is an EntityByPID argument.
 	EntityPID model.PID
+	// ArtHash is the front cover the bucket's entity resolves to, as EntityInfo.ArtHash
+	// is, on the dimensions GroupBy.ArtEntity names. Empty on the rest, on an unknown
+	// bucket, and for an entity that resolves no cover.
+	ArtHash string
 }
 
 // FacetResult is the grouped, counted answer for one Query and dimension.

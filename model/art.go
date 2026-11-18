@@ -191,13 +191,16 @@ type ArtProvenance struct {
 }
 
 // ArtBlob is resolved art ready to serve: the stored source image or one generated from
-// it. SourceHash is the content hash of the originating source; Thumbnail is true when
+// it. SourceHash is the content hash of the originating source, the value ArtHashes
+// reports for the same reference ahead of the resolve. A host serving a URL that carries
+// a hash checks it against this one before caching the response for good, since the
+// cover may have changed since the URL was built. Thumbnail is true when
 // Bytes were generated from that source rather than being the source itself, whether
 // scaled to fit the rung in Box, re-encoded because the source is held in a format most
 // clients cannot paint, or both. Level names the chain level that answered (the
 // requested entity itself, or the ancestor a front-cover resolve fell back to), and
 // Derived marks an album answered from a member track's cover rather than a durable
-// album row of its own.
+// album row of its own: the cover of its earliest-cataloged member that has one.
 type ArtBlob struct {
 	Bytes      []byte
 	Format     string

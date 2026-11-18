@@ -183,7 +183,8 @@ func TestApplyReleaseGroupArtBackfillSettlesEachHalf(t *testing.T) {
 
 // TestApplyReleaseGroupArtBackfillFillsAVacantFront: the backfill's front fills a group
 // that has none, is fill-when-empty against a front set since the queue page, and
-// answers to the art lock; the entity delta rides on a write.
+// answers to the art lock; the entity delta rides on a write, with one for the group's
+// coverless album, which draws the new front too.
 func TestApplyReleaseGroupArtBackfillFillsAVacantFront(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -200,7 +201,7 @@ func TestApplyReleaseGroupArtBackfillFillsAVacantFront(t *testing.T) {
 		title  string
 		fronts int
 		deltas int
-	}{{"Vacant", 1, 1}, {"Held", 0, 0}, {"Locked", 0, 0}} {
+	}{{"Vacant", 1, 2}, {"Held", 0, 0}, {"Locked", 0, 0}} {
 		before, err := st.LatestChangeSeq(ctx)
 		if err != nil {
 			t.Fatal(err)

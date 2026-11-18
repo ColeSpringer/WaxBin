@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,11 +33,86 @@ type affectedRollups struct {
 	albums   map[int64]bool
 	fresh    map[string][]int64
 	deferred bool
+	// fronts is the cover each album the write may touch drew at its own rung when the
+	// write first met it (watchAlbum), for announceFrontsTx to compare against.
+	fronts map[int64]string
 }
 
 func newAffectedRollups() *affectedRollups {
 	return &affectedRollups{artists: map[int64]bool{}, rgs: map[int64]bool{}, genres: map[int64]bool{},
-		albums: map[int64]bool{}, fresh: map[string][]int64{}}
+		albums: map[int64]bool{}, fresh: map[string][]int64{}, fronts: map[int64]string{}}
+}
+
+// albumRungFront reads the cover an album draws at its own rung: its own row, else the
+// member's the art walk borrows (albumMemberFronts), else nothing. It is the part of an
+// album's cover that moves with its tracks, read inside the write that moves them.
+const albumRungFront = `SELECT al.pid, COALESCE(
+		(SELECT am.source_hash FROM art_map am WHERE am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front'),
+		(SELECT tm.source_hash` + albumMemberFronts + `al.id ORDER BY t.item_id LIMIT 1), '')
+	FROM album al WHERE al.id = ?`
+
+// watchAlbum notes what an album draws before the write changes its members or their
+// covers. An album's cover is worked out from its tracks, so a track gaining, losing or
+// changing its cover, or joining or leaving the album, can move it with no write to the
+// album's own row, and a host showing the album's ArtHash would not hear of it.
+func (a *affectedRollups) watchAlbum(ctx context.Context, tx *sql.Tx, albumID int64) error {
+	if _, seen := a.fronts[albumID]; seen {
+		return nil
+	}
+	var pid, front string
+	err := tx.QueryRowContext(ctx, albumRungFront, albumID).Scan(&pid, &front)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	a.fronts[albumID] = front
+	return nil
+}
+
+// watchAlbumOf is watchAlbum for the album an item's track sits on, if any.
+func (a *affectedRollups) watchAlbumOf(ctx context.Context, tx *sql.Tx, itemID int64) error {
+	var albumID sql.NullInt64
+	err := tx.QueryRowContext(ctx, "SELECT album_id FROM track WHERE item_id = ?", itemID).Scan(&albumID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if !albumID.Valid {
+		return nil
+	}
+	return a.watchAlbum(ctx, tx, albumID.Int64)
+}
+
+// announceFrontsTx names in the change log each watched album whose cover moved, and
+// takes what it draws now as the new baseline, so a second call in the same write says
+// nothing twice. An album the write created is left to its create row, and one that is
+// gone to its delete.
+func (a *affectedRollups) announceFrontsTx(ctx context.Context, tx *sql.Tx) error {
+	created := map[int64]bool{}
+	for _, id := range a.fresh["album"] {
+		created[id] = true
+	}
+	// In id order, so the rows a write appends do not depend on map order.
+	for _, id := range slices.Sorted(maps.Keys(a.fronts)) {
+		var pid model.PID
+		var front string
+		err := tx.QueryRowContext(ctx, albumRungFront, id).Scan(&pid, &front)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if front == a.fronts[id] {
+			continue
+		}
+		a.fronts[id] = front
+		if created[id] {
+			continue
+		}
+		if err := appendChange(ctx, tx, "album", pid, model.OpUpdate); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // created records an album, release group or artist the write inserted, which is as
@@ -80,6 +157,9 @@ func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64)
 	}
 	if albumID.Valid {
 		a.albums[albumID.Int64] = true
+		if err := a.watchAlbum(ctx, tx, albumID.Int64); err != nil {
+			return err
+		}
 	}
 	if rgID.Valid {
 		a.rgs[rgID.Int64] = true
@@ -172,6 +252,11 @@ var rollupKinds = []rollupKind{
 // zero tracks still get the zero row expected by the consistency check. A deferred set
 // is only recorded in rollup_dirty.
 func maintainRollupsTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, now int64) error {
+	// An album whose members moved may draw another cover, which is said now whether or
+	// not the rollups wait for a settle.
+	if err := aff.announceFrontsTx(ctx, tx); err != nil {
+		return err
+	}
 	// A new entity takes its spelling from the members it has now, by the rule the settle
 	// applies, rather than keying by its name until a deferred settle. Its create delta
 	// covers the key.

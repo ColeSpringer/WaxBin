@@ -213,10 +213,13 @@ func TestSearchRunsCachedStatements(t *testing.T) {
 		}
 	}
 	search("alpha")
-	// The match, the artists and albums by name, and the transcripts.
+	// The match, the artists and albums by name, and the transcripts; then the art walks
+	// its hits make, which for a coverless track, its artist and its album are seven:
+	// the track's and the artist's own rows, the album's by id and by pid, its members'
+	// covers, the rows above it, and the track's genre.
 	prepared := st.rstmts.stats().prepares
-	if prepared != 4 {
-		t.Fatalf("the search prepared %d statements through the cache, want its 4", prepared)
+	if prepared != 11 {
+		t.Fatalf("the search prepared %d statements through the cache, want its 11", prepared)
 	}
 	for _, q := range []string{"alpha", "song", "beta"} {
 		search(q)
@@ -285,12 +288,13 @@ func TestEntityReadsRunCachedStatements(t *testing.T) {
 	}
 	reads()
 	// The page's walk, its batch of albums, their live counts and their libraries; the
-	// lookup's album, count and libraries.
-	if got := st.rstmts.stats().prepares; got != 7 {
-		t.Fatalf("the reads prepared %d statements through the cache, want their 7", got)
+	// lookup's album, count and libraries; and the art walk the two share for a
+	// coverless album: its own row, its members' covers, and the rows above it.
+	if got := st.rstmts.stats().prepares; got != 10 {
+		t.Fatalf("the reads prepared %d statements through the cache, want their 10", got)
 	}
 	reads()
-	if got := st.rstmts.stats().prepares; got != 7 {
-		t.Errorf("prepares after the same reads again = %d, want 7", got)
+	if got := st.rstmts.stats().prepares; got != 10 {
+		t.Errorf("prepares after the same reads again = %d, want 10", got)
 	}
 }

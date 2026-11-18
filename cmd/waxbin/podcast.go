@@ -707,6 +707,7 @@ type podcastView struct {
 	Downloaded     int          `json:"downloaded"`
 	Keep           int          `json:"retentionKeep"`
 	AuthUser       string       `json:"authUser,omitempty"`
+	ArtHash        string       `json:"artHash,omitempty"`
 }
 
 func toPodcastView(p *model.Podcast) podcastView {
@@ -716,7 +717,7 @@ func toPodcastView(p *model.Podcast) podcastView {
 		Explicit: p.Explicit, FundingURL: p.FundingURL, FundingMessage: p.FundingMessage,
 		Medium: p.Medium, Persons: personViews(p.Persons),
 		Episodes: p.EpisodeCount, Downloaded: p.DownloadedCount,
-		Keep: p.RetentionKeep, AuthUser: p.AuthUser,
+		Keep: p.RetentionKeep, AuthUser: p.AuthUser, ArtHash: p.ArtHash,
 	}
 }
 

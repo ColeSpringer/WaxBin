@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -164,5 +170,102 @@ func TestArtLockLine(t *testing.T) {
 				t.Errorf("line = %q\nwant %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestArtHashesNamesTheCoverEachEntityDraws drives `art hashes` over a track with a
+// cover, its album, which holds none of its own and answers with the track's, and a pid
+// that names nothing.
+func TestArtHashesNamesTheCoverEachEntityDraws(t *testing.T) {
+	t.Parallel()
+	db, root, pid := creditCLIFixture(t)
+	var img bytes.Buffer
+	if err := png.Encode(&img, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	cover := filepath.Join(t.TempDir(), "cover.png")
+	if err := os.WriteFile(cover, img.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCLIJSON(t, db, root, "art", "set", string(pid), "--file", cover); err != nil {
+		t.Fatalf("art set: %v", err)
+	}
+	want := art.Hash(img.Bytes())
+
+	const nobody = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	out, err := runCLIJSON(t, db, root, "art", "hashes", string(pid), nobody)
+	if err != nil {
+		t.Fatalf("art hashes: %v", err)
+	}
+	var env struct {
+		Data struct {
+			Type   string        `json:"type"`
+			Hashes []artHashView `json:"hashes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("art hashes printed %q: %v", out, err)
+	}
+	if h := env.Data.Hashes; env.Data.Type != "track" || len(h) != 2 ||
+		h[0] != (artHashView{PID: pid, SourceHash: want}) || h[1] != (artHashView{PID: nobody}) {
+		t.Errorf("art hashes = %+v, want the cover's hash for the track and none for the unknown pid", env.Data)
+	}
+
+	shown, err := runCLIJSON(t, db, root, "show", string(pid))
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	var item struct {
+		Data struct {
+			Item struct {
+				AlbumPID string `json:"albumPid"`
+			} `json:"item"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(shown), &item); err != nil || item.Data.Item.AlbumPID == "" {
+		t.Fatalf("show printed %q (err %v), want the track's album pid", shown, err)
+	}
+	album := item.Data.Item.AlbumPID
+	text, err := runCLIText(t, db, root, "art", "hashes", album, nobody, "--type", "album")
+	if err != nil {
+		t.Fatalf("art hashes --type album: %v", err)
+	}
+	if wantText := album + " " + want + "\n" + nobody + " -\n"; text != wantText {
+		t.Errorf("art hashes --type album printed %q, want %q", text, wantText)
+	}
+
+	// The album's card and its facet bucket carry the same hash.
+	info, err := runCLIJSON(t, db, root, "entity", "info", "album", album)
+	if err != nil {
+		t.Fatalf("entity info: %v", err)
+	}
+	var card struct {
+		Data entityInfoView `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(info), &card); err != nil || card.Data.ArtHash != want {
+		t.Errorf("entity info printed artHash %q (err %v), want %s", card.Data.ArtHash, err, want)
+	}
+	faceted, err := runCLIJSON(t, db, root, "facet", "--group-by", "album")
+	if err != nil {
+		t.Fatalf("facet: %v", err)
+	}
+	var facet struct {
+		Data facetView `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(faceted), &facet); err != nil || len(facet.Data.Buckets) != 1 ||
+		facet.Data.Buckets[0].ArtHash != want {
+		t.Errorf("facet printed %+v (err %v), want the album's bucket with artHash %s", facet.Data, err, want)
+	}
+	// And so do the track and the album a search finds.
+	found, err := runCLIJSON(t, db, root, "search", "Song")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	var hits struct {
+		Data searchView `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(found), &hits); err != nil || len(hits.Data.Tracks) != 1 || len(hits.Data.Albums) != 1 ||
+		hits.Data.Tracks[0].ArtHash != want || hits.Data.Albums[0].ArtHash != want {
+		t.Errorf("search printed %+v (err %v), want the track and its album with artHash %s", hits.Data, err, want)
 	}
 }

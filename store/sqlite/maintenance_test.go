@@ -93,6 +93,35 @@ func TestYearInReview(t *testing.T) {
 	if len(yr.TopGenres) == 0 || yr.TopGenres[0].Display != "Rock" {
 		t.Errorf("top genre = %+v, want Rock", yr.TopGenres)
 	}
+
+	// The top lists are drawn, so their buckets carry the covers the artist and the
+	// genre hold, here and in the catalog's own stats.
+	portrait, tile := testPNG(t, 40, 40), testPNG(t, 41, 41)
+	user := model.Attribution{Source: model.SourceUser}
+	if _, err := st.SetEntityArt(ctx, model.ArtArtist, yr.TopArtists[0].EntityPID, model.ArtRoleFront, portrait.Data, "", user, model.LockOf(false), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetEntityArt(ctx, model.ArtGenre, yr.TopGenres[0].EntityPID, model.ArtRoleFront, tile.Data, "", user, model.LockOf(false), false); err != nil {
+		t.Fatal(err)
+	}
+	if yr, err = st.YearInReview(ctx, "", 2025, 10); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := st.Stats(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for what, got := range map[string][2]string{
+		"the year's top artist":  {yr.TopArtists[0].ArtHash, portrait.Hash},
+		"the year's top genre":   {yr.TopGenres[0].ArtHash, tile.Hash},
+		"the stats' top artist":  {stats.TopArtists[0].ArtHash, portrait.Hash},
+		"the stats' top genre":   {stats.TopGenres[0].ArtHash, tile.Hash},
+		"a year bucket (no art)": {stats.ByYear[0].ArtHash, ""},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s carries %q, want %q", what, got[0], got[1])
+		}
+	}
 }
 
 func TestYearInReviewRejectsOutOfRange(t *testing.T) {

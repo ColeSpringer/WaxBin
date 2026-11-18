@@ -357,33 +357,33 @@ func plural(n int, noun string) string {
 	return strconv.Itoa(n) + " " + noun + s
 }
 
-// itemsMissingArtWhere is the shared predicate for the missing-art count and
-// sample: a present track/book with no front cover anywhere in the v1.0 art chain
-// (its own map, its album's direct or track-derived cover, or the release-group
-// cover enrichment populates). The role filter matters now that an entity can
-// carry several slots: a lone booklet scan is not a cover, so it must not hide
-// the item from this report. That is the same front-only predicate the has_art
-// query field applies (fields.go). Artist/genre rungs are not checked: nothing in a
-// scan or enrich pass fills them, so in practice they are empty. A user-set artist or
-// genre cover does resolve for the items under it, so an item covered only that way is
-// still reported here; covering that would mean restating the resolver's artist rung
-// (the release group's artist, else the album artist, else the track artist) in SQL and
-// keeping the two in step. A playlist is an art entity too, but it is deliberately
-// absent here: this report is item-scoped, and a playlist without a cover is normal
-// rather than a finding.
-// These arms stay track/book-scoped with the literal 'track' slot; the
-// kind-switched slot expression (itemArtSlotExpr) exists for predicates that
-// also cover episodes.
+// itemsMissingArtWhere selects the present tracks and books that resolve no front cover:
+// the art walk's answer of nothing, rung for rung, as one predicate so the check stays a
+// count and a sample whatever the library's size. A book stops at its own cover; a track
+// goes on to its album's row, a member's cover, its release group, the artist rung (the
+// group's primary artist, else the album artist, else the artist) and its lowest-id
+// genre. TestItemsMissingArtIsWhatTheWalkLeavesBare holds it to the walk, which is the
+// definition. Episodes and playlists stay out: the report is about a library's music and
+// books, and neither of those going without a cover is a finding.
+//
+// The member rung is one set, built once from every track cover, rather than a probe per
+// item, which for a coverless album would read its members once per member.
 const itemsMissingArtWhere = `
 	FROM playable_item pi
 	LEFT JOIN track t ON t.item_id = pi.id
 	LEFT JOIN album al ON al.id = t.album_id
+	LEFT JOIN release_group rg ON rg.id = al.release_group_id
 	WHERE pi.kind IN ('track','book') AND pi.state = 'present'
 	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='track' AND am.entity_id=pi.id AND am.role='front')
-	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='album' AND am.entity_id=t.album_id AND am.role='front')
-	  AND NOT EXISTS (SELECT 1 FROM art_map am JOIN track t2 ON t2.item_id=am.entity_id
-			WHERE am.entity_type='track' AND am.role='front' AND t2.album_id=t.album_id)
-	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='release_group' AND am.entity_id=al.release_group_id AND am.role='front')`
+	  AND (pi.kind = 'book' OR (
+	    NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='album' AND am.entity_id=t.album_id AND am.role='front')
+	    AND (t.album_id IS NULL OR t.album_id NOT IN (SELECT t2.album_id FROM art_map tm JOIN track t2 ON t2.item_id = tm.entity_id
+			WHERE tm.entity_type='track' AND tm.role='front' AND t2.album_id IS NOT NULL))
+	    AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='release_group' AND am.entity_id=al.release_group_id AND am.role='front')
+	    AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='artist'
+			AND am.entity_id=COALESCE(rg.primary_artist_id, t.album_artist_id, t.artist_id) AND am.role='front')
+	    AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='genre'
+			AND am.entity_id=(SELECT MIN(ig.genre_id) FROM item_genre ig WHERE ig.item_id = pi.id) AND am.role='front')))`
 
 // sampleItemRefs is the count-then-sample shape the list-style audit checks share.
 // where is a package constant beginning at FROM, never caller text; a non-positive
@@ -417,8 +417,9 @@ func (s *Store) sampleItemRefs(ctx context.Context, op, where string, limit int)
 	return out, total, nil
 }
 
-// ItemsMissingArt returns a sample (up to limit) of present items with no
-// resolvable cover, plus the total count.
+// ItemsMissingArt returns a sample (up to limit) of the present tracks and books that
+// resolve no front cover, plus the total count: the items ResolveArt would find nothing
+// for, on any rung.
 func (s *Store) ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef, int, error) {
 	return s.sampleItemRefs(ctx, "store.ItemsMissingArt", itemsMissingArtWhere, limit)
 }
@@ -426,7 +427,7 @@ func (s *Store) ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef
 // itemsMissingMBIDWhere selects present tracks and books with no MusicBrainz identity
 // anywhere on the chain: not their own recording/release id, and not their album's or
 // release group's. A track whose release group enrichment matched is therefore not
-// reported, the way the missing-art predicate walks its own fallback chain. Episodes
+// reported, the way the missing-art check follows the art chain. Episodes
 // stay out: a podcast's identity is a feed GUID and no MusicBrainz id will ever exist
 // for one.
 //
@@ -436,7 +437,7 @@ func (s *Store) ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef
 // nothing about which of their works this is, so counting it would report clean on
 // items nothing can be fetched for.
 //
-// Unlike itemsMissingArtWhere this joins book, which cannot fan the row out: book is
+// It joins book, which cannot fan the row out: book is
 // unique on item_id (upsertBook's ON CONFLICT(item_id)), so it is at most one row like
 // every other join here.
 const itemsMissingMBIDWhere = `

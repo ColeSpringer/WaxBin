@@ -1,6 +1,10 @@
 package read
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/colespringer/waxbin/model"
+)
 
 func TestGroupByValidAcceptsTagDimensions(t *testing.T) {
 	// The fixed dimensions stay valid.
@@ -47,5 +51,53 @@ func TestTagGroupKeyCanonicalizes(t *testing.T) {
 	}
 	if _, ok := TagGroupKey("genre"); ok {
 		t.Error("TagGroupKey(genre) should reject a non-tag dimension")
+	}
+}
+
+// TestArtEntityClassifiesEveryDimensionAndKind lists what each fixed dimension's bucket
+// pids and each entity kind are asked for art under. A dimension or kind added without
+// a line here fails, so its buckets cannot go without covers by oversight.
+func TestArtEntityClassifiesEveryDimensionAndKind(t *testing.T) {
+	dims := map[GroupBy]model.ArtEntity{
+		GroupGenre: model.ArtGenre, GroupArtist: model.ArtArtist, GroupCreditArtist: model.ArtArtist,
+		GroupAlbumArtist: model.ArtArtist, GroupAlbum: model.ArtAlbum, GroupReleaseGroup: model.ArtReleaseGroup,
+		GroupYear: "", GroupKind: "", GroupLibrary: "", GroupPrimaryLibrary: "",
+		GroupPodcast: model.ArtPodcast, GroupPlaylist: model.ArtPlaylist, GroupSeries: "",
+		GroupAuthor: model.ArtArtist, GroupNarrator: model.ArtArtist,
+	}
+	for _, g := range append(GroupBys(), "tag.MOOD") {
+		want, listed := dims[g]
+		if !listed && g != "tag.MOOD" {
+			t.Errorf("dimension %q is not classified", g)
+		}
+		if got, ok := g.ArtEntity(); got != want || ok != (want != "") || ok && !got.Valid() {
+			t.Errorf("%q.ArtEntity() = %q, %v, want %q", g, got, ok, want)
+		}
+	}
+	kinds := map[EntityKind]model.ArtEntity{
+		EntityArtist: model.ArtArtist, EntityReleaseGroup: model.ArtReleaseGroup,
+		EntityAlbum: model.ArtAlbum, EntityGenre: model.ArtGenre, EntitySeries: "",
+	}
+	for _, k := range EntityKinds() {
+		want, listed := kinds[k]
+		if !listed {
+			t.Errorf("kind %q is not classified", k)
+		}
+		if got, ok := k.ArtEntity(); got != want || ok != (want != "") || ok && !got.Valid() {
+			t.Errorf("%q.ArtEntity() = %q, %v, want %q", k, got, ok, want)
+		}
+	}
+}
+
+// TestSearchHitArtRefFollowsItsKind: a hit is asked for art as the kind it is, a book
+// sharing the track slot.
+func TestSearchHitArtRefFollowsItsKind(t *testing.T) {
+	for kind, want := range map[string]model.ArtEntity{
+		"artist": model.ArtArtist, "album": model.ArtAlbum, "track": model.ArtTrack,
+		"book": model.ArtTrack, "episode": model.ArtEpisode,
+	} {
+		if got := (SearchHit{PID: "p", Kind: kind}).ArtRef(); got != (model.EntityRef{Type: want, PID: "p"}) {
+			t.Errorf("a %s hit is asked for under %+v, want %s", kind, got, want)
+		}
 	}
 }

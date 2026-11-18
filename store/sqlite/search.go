@@ -267,7 +267,7 @@ func searchScanCap(limit, maxCandidates int) int {
 // opt.MaxCandidates bounds the match pool, while opt.Libraries, opt.PrimaryLibraries,
 // opt.States and opt.Podcasts narrow it and the entity lookups alike (see
 // read.SearchOptions for their contracts), and an unknown library, state or show is
-// refused whatever the query holds.
+// refused whatever the query holds. Each hit carries the cover it resolves (ArtHash).
 func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOptions) (*read.SearchResult, error) {
 	const op = "store.Search"
 	res := &read.SearchResult{Query: queryStr}
@@ -316,7 +316,37 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 			return nil, err
 		}
 	}
+	if err := s.fillSearchArt(ctx, res, op); err != nil {
+		return nil, err
+	}
 	return res, nil
+}
+
+// fillSearchArt sets each hit's ArtHash, with one art walk per entity type the hits are
+// asked for art under, so the tracks and the books share theirs.
+func (s *Store) fillSearchArt(ctx context.Context, res *read.SearchResult, op string) error {
+	groups := [][]read.SearchHit{res.Artists, res.Albums, res.Tracks, res.Books, res.Episodes}
+	byType := map[model.ArtEntity][]model.PID{}
+	for _, hits := range groups {
+		for _, h := range hits {
+			typ := h.ArtRef().Type
+			byType[typ] = append(byType[typ], h.PID)
+		}
+	}
+	hashes := make(map[model.ArtEntity]map[model.PID]string, len(byType))
+	for typ, pids := range byType {
+		got, err := s.frontHashes(ctx, typ, pids, op)
+		if err != nil {
+			return err
+		}
+		hashes[typ] = got
+	}
+	for _, hits := range groups {
+		for i := range hits {
+			hits[i].ArtHash = hashes[hits[i].ArtRef().Type][hits[i].PID]
+		}
+	}
+	return nil
 }
 
 // searchMatches feeds the ranked FTS rows to the groups. Both limits fetch one past

@@ -436,7 +436,7 @@ func boundArrival(img *model.ArtImage) examinedArt {
 //
 // The album slot needs care: album art is otherwise derived on read from the current
 // track maps, which keeps a re-cover or delete from leaving a stale cover behind, and a
-// stored album row wins over that derivation (artInChain consults it first). Only a
+// stored album row wins over that derivation (the art walk consults it first). Only a
 // writer that knows WHICH edition the album is should use it, today the release match.
 //
 // The write is idempotent: an entity already mapping this cover does nothing (reporting
@@ -595,7 +595,7 @@ func refreshArtProvenanceTx(ctx context.Context, tx *sql.Tx, entityType string, 
 // resolves nothing and would otherwise read as an invitation to fill.
 //
 // "Empty" has to mean what ResolveArt means. An album normally owns no art_map row and
-// answers from a member track's embedded cover instead (artInChain's derived rung), and a
+// answers from a member track's embedded cover instead (the art walk's derived rung), and a
 // stored album row wins over that derivation. Probing only for the album's own row would
 // therefore call almost every album empty and quietly replace the file's own artwork with
 // the Cover Art Archive's on the first release match.
@@ -695,20 +695,12 @@ func clearEnrichmentArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtE
 		if locked {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx,
-			"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = ?",
-			string(entityType), entityID, string(role)); err != nil {
+		// Through the role writer, which names the cards that drew this picture.
+		if _, err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, string(role), examinedArt{}); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// artLevel is one rung of the resolution fallback chain: an entity type and its
-// internal id.
-type artLevel struct {
-	typ string
-	id  int64
 }
 
 // ResolveArt resolves art for an entity in one role. The front role walks the
@@ -833,7 +825,7 @@ func (s *Store) artProvenance(ctx context.Context, ref model.EntityRef, role mod
 		return nil, err
 	}
 	return &model.ArtProvenance{
-		Role: role, Level: model.ArtEntity(hit.level), Derived: hit.derived, SourceHash: hit.hash,
+		Role: role, Level: hit.level, Derived: hit.derived, SourceHash: hit.hash,
 		Format: format, Width: w, Height: h, Size: size,
 		Attribution: model.Attribution{Source: hit.source, Provider: hit.provider, SourceURL: hit.sourceURL},
 		UpdatedAt:   hit.updatedAt,
@@ -841,8 +833,8 @@ func (s *Store) artProvenance(ctx context.Context, ref model.EntityRef, role mod
 }
 
 // artHitFor validates a reference and role and walks the fallback chain for them,
-// returning the answering hit and the normalized role. It is the one chain walk behind
-// both art reads.
+// returning the answering hit and the normalized role. It is the single-entity face of
+// artWalk, behind both art reads.
 func (s *Store) artHitFor(ctx context.Context, ref model.EntityRef, role model.ArtRole, op string) (artHit, model.ArtRole, error) {
 	if !ref.Type.Valid() {
 		return artHit{}, role, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
@@ -853,24 +845,24 @@ func (s *Store) artHitFor(ctx context.Context, ref model.EntityRef, role model.A
 	if !role.Valid() {
 		return artHit{}, role, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
-	chain, err := s.artChain(ctx, ref)
+	fronts, err := s.artWalk(ctx, ref.Type, role, []model.PID{ref.PID}, op)
 	if err != nil {
 		return artHit{}, role, err
 	}
-	// Non-front roles never inherit from an ancestor: truncate the chain to the
-	// requested entity itself (always the first level artChain builds).
-	if role != model.ArtRoleFront && len(chain) > 1 {
-		chain = chain[:1]
+	front, known := fronts[ref.PID]
+	if !known {
+		// The refusal the writers give for the same pid: no such entity, or an item whose
+		// kind keeps its cover in the other slot.
+		if _, err := artEntityIDTx(ctx, s.rdb(), ref.Type, ref.PID, op); err != nil {
+			return artHit{}, role, err
+		}
+		return artHit{}, role, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(ref.Type)+": "+string(ref.PID))
 	}
-	hit, ok, err := s.artInChain(ctx, chain, role)
-	if err != nil {
-		return artHit{}, role, err
-	}
-	if !ok {
+	if !front.ok {
 		return artHit{}, role, waxerr.New(waxerr.CodeNotFound, op,
 			"no "+string(role)+" art for "+string(ref.Type)+":"+string(ref.PID))
 	}
-	return hit, role, nil
+	return front.hit, role, nil
 }
 
 // ArtRoles lists the artwork slots an entity holds at its own level, with no
@@ -900,9 +892,8 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	if !ref.Type.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
 	}
-	// artChain resolves the pid to its internal id (erroring on an unknown entity);
-	// the first level is always the requested entity itself.
-	chain, err := s.artChain(ctx, ref)
+	// An unknown entity is an error here, before any slot is read.
+	slotID, err := artEntityIDTx(ctx, s.rdb(), ref.Type, ref.PID, op)
 	if err != nil {
 		return nil, err
 	}
@@ -911,7 +902,7 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 		        m.source, m.provider, m.source_url, m.updated_at
 		 FROM art_map m JOIN art_source s ON s.hash = m.source_hash
 		 WHERE m.entity_type = ? AND m.entity_id = ? ORDER BY m.role`,
-		chain[0].typ, chain[0].id)
+		string(ref.Type), slotID)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -934,7 +925,7 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	// cover locked by SetItemArt reports here too (artLockIsItemScoped). It is taken
 	// unconditionally because a lock with no image behind it is exactly the state worth
 	// reporting.
-	locks, err := s.artLockRows(ctx, ref.Type, chain[0].id, op)
+	locks, err := s.artLockRows(ctx, ref.Type, slotID, op)
 	if err != nil {
 		return nil, err
 	}
@@ -1141,270 +1132,6 @@ func (s *Store) artSourceData(ctx context.Context, hash, op string) ([]byte, err
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return data, nil
-}
-
-// artHit is what one art-chain walk found: the source hash to serve, the level that
-// answered, whether that answer was derived from a member track, and the answering
-// art_map row's provenance.
-type artHit struct {
-	hash      string
-	level     string
-	derived   bool
-	source    model.ProvenanceSource
-	provider  string
-	sourceURL string
-	updatedAt int64
-}
-
-// artInChain returns the first chain level that has art in the requested role;
-// ok=false when none does. The role filter is what keeps a level's back/booklet slots
-// from answering a front-cover walk (any-role rows used to win by rowid order). The
-// primary key holds one row per (entity, role), so a direct lookup needs no
-// ordering. Album front art with no direct entry is derived from the album's
-// track covers, so it is always a cover currently carried by a track in that
-// album, never a stale denormalized mapping left by a re-cover, cross-album
-// retag, or deletion; the member ORDER BY rowid keeps the pick stable. The
-// derivation applies to the front cover alone: the other roles answer from a
-// durable row at the entity's own level or not at all, matching the public
-// contract that non-front roles never look past the requested entity.
-//
-// Both branches read the provenance columns, so a derived album cover honestly
-// reports the member track's own answer rather than claiming the album chose it.
-func (s *Store) artInChain(ctx context.Context, chain []artLevel, role model.ArtRole) (artHit, bool, error) {
-	const op = "store.ResolveArt"
-	for _, lv := range chain {
-		if lv.id == 0 {
-			continue
-		}
-		// A fresh hit per rung: Scan leaves its destinations untouched on ErrNoRows, so
-		// reusing one across rungs would let a partly-filled miss answer for the rung
-		// that follows it.
-		var h artHit
-		var src string
-		qerr := s.rdb().QueryRowContext(ctx,
-			"SELECT source_hash, source, provider, source_url, updated_at FROM art_map"+
-				" WHERE entity_type = ? AND entity_id = ? AND role = ?",
-			lv.typ, lv.id, string(role)).Scan(&h.hash, &src, &h.provider, &h.sourceURL, &h.updatedAt)
-		if qerr == nil {
-			h.level, h.source = lv.typ, model.ProvenanceSource(src)
-			return h, true, nil
-		}
-		if !errors.Is(qerr, sql.ErrNoRows) {
-			return artHit{}, false, waxerr.Wrap(waxerr.CodeIO, op, qerr)
-		}
-		if lv.typ == string(model.ArtAlbum) && role == model.ArtRoleFront {
-			var d artHit
-			derr := s.rdb().QueryRowContext(ctx,
-				`SELECT tm.source_hash, tm.source, tm.provider, tm.source_url, tm.updated_at
-				 FROM art_map tm JOIN track t ON t.item_id = tm.entity_id
-				 WHERE tm.entity_type = 'track' AND tm.role = 'front' AND t.album_id = ?
-				 ORDER BY tm.rowid LIMIT 1`, lv.id).Scan(&d.hash, &src, &d.provider, &d.sourceURL, &d.updatedAt)
-			if derr == nil {
-				d.level, d.source, d.derived = lv.typ, model.ProvenanceSource(src), true
-				return d, true, nil
-			}
-			if !errors.Is(derr, sql.ErrNoRows) {
-				return artHit{}, false, waxerr.Wrap(waxerr.CodeIO, op, derr)
-			}
-		}
-	}
-	return artHit{}, false, nil
-}
-
-// artChain builds the resolution fallback chain for a reference: the requested
-// level first, then its ancestors up to the genre root, each as (type, internal
-// id). Missing ancestors are dropped, so the chain only contains resolvable levels.
-// A returned chain is never empty: every branch resolves the requested entity
-// itself before appending ancestors, and an unknown pid or type errors instead.
-// ResolveArt's non-front truncation (chain[:1]) and ArtRoles' own-level read
-// (chain[0]) both rely on that.
-func (s *Store) artChain(ctx context.Context, ref model.EntityRef) ([]artLevel, error) {
-	const op = "store.ResolveArt"
-	switch ref.Type {
-	case model.ArtTrack:
-		return s.trackArtChain(ctx, ref.PID)
-	case model.ArtAlbum:
-		albumID, err := s.idByPID(ctx, "album", ref.PID, op)
-		if err != nil {
-			return nil, err
-		}
-		return s.albumArtChain(ctx, albumID)
-	case model.ArtReleaseGroup:
-		rgID, err := s.idByPID(ctx, "release_group", ref.PID, op)
-		if err != nil {
-			return nil, err
-		}
-		return s.releaseGroupArtChain(ctx, rgID)
-	case model.ArtArtist:
-		artistID, err := s.idByPID(ctx, "artist", ref.PID, op)
-		if err != nil {
-			return nil, err
-		}
-		return []artLevel{{string(model.ArtArtist), artistID}}, nil
-	case model.ArtGenre:
-		genreID, err := s.idByPID(ctx, "genre", ref.PID, op)
-		if err != nil {
-			return nil, err
-		}
-		return []artLevel{{string(model.ArtGenre), genreID}}, nil
-	case model.ArtEpisode:
-		return s.episodeArtChain(ctx, ref.PID)
-	case model.ArtPodcast:
-		podID, err := s.idByPID(ctx, "podcast", ref.PID, op)
-		if err != nil {
-			return nil, err
-		}
-		return []artLevel{{string(model.ArtPodcast), podID}}, nil
-	case model.ArtPlaylist:
-		plID, err := s.idByPID(ctx, "playlist", ref.PID, op)
-		if err != nil {
-			return nil, err
-		}
-		// One rung on purpose: a playlist has no ancestor, so even a front cover has
-		// nowhere to fall back to.
-		return []artLevel{{string(model.ArtPlaylist), plID}}, nil
-	}
-	return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
-}
-
-// episodeArtChain resolves a podcast episode's chain: episode -> podcast. The
-// episode's own artwork wins; a feed image is the fallback for an episode without
-// one.
-func (s *Store) episodeArtChain(ctx context.Context, pid model.PID) ([]artLevel, error) {
-	const op = "store.ResolveArt"
-	var itemID, podcastID int64
-	err := s.rdb().QueryRowContext(ctx,
-		`SELECT pi.id, ep.podcast_id FROM playable_item pi
-		 JOIN episode ep ON ep.item_id = pi.id WHERE pi.pid = ?`, string(pid)).Scan(&itemID, &podcastID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such episode: "+string(pid))
-	}
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	return []artLevel{
-		{string(model.ArtEpisode), itemID},
-		{string(model.ArtPodcast), podcastID},
-	}, nil
-}
-
-// trackArtChain resolves a track's full chain: track -> album -> release_group ->
-// artist -> genre. The artist level is the release group's primary artist, falling
-// back to the track's album artist then artist; the genre level is the item's first
-// genre.
-//
-// A book's chain is its own cover alone (the 'track' slot keyed by the item id). An
-// author's picture is a portrait and a genre's a category tile, neither of them a book
-// jacket, so a coverless book answers NotFound and a host draws its own placeholder; the
-// author's picture stays reachable through the author's artist entity.
-func (s *Store) trackArtChain(ctx context.Context, pid model.PID) ([]artLevel, error) {
-	const op = "store.ResolveArt"
-	var itemID int64
-	var kind string
-	var albumID, albumArtistID, artistID sql.NullInt64
-	err := s.rdb().QueryRowContext(ctx,
-		`SELECT pi.id, pi.kind, t.album_id, t.album_artist_id, t.artist_id
-		 FROM playable_item pi LEFT JOIN track t ON t.item_id = pi.id WHERE pi.pid = ?`, string(pid)).
-		Scan(&itemID, &kind, &albumID, &albumArtistID, &artistID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(pid))
-	}
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-
-	chain := []artLevel{{string(model.ArtTrack), itemID}}
-	if kind == string(model.KindBook) {
-		return chain, nil
-	}
-	var rgID, primaryArtistID int64
-	if albumID.Valid {
-		chain = append(chain, artLevel{string(model.ArtAlbum), albumID.Int64})
-		rgID, primaryArtistID, err = s.albumParents(ctx, albumID.Int64)
-		if err != nil {
-			return nil, err
-		}
-		if rgID != 0 {
-			chain = append(chain, artLevel{string(model.ArtReleaseGroup), rgID})
-		}
-	}
-	// Artist level: prefer the release group's primary artist, then album artist,
-	// then track artist.
-	artLevelID := primaryArtistID
-	if artLevelID == 0 && albumArtistID.Valid {
-		artLevelID = albumArtistID.Int64
-	}
-	if artLevelID == 0 && artistID.Valid {
-		artLevelID = artistID.Int64
-	}
-	if artLevelID != 0 {
-		chain = append(chain, artLevel{string(model.ArtArtist), artLevelID})
-	}
-	if gid := s.firstItemGenre(ctx, itemID); gid != 0 {
-		chain = append(chain, artLevel{string(model.ArtGenre), gid})
-	}
-	return chain, nil
-}
-
-func (s *Store) albumArtChain(ctx context.Context, albumID int64) ([]artLevel, error) {
-	chain := []artLevel{{string(model.ArtAlbum), albumID}}
-	rgID, artistID, err := s.albumParents(ctx, albumID)
-	if err != nil {
-		return nil, err
-	}
-	if rgID != 0 {
-		chain = append(chain, artLevel{string(model.ArtReleaseGroup), rgID})
-	}
-	if artistID != 0 {
-		chain = append(chain, artLevel{string(model.ArtArtist), artistID})
-	}
-	return chain, nil
-}
-
-func (s *Store) releaseGroupArtChain(ctx context.Context, rgID int64) ([]artLevel, error) {
-	chain := []artLevel{{string(model.ArtReleaseGroup), rgID}}
-	var artistID sql.NullInt64
-	if err := s.rdb().QueryRowContext(ctx,
-		"SELECT primary_artist_id FROM release_group WHERE id = ?", rgID).Scan(&artistID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.Wrap(waxerr.CodeIO, "store.ResolveArt", err)
-	}
-	if artistID.Valid {
-		chain = append(chain, artLevel{string(model.ArtArtist), artistID.Int64})
-	}
-	return chain, nil
-}
-
-// albumParents returns an album's release-group id and that group's primary-artist
-// id (each 0 when absent).
-func (s *Store) albumParents(ctx context.Context, albumID int64) (rgID, artistID int64, err error) {
-	var rg sql.NullInt64
-	if err := s.rdb().QueryRowContext(ctx,
-		"SELECT release_group_id FROM album WHERE id = ?", albumID).Scan(&rg); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, waxerr.Wrap(waxerr.CodeIO, "store.ResolveArt", err)
-	}
-	if !rg.Valid {
-		return 0, 0, nil
-	}
-	var artist sql.NullInt64
-	if err := s.rdb().QueryRowContext(ctx,
-		"SELECT primary_artist_id FROM release_group WHERE id = ?", rg.Int64).Scan(&artist); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return rg.Int64, 0, waxerr.Wrap(waxerr.CodeIO, "store.ResolveArt", err)
-	}
-	if artist.Valid {
-		return rg.Int64, artist.Int64, nil
-	}
-	return rg.Int64, 0, nil
-}
-
-// firstItemGenre returns the item's lowest-id genre, or 0 when it has none.
-func (s *Store) firstItemGenre(ctx context.Context, itemID int64) int64 {
-	var gid int64
-	err := s.rdb().QueryRowContext(ctx,
-		"SELECT genre_id FROM item_genre WHERE item_id = ? ORDER BY genre_id LIMIT 1", itemID).Scan(&gid)
-	if err != nil {
-		return 0
-	}
-	return gid
 }
 
 // idByPID resolves an entity pid to its rowid in the named table.

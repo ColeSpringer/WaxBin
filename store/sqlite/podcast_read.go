@@ -13,7 +13,8 @@ import (
 // two facts a sync needs about the cover it already holds: where that cover came from
 // and whether it is locked. Both are scalar subqueries beside the counts, so a sync
 // gets them from the PodcastByPID it already does rather than earning a port method
-// and a per-show query in SyncAll.
+// and a per-show query in SyncAll. The cover's hash rides beside them for a host
+// drawing the show.
 const podcastSelect = `SELECT p.id, p.pid, p.feed_url, p.identity_key, p.title, p.sort_key, p.author,
 	p.description, p.link, p.language, p.category, p.explicit,
 	p.funding_url, p.funding_message, p.medium, p.image_url, p.guid, p.etag,
@@ -24,7 +25,9 @@ const podcastSelect = `SELECT p.id, p.pid, p.feed_url, p.identity_key, p.title, 
 	COALESCE((SELECT am.source_url FROM art_map am
 	   WHERE am.entity_type = 'podcast' AND am.entity_id = p.id AND am.role = 'front'), '') AS cover_source_url,
 	COALESCE((SELECT ec.locked FROM entity_curation ec
-	   WHERE ec.entity_type = 'podcast' AND ec.entity_id = p.id AND ec.field = 'art'), 0) AS cover_locked
+	   WHERE ec.entity_type = 'podcast' AND ec.entity_id = p.id AND ec.field = 'art'), 0) AS cover_locked,
+	COALESCE((SELECT am.source_hash FROM art_map am
+	   WHERE am.entity_type = 'podcast' AND am.entity_id = p.id AND am.role = 'front'), '') AS art_hash
 	FROM podcast p`
 
 func scanPodcast(sc rowScanner) (*model.Podcast, error) {
@@ -35,7 +38,7 @@ func scanPodcast(sc rowScanner) (*model.Podcast, error) {
 		&p.Description, &p.Link, &p.Language, &p.Category, &p.Explicit,
 		&p.FundingURL, &p.FundingMessage, &p.Medium, &p.ImageURL, &p.GUID, &p.ETag,
 		&p.LastModified, &lastFetched, &p.RetentionKeep, &p.AuthUser, &p.SourceType, &p.CreatedAt, &p.UpdatedAt,
-		&p.EpisodeCount, &p.DownloadedCount, &p.CoverSourceURL, &coverLocked); err != nil {
+		&p.EpisodeCount, &p.DownloadedCount, &p.CoverSourceURL, &coverLocked, &p.ArtHash); err != nil {
 		return nil, err
 	}
 	p.LastFetchedAt = lastFetched.Int64

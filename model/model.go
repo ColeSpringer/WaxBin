@@ -592,6 +592,15 @@ func (f ItemFilter) Admit(items []*ItemView) []*ItemView {
 // carries *ItemView; a value receiver would copy the whole view to read two bools.
 func (v *ItemView) AdvisoryFlagged() bool { return v.Explicit || v.PodcastExplicit }
 
+// ArtRef is the reference the item's cover is asked for under: the episode slot for an
+// episode, the track slot for a track or a book. ResolveArt and ArtHashes take it.
+func (v *ItemView) ArtRef() EntityRef {
+	if v.Kind == KindEpisode {
+		return EntityRef{Type: ArtEpisode, PID: v.PID}
+	}
+	return EntityRef{Type: ArtTrack, PID: v.PID}
+}
+
 // FramesPerSecond is the CD frame rate: a frame is 1/75 s, the disc's own addressing
 // quantum and the unit every MM:SS:FF in a .cue sheet is written in. It is a fixed
 // property of the CD format, not a tunable.

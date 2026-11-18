@@ -9,7 +9,7 @@ import (
 )
 
 // This file covers a playlist as an art entity: a one-rung chain (so every role,
-// front included, resolves at the playlist's own level or not at all), the HasArt
+// front included, resolves at the playlist's own level or not at all), the ArtHash
 // projection on the playlist read model, and the delete/verify/GC lifecycle of a
 // playlist cover, which has no merge or orphan hook to lean on.
 
@@ -104,54 +104,57 @@ func TestPlaylistArtResolvesOwnLevelOnly(t *testing.T) {
 	}
 }
 
-// playlistHasArt reads one playlist's HasArt flag, failing the test on a read error
+// playlistArtHash reads one playlist's ArtHash, failing the test on a read error
 // rather than dereferencing the nil playlist it comes back with.
-func playlistHasArt(t *testing.T, st *Store, pid model.PID) bool {
+func playlistArtHash(t *testing.T, st *Store, pid model.PID) string {
 	t.Helper()
 	p, err := st.PlaylistByPID(context.Background(), pid)
 	if err != nil {
 		t.Fatalf("read playlist %s: %v", pid, err)
 	}
-	return p.HasArt
+	return p.ArtHash
 }
 
-// TestPlaylistHasArt checks the read-model projection: it follows a set and cleared
-// cover on both the single and list reads, and counts only the front role, so an
+// TestPlaylistArtHash checks the read-model projection: it follows a set, replaced and
+// cleared cover on both the single and list reads, and names only the front role, so an
 // auxiliary image does not advertise a cover the playlist does not have.
-func TestPlaylistHasArt(t *testing.T) {
+func TestPlaylistArtHash(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	front, back := testPNG(t, 42, 42), testPNG(t, 43, 43)
+	front, second, back := testPNG(t, 42, 42), testPNG(t, 44, 44), testPNG(t, 43, 43)
 	pl := newPlaylist(t, st, "Mix")
-
-	if playlistHasArt(t, st, pl) {
-		t.Errorf("HasArt = true on a new playlist, want false")
+	set := func(role model.ArtRole, data []byte) {
+		t.Helper()
+		if _, err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, role, data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+			t.Fatalf("set %s: %v", role, err)
+		}
 	}
 
-	if _, err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
-		t.Fatalf("set front: %v", err)
+	if got := playlistArtHash(t, st, pl); got != "" {
+		t.Errorf("ArtHash = %q on a new playlist, want none", got)
 	}
-	if !playlistHasArt(t, st, pl) {
-		t.Errorf("HasArt = false after setting a front cover, want true")
+	set(model.ArtRoleFront, front.Data)
+	if got := playlistArtHash(t, st, pl); got != front.Hash {
+		t.Errorf("ArtHash = %q after setting a front cover, want its hash %s", got, front.Hash)
 	}
 	pls, err := st.ListPlaylists(ctx, "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(pls) != 1 || !pls[0].HasArt {
-		t.Errorf("list HasArt = %+v, want the cover reported on the list read too", pls)
+	if len(pls) != 1 || pls[0].ArtHash != front.Hash {
+		t.Errorf("list = %+v, want the cover's hash on the list read too", pls)
+	}
+	set(model.ArtRoleFront, second.Data)
+	if got := playlistArtHash(t, st, pl); got != second.Hash {
+		t.Errorf("ArtHash = %q after replacing the cover, want the new hash %s", got, second.Hash)
 	}
 
 	// A back image alone is not a cover: the projection is front-scoped.
-	if _, err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
-		t.Fatalf("clear front: %v", err)
-	}
-	if _, err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
-		t.Fatalf("set back: %v", err)
-	}
-	if playlistHasArt(t, st, pl) {
-		t.Errorf("HasArt = true with only a back image, want false (front role only)")
+	set(model.ArtRoleFront, nil)
+	set(model.ArtRoleBack, back.Data)
+	if got := playlistArtHash(t, st, pl); got != "" {
+		t.Errorf("ArtHash = %q with only a back image, want none (front role only)", got)
 	}
 }
 
@@ -189,7 +192,7 @@ func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 	if got := scalarInt(t, st, "SELECT id FROM playlist WHERE pid = ?", string(second)); got != firstID {
 		t.Fatalf("second playlist got id %d, want the deleted playlist's %d reused", got, firstID)
 	}
-	if playlistHasArt(t, st, second) {
+	if playlistArtHash(t, st, second) != "" {
 		t.Errorf("a fresh playlist inherited the deleted playlist's cover through the reused rowid")
 	}
 	ref := model.EntityRef{Type: model.ArtPlaylist, PID: second}

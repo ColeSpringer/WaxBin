@@ -352,11 +352,22 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 				return waxerr.New(waxerr.CodeLocked, op, artLockedMessage(model.ArtTrack, itemPID, role))
 			}
 		}
+		// The track's album borrows its front, so it is watched across the write and
+		// named if what it draws moved.
+		album := newAffectedRollups()
+		if lockField == "art" {
+			if err := album.watchAlbumOf(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		// One path for set and clear: replace this role's mapping (a nil image just
 		// deletes it). A cleared role's orphaned source becomes GC-able.
 		if err := setFrontOwingTx(ctx, tx, "track", itemID, string(role), pic, func() error {
 			return noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedArt}, attr)
 		}); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := album.announceFrontsTx(ctx, tx); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if !pic.present() && lockField == "art" {
@@ -386,9 +397,10 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 // asked about; the album predicate reads the resolver's answer, so it sees the gap the
 // moment the track's row goes. A book item matches no track row and gets a no-op.
 //
-// Both writers of a track's front call it. SetItemArt is the item surface the CLI uses
-// and SetEntityArt accepts a track type from the proxy, so a rule living in only one of
-// them would fire for one client and not the other.
+// Every writer that clears a track's front calls it. SetItemArt is the item surface the
+// CLI uses and SetEntityArt accepts a track type from the proxy, so a rule living in only
+// one of them would fire for one client and not the other, and a scan that finds the
+// cover gone from disk (dropUnstatedFrontTx) opens the same vacancy.
 func memberFrontClearedTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	var albumID sql.NullInt64
 	err := tx.QueryRowContext(ctx, "SELECT album_id FROM track WHERE item_id = ?", itemID).Scan(&albumID)
@@ -492,7 +504,17 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				return noteOwedMembersTx(ctx, tx, model.MergeAlbum, entityID, []string{model.OwedAlbumArt}, attr)
 			}
 		}
+		// A track's album borrows its front (see SetItemArt).
+		album := newAffectedRollups()
+		if entityType == model.ArtTrack && artRoleLockField(role) == "art" {
+			if err := album.watchAlbumOf(ctx, tx, entityID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		if err := setFrontOwingTx(ctx, tx, string(entityType), entityID, string(role), pic, owe); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := album.announceFrontsTx(ctx, tx); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if lock != model.LockUnchanged {
@@ -729,27 +751,101 @@ func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, enti
 	if err := checkArtImage(pic.img, entityType, role); err != nil {
 		return "", err
 	}
+	// A release group's front is what its coverless albums draw, and an artist's what its
+	// groups and their albums do, so those are named when it moves (nameFrontHeirsTx).
+	inherited := role == string(model.ArtRoleFront) &&
+		(entityType == string(model.ArtReleaseGroup) || entityType == string(model.ArtArtist))
+	var prior string
+	if inherited {
+		err := tx.QueryRowContext(ctx, "SELECT source_hash FROM art_map WHERE entity_type=? AND entity_id=? AND role=?",
+			entityType, entityID, role).Scan(&prior)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type=? AND entity_id=? AND role=?", entityType, entityID, role); err != nil {
 		return "", err
 	}
-	if !pic.present() {
-		return "", nil
+	hash := ""
+	if pic.present() {
+		if err := insertArtSourceTx(ctx, tx, pic); err != nil {
+			return "", err
+		}
+		img := pic.img
+		// A plain INSERT, not OR IGNORE: the DELETE above already removed the only primary
+		// key this can collide with, so the IGNORE has nothing left to absorb except a
+		// genuine failure (a missing art_source under foreign_keys=ON, a rejected value).
+		// Swallowing one of those would delete the old mapping and store no new one, and
+		// report success.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			entityType, entityID, img.Hash, role, string(img.Source), img.Provider, img.SourceURL, nowNS()); err != nil {
+			return "", err
+		}
+		hash = img.Hash
 	}
-	if err := insertArtSourceTx(ctx, tx, pic); err != nil {
-		return "", err
+	if inherited && hash != prior {
+		return hash, nameFrontHeirsTx(ctx, tx, entityType, entityID)
 	}
-	img := pic.img
-	// A plain INSERT, not OR IGNORE: the DELETE above already removed the only primary
-	// key this can collide with, so the IGNORE has nothing left to absorb except a
-	// genuine failure (a missing art_source under foreign_keys=ON, a rejected value).
-	// Swallowing one of those would delete the old mapping and store no new one, and
-	// report success.
-	_, err := tx.ExecContext(ctx,
-		`INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		entityType, entityID, img.Hash, role, string(img.Source), img.Provider, img.SourceURL, nowNS())
-	return img.Hash, err
+	return hash, nil
+}
+
+// frontHeirs selects, by type and pid, the cards that draw their cover from one release
+// group's row or one artist's and so move with it: a group's albums that resolve no cover
+// at their own rung, and an artist's groups holding no row of their own with those
+// groups' albums likewise. It is the art walk's fallback read from the other end.
+var frontHeirs = map[string]string{
+	string(model.ArtReleaseGroup): `SELECT 'album', al.pid FROM album al
+		WHERE al.release_group_id = ?1 AND NOT ` + albumResolvesFrontArt,
+	string(model.ArtArtist): `SELECT 'release_group', rg.pid FROM release_group rg
+		WHERE rg.primary_artist_id = ?1 AND NOT ` + groupHoldsFront + `
+		UNION ALL
+		SELECT 'album', al.pid FROM album al JOIN release_group rg ON rg.id = al.release_group_id
+		WHERE rg.primary_artist_id = ?1 AND NOT ` + groupHoldsFront + ` AND NOT ` + albumResolvesFrontArt,
+}
+
+// groupHoldsFront is true when a release group, read as rg, holds a front of its own.
+const groupHoldsFront = `EXISTS (SELECT 1 FROM art_map ga
+	WHERE ga.entity_type = 'release_group' AND ga.entity_id = rg.id AND ga.role = 'front')`
+
+// nameFrontHeirsTx names in the change log the cards whose cover is a release group's or
+// an artist's front, after that front changed. The entity's own row is its writer's to
+// name. An item draws through the same chain and is not named: a host caching item
+// covers refreshes the items under an entity the log names.
+func nameFrontHeirsTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) error {
+	q, ok := frontHeirs[entityType]
+	if !ok {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, q, entityID)
+	if err != nil {
+		return err
+	}
+	type heir struct {
+		typ string
+		pid model.PID
+	}
+	var heirs []heir
+	for rows.Next() {
+		var h heir
+		if err := rows.Scan(&h.typ, &h.pid); err != nil {
+			rows.Close()
+			return err
+		}
+		heirs = append(heirs, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, h := range heirs {
+		if err := appendChange(ctx, tx, h.typ, h.pid, model.OpUpdate); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkArtImage refuses an image an art_map row cannot hold: an attribution outside the
@@ -1032,4 +1128,108 @@ func attachArtRespectingLockTx(ctx context.Context, tx *sql.Tx, itemID int64, pi
 		}
 	}
 	return attachArtTxChanged(ctx, tx, itemID, pic)
+}
+
+// scannedCover is what one read of a file said about its cover: a picture, none (the
+// scan looked in the tags and beside the file and found no cover), or nothing at all.
+type scannedCover struct {
+	pic  examinedArt
+	none bool
+}
+
+// scanned reads a put's two cover fields as one statement: the picture when there is
+// one, else the finding of none when the scan made it.
+func scanned(pic examinedArt, noCover bool) scannedCover {
+	return scannedCover{pic: pic, none: noCover && !pic.present()}
+}
+
+// settleScannedFrontTx applies one file's read to the front its item draws, the one in
+// the track slot. Only the owner's picture is attached: the item's primary file, a
+// book's primary part. A finding of none, from any of the item's files, takes back a
+// front the disk gave once no file of the item states it (dropUnstatedFrontTx). It
+// reports whether the front changed.
+//
+// A track's front is what its album borrows, so the album is watched before the write
+// (affectedRollups.watchAlbumOf) and the put names it once the write is done, if what the
+// album draws moved.
+func settleScannedFrontTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, itemID, fileID int64, c scannedCover, owner, preserveLock bool) (bool, error) {
+	if !(c.pic.present() && owner) && !c.none {
+		return false, nil
+	}
+	if err := aff.watchAlbumOf(ctx, tx, itemID); err != nil {
+		return false, err
+	}
+	if c.none {
+		return dropUnstatedFrontTx(ctx, tx, itemID, fileID, preserveLock)
+	}
+	changed, err := attachArtRespectingLockTx(ctx, tx, itemID, c.pic, preserveLock)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, yieldAlbumEnrichmentFrontTx(ctx, tx, itemID, c.pic.img.Hash)
+}
+
+// yieldAlbumEnrichmentFrontTx takes away the front enrichment gave a track's album, now
+// that the track states a cover of its own. Enrichment fills an album only while it
+// resolves no cover (fillAlbumArtTx), the file's own artwork being the first claim, and a
+// stored album row outranks its members' covers from then on. So a fill made while the
+// disk had none to offer, an album whose cover was still on its way or briefly gone,
+// would outrank that cover for good. A locked album front stays, as does one enrichment
+// did not write, and one holding the same picture. The caller's watch on the album names
+// it in the change log.
+func yieldAlbumEnrichmentFrontTx(ctx context.Context, tx *sql.Tx, itemID int64, hash string) error {
+	var albumID int64
+	err := tx.QueryRowContext(ctx, `SELECT al.id FROM track t JOIN album al ON al.id = t.album_id
+		JOIN art_map am ON am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front'
+		WHERE t.item_id = ? AND am.source = ? AND am.source_hash <> ?`,
+		itemID, string(model.SourceEnrichment), hash).Scan(&albumID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	locked, err := artFillBlockedTx(ctx, tx, model.ArtAlbum, albumID, model.ArtRoleFront)
+	if err != nil || locked {
+		return err
+	}
+	_, err = setEntityArtRoleTx(ctx, tx, string(model.ArtAlbum), albumID, string(model.ArtRoleFront), examinedArt{})
+	return err
+}
+
+// dropUnstatedFrontTx takes back a front the disk gave and no longer states, after a read
+// of fileID found no cover. Only a front from a tag or a sidecar is the disk's to take
+// back, and only once no other file of the item might still state it: one whose last
+// read gave that picture, or one whose file.front_hash is unknown. So a front an
+// alternate or a later part still carries stays, and where the catalog cannot tell, it
+// stays as well. The lock gates it as it gates the attach.
+func dropUnstatedFrontTx(ctx context.Context, tx *sql.Tx, itemID, fileID int64, preserveLock bool) (bool, error) {
+	var hash, source string
+	err := tx.QueryRowContext(ctx,
+		"SELECT source_hash, source FROM art_map WHERE entity_type = 'track' AND entity_id = ? AND role = 'front'", itemID).Scan(&hash, &source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if source != string(model.SourceTag) && source != string(model.SourceSidecar) {
+		return false, nil
+	}
+	var stating int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM item_file e JOIN file f ON f.id = e.file_id
+		WHERE e.item_id = ? AND e.file_id <> ? AND (f.front_hash IS NULL OR f.front_hash = ?)`,
+		itemID, fileID, hash).Scan(&stating); err != nil || stating > 0 {
+		return false, err
+	}
+	if preserveLock {
+		locked, err := artFillBlockedTx(ctx, tx, model.ArtTrack, itemID, model.ArtRoleFront)
+		if err != nil || locked {
+			return false, err
+		}
+	}
+	if _, err := setEntityArtRoleTx(ctx, tx, string(model.ArtTrack), itemID, string(model.ArtRoleFront), examinedArt{}); err != nil {
+		return false, err
+	}
+	return true, memberFrontClearedTx(ctx, tx, itemID)
 }

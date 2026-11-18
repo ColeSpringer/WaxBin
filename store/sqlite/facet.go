@@ -277,8 +277,50 @@ func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 // paging a facet is not offered: a cursor would re-run the entire aggregation for
 // every page. For an index over a large dimension, enumerate the entities instead
 // (EntityPage), which is O(page) off the entity table's sort_key index.
+//
+// Each bucket of a dimension whose entities hold art carries the cover it resolves
+// (read.Bucket.ArtHash), from one art walk over the buckets returned, so a limit bounds
+// that as well.
 func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order read.FacetOrder, limit int, userPID model.PID) (*read.FacetResult, error) {
 	const op = "store.Facet"
+	res, err := s.facet(ctx, q, g, order, limit, userPID, op)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.fillBucketArt(ctx, g, res.Buckets, op); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// fillBucketArt sets ArtHash on the buckets of a dimension whose entities hold art.
+func (s *Store) fillBucketArt(ctx context.Context, g read.GroupBy, buckets []read.Bucket, op string) error {
+	typ, ok := g.ArtEntity()
+	if !ok {
+		return nil
+	}
+	pids := make([]model.PID, 0, len(buckets))
+	for _, b := range buckets {
+		if b.EntityPID != "" {
+			pids = append(pids, b.EntityPID)
+		}
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+	hashes, err := s.frontHashes(ctx, typ, pids, op)
+	if err != nil {
+		return err
+	}
+	for i := range buckets {
+		buckets[i].ArtHash = hashes[buckets[i].EntityPID]
+	}
+	return nil
+}
+
+// facet is Facet without the buckets' covers, for a caller that reads the covers of the
+// few buckets it keeps (Stats).
+func (s *Store) facet(ctx context.Context, q query.Query, g read.GroupBy, order read.FacetOrder, limit int, userPID model.PID, op string) (*read.FacetResult, error) {
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))

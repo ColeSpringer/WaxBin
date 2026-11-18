@@ -11,11 +11,12 @@ import (
 // stmtCacheMax bounds the statements kept prepared: a query's text varies with the
 // shape of its filter and the page size written into it, so the set a long-running
 // server sees is open-ended. The item and entity reads, single and batched, take 31
-// texts at one page size, and each browse list, query shape and search a few more, so a
-// host with a handful of views open keeps 70 or so hot. An item-view statement holds 15
-// to 45 KB of SQLite's memory on each pool connection that has run it and most others 1
-// to 2 KB, so a full cache of a usual mix is under 1 MB a connection, and of item views
-// alone under 6 MB, well inside the page cache each connection may keep by default.
+// texts at one page size, the art walk a dozen, and each browse list, query shape and
+// search a few more, so a host with a handful of views open keeps 80 or so hot. An
+// item-view statement holds 15 to 45 KB of SQLite's memory on each pool connection that
+// has run it and most others 1 to 2 KB, so a full cache of a usual mix is under 1 MB a
+// connection, and of item views alone under 6 MB, well inside the page cache each
+// connection may keep by default.
 const stmtCacheMax = 128
 
 // stmtCache holds prepared statements on the read pool, keyed by their SQL text, so a hot

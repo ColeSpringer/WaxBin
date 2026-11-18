@@ -120,11 +120,11 @@ func TestResolveCoverClimbsFromADiscFolder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := resolveCover(filepath.Join(album, "CD1", "01.mp3"), nil, newArtCache()); got == nil || got.Width != 64 {
+	if got, _ := resolveCover(filepath.Join(album, "CD1", "01.mp3"), nil, newArtCache()); got == nil || got.Width != 64 {
 		t.Errorf("cover for a disc folder = %+v, want the album folder's", got)
 	}
-	if got := resolveCover(filepath.Join(album, "Bonus", "01.mp3"), nil, newArtCache()); got != nil {
-		t.Errorf("cover for a non-disc subfolder = %+v, want none", got)
+	if got, looked := resolveCover(filepath.Join(album, "Bonus", "01.mp3"), nil, newArtCache()); got != nil || !looked {
+		t.Errorf("cover for a non-disc subfolder = %+v (looked %v), want a finding of none", got, looked)
 	}
 	if !coverChangedFast(filepath.Join(album, "CD1", "01.mp3"), map[string]model.AuxObservation{}, newArtCache()) {
 		t.Error("an album folder cover newly seen from a disc folder was not reported changed")

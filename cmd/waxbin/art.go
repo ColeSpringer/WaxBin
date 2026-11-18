@@ -127,7 +127,7 @@ func newArtCmd(g *globals) *cobra.Command {
 	f.IntVar(&size, "size", 0, "max dimension in px, rounded up to a ladder rung; "+
 		"also converts a format most clients cannot display (0 = stored image)")
 	f.StringVar(&outPath, "out", "", "write image bytes to this file instead of stdout")
-	cmd.AddCommand(newArtRolesCmd(g), newArtSetCmd(g), newArtLockCmd(g, true), newArtLockCmd(g, false))
+	cmd.AddCommand(newArtRolesCmd(g), newArtHashesCmd(g), newArtSetCmd(g), newArtLockCmd(g, true), newArtLockCmd(g, false))
 	return cmd
 }
 
@@ -270,6 +270,71 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 				}
 				fmt.Fprintf(w, "%-11s %s %s%s\n",
 					r.Role, desc, attribution(r.Source, r.Provider, r.SourceURL), lock)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&entType, "type", "track", "entity type: "+artTypeList)
+	return cmd
+}
+
+// artHashView is one entity's line of `art hashes`. An entity that resolves no cover
+// keeps its line and carries no hash.
+type artHashView struct {
+	PID        model.PID `json:"pid"`
+	SourceHash string    `json:"sourceHash,omitempty"`
+}
+
+// newArtHashesCmd prints the hash of the front cover each entity resolves to, the
+// version a host carries in a cover's URL.
+func newArtHashesCmd(g *globals) *cobra.Command {
+	var entType string
+	cmd := &cobra.Command{
+		Use:   "hashes <pid>...",
+		Short: "Print the hash of the front cover each entity resolves to",
+		Long: "Prints, for each entity, the content hash of the front cover `art` would answer " +
+			"with, following the same fallback chain and loading no picture. The hash changes " +
+			"exactly when the picture does, so it is what a host puts in a cover's URL to cache " +
+			"the response for good, having checked the picture it serves still carries that hash. " +
+			"An entity that resolves no cover, or a pid that names none of the type, prints " +
+			"without a hash.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			et, err := parseArtEntity("art hashes", entType)
+			if err != nil {
+				return err
+			}
+			lib, _, err := g.openRead(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+
+			refs := make([]model.EntityRef, len(args))
+			for i, a := range args {
+				refs[i] = model.EntityRef{Type: et, PID: model.PID(a)}
+			}
+			hashes, err := lib.ArtHashes(ctx(cmd), refs)
+			if err != nil {
+				return err
+			}
+			views := make([]artHashView, len(refs))
+			for i, ref := range refs {
+				views[i] = artHashView{PID: ref.PID, SourceHash: hashes[ref]}
+			}
+			if g.jsonOut {
+				return printJSON(cmd, struct {
+					Type   string        `json:"type"`
+					Hashes []artHashView `json:"hashes"`
+				}{string(et), views})
+			}
+			w := out(cmd)
+			for _, v := range views {
+				hash := v.SourceHash
+				if hash == "" {
+					hash = "-"
+				}
+				fmt.Fprintf(w, "%s %s\n", v.PID, hash)
 			}
 			return nil
 		},

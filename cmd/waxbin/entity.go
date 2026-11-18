@@ -794,6 +794,7 @@ type entityInfoView struct {
 	// PrimaryLibraryPIDs are the libraries among libraryPids holding a member's primary
 	// file, the ones the members are placed in (read.EntityInfo.PrimaryLibraryPIDs).
 	PrimaryLibraryPIDs []string `json:"primaryLibraryPids"`
+	ArtHash            string   `json:"artHash,omitempty"`
 }
 
 func toEntityInfoView(info *read.EntityInfo) entityInfoView {
@@ -813,7 +814,7 @@ func toEntityInfoView(info *read.EntityInfo) entityInfoView {
 		ArtistPID: string(info.ArtistPID), ReleaseGroupPID: string(info.ReleaseGroupPID),
 		ItemCount: info.ItemCount, ReleaseGroupCount: info.ReleaseGroupCount,
 		TotalDurationMS: info.TotalDurationMS, LibraryPIDs: strs(info.LibraryPIDs),
-		PrimaryLibraryPIDs: strs(info.PrimaryLibraryPIDs),
+		PrimaryLibraryPIDs: strs(info.PrimaryLibraryPIDs), ArtHash: info.ArtHash,
 	}
 }
 

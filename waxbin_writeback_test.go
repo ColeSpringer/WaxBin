@@ -581,11 +581,35 @@ func TestSetItemArtWriteBack(t *testing.T) {
 	}
 	pid := itemPIDByTitle(t, ctx, lib, "Song")
 
+	stated := func() string {
+		t.Helper()
+		return catalogScalar[string](t, ctx, db, "SELECT COALESCE(front_hash, 'unknown') FROM file WHERE kind = 'audio'")
+	}
+	if got := stated(); got != "" {
+		t.Fatalf("the scanned file states %q, want a finding of no cover", got)
+	}
 	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t),
 		waxbin.ArtEditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("set item art write-back: %v", err)
 	}
 	assertFrontCover(t, ctx, src)
+	// The catalog records what the file carries now, with no scan to read it back, and a
+	// write of another tag leaves that alone.
+	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+	held, err := lib.ArtHashes(ctx, []model.EntityRef{ref})
+	if err != nil || held[ref] == "" {
+		t.Fatalf("the item's cover = %q (err %v), want the one set", held[ref], err)
+	}
+	if got := stated(); got != held[ref] {
+		t.Errorf("after the cover write the file states %q, want the cover written %s", got, held[ref])
+	}
+	if err := lib.EditFields(ctx, pid, map[string]string{"title": "Song Again"},
+		waxbin.EditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+	if got := stated(); got != held[ref] {
+		t.Errorf("after a title write the file states %q, want its cover %s still", got, held[ref])
+	}
 
 	// Only the front cover has an embedded representation, so --write-back with any
 	// other role is refused before the catalog write: the back slot stays empty.

@@ -23,6 +23,13 @@ type PutScannedTrackInput struct {
 	// The store dedups it into the content-addressed art store and maps it onto the
 	// track. Album art is derived from current track covers at read time.
 	CoverArt *ArtImage
+	// NoCover says the scan read this file's tags and looked in the folders beside it,
+	// and there is no cover. It takes back a front the catalog holds from a tag or a
+	// sidecar once no other file of the item states that picture; a front set any other
+	// way stays. With CoverArt nil and NoCover unset the put says nothing about the
+	// cover: a scan that could not read the tags, a cover folder or a cover file, or an
+	// import whose cover follows the audio.
+	NoCover bool
 	// AuxObservations records the on-disk state of this file's sidecars (a sibling
 	// .lrc, the directory cover) so a later rescan can stat-compare them and re-parse
 	// only a changed one instead of re-reading every sidecar every scan.
@@ -105,8 +112,11 @@ type PutScannedBookInput struct {
 	// the chapter rows' source so embedded chapters stay authoritative over cue ones.
 	// Empty defaults to "embedded".
 	ChapterSource string
-	// CoverArt is the book's cover image (embedded or directory), or nil.
+	// CoverArt is the book's cover image (embedded or directory), or nil, and NoCover
+	// says the scan looked and found none, as on PutScannedTrackInput. The book takes its
+	// primary part's cover.
 	CoverArt *ArtImage
+	NoCover  bool
 	// AuxObservations records the on-disk state of this file's sidecars for the scan
 	// fast-path (see PutScannedTrackInput.AuxObservations).
 	AuxObservations []AuxObservation
@@ -172,8 +182,10 @@ type PutScannedVirtualTracksInput struct {
 	// per-track and album-level display metadata.
 	Tracks []VirtualTrack
 	// CoverArt is the rip's cover image (embedded or directory), mapped onto each
-	// virtual track, or nil.
+	// virtual track on every put, or nil, and NoCover says the scan looked and found
+	// none, as on PutScannedTrackInput.
 	CoverArt *ArtImage
+	NoCover  bool
 	// AuxObservations records this file's sidecar state (the .cue, a directory cover)
 	// for the scan fast-path, exactly as the track/book inputs do.
 	AuxObservations []AuxObservation
@@ -558,6 +570,10 @@ type FileStateUpdate struct {
 	NewSize         int64
 	NewMTimeNS      int64
 	NewContentHash  string
+	// Front is set by a write that changed the picture the file embeds: the hash of the
+	// cover it now carries, or the empty string for a write that stripped it. Nil is
+	// every other write, which leaves the picture as the last read found it.
+	Front *string
 }
 
 // Catalog is the persistence port for the catalog. store/sqlite implements it;

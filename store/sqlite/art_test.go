@@ -162,11 +162,12 @@ func TestAlbumArtPrunedOnCoverChange(t *testing.T) {
 		t.Fatalf("album art: %v", err)
 	}
 	if got.SourceHash != coverA.Hash {
-		t.Fatalf("album initially resolves to %s, want the first-mapped cover A %s", got.SourceHash, coverA.Hash)
+		t.Fatalf("album initially resolves to %s, want its first member's cover A %s", got.SourceHash, coverA.Hash)
 	}
 
 	// Re-cover track 1 (A -> C). Cover A is now backed by no track, so the album
-	// must stop resolving to it and A becomes reclaimable.
+	// must stop resolving to it and A becomes reclaimable. The album follows track 1
+	// to its new cover rather than moving to track 2's.
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", coverC)
 	got, err = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront, 0)
 	if err != nil {
@@ -175,8 +176,8 @@ func TestAlbumArtPrunedOnCoverChange(t *testing.T) {
 	if got.SourceHash == coverA.Hash {
 		t.Errorf("album still resolves to the stale cover A after every track dropped it")
 	}
-	if got.SourceHash != coverB.Hash && got.SourceHash != coverC.Hash {
-		t.Errorf("album resolved to %s, want a current track cover (B %s or C %s)", got.SourceHash, coverB.Hash, coverC.Hash)
+	if got.SourceHash != coverC.Hash {
+		t.Errorf("album resolved to %s, want track 1's new cover C %s", got.SourceHash, coverC.Hash)
 	}
 	rep, _ := st.VerifyDerived(ctx)
 	if rep.OrphanArtSources == 0 {
@@ -214,7 +215,7 @@ func TestAlbumArtNotStaleAfterTrackDeparts(t *testing.T) {
 	ctx := context.Background()
 	coverA, coverB := testPNG(t, 64, 64), testPNG(t, 65, 65)
 
-	// Album X holds T1 (cover A, first/lowest rowid) and T2 (cover B).
+	// Album X holds T1 (cover A, its first member) and T2 (cover B).
 	putArt(t, st, lib.ID, "/lib/x/1.flac", "e1", "c1", "X", coverA)
 	putArt(t, st, lib.ID, "/lib/x/2.flac", "e2", "c2", "X", coverB)
 	var xPID model.PID

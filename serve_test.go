@@ -758,7 +758,7 @@ func TestServeProxiedPlaylistDescription(t *testing.T) {
 // TestServeProxiedPlaylistArt drives set_entity_art for a playlist over the socket:
 // the entity type rides the existing wire field (no new method, no version bump), the
 // cover resolves at the playlist's own level through the served library, and the
-// HasArt projection follows. This is the surface WaxDeck serves a synced playlist's
+// ArtHash projection follows. This is the surface WaxDeck serves a synced playlist's
 // cover from.
 func TestServeProxiedPlaylistArt(t *testing.T) {
 	t.Parallel()
@@ -795,8 +795,8 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 			len(blob.Bytes), blob.Level, len(cover))
 	}
 	pl, err := lib.Playlists().Get(ctx, pid)
-	if err != nil || !pl.HasArt {
-		t.Fatalf("playlist = %+v (err %v), want HasArt after the proxied cover set", pl, err)
+	if err != nil || pl.ArtHash != blob.SourceHash {
+		t.Fatalf("playlist = %+v (err %v), want the cover's hash %s after the proxied cover set", pl, err, blob.SourceHash)
 	}
 }
 

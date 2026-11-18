@@ -28,6 +28,8 @@ func VerdictOf(out *model.ScanItemResult) Verdict {
 		return VerdictRevived
 	case out.AttachedAsCopy && out.ContentChanged:
 		return VerdictUpdated
+	case out.AttachedAsCopy && out.SidecarsChanged:
+		return VerdictSidecars
 	case out.AttachedAsCopy:
 		return VerdictUnchanged
 	case out.Joined:

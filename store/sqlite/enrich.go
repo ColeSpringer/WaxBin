@@ -67,10 +67,10 @@ const (
 	// both halves.
 	//
 	// It accepts one tolerance the artist and release-group rungs accept too. A member
-	// track's embedded cover stripped by a rescan opens an album front vacancy this
-	// marker keeps closed until it expires (a miss) or until evidence arrives (a match):
-	// the marker is keyed on the album, not on where the front came from, and a scan has
-	// no cheap way to tell the two apart.
+	// track that leaves the album with the cover that answered for it opens an album
+	// front vacancy this marker keeps closed until it expires (a miss) or until evidence
+	// arrives (a match): the marker is keyed on the album, not on where the front came
+	// from. A member that stays and loses its cover re-opens it (memberFrontClearedTx).
 	enrichEntityAlbumFront = "album_front"
 	// enrichEntityFields is the entity_enrichment.entity_type for the item-rung fields
 	// walk, keyed by the item id. Tracks and books share the id space and share this
@@ -89,13 +89,13 @@ const (
 )
 
 // albumResolvesFrontArt is true when an album already answers a front-cover request: its
-// own art_map row, or the member track's cover ResolveArt derives one from. It mirrors
-// artInChain's album rung, so a caller can ask the question outside a read without
-// disagreeing with what the resolver would actually return. It reads the album as al.
+// own art_map row, or the member track's cover ResolveArt derives one from. It is the art
+// walk's album rung, reading the same member covers (albumMemberFronts), so a caller can
+// ask the question outside a read without disagreeing with what the resolver would
+// actually return. It reads the album as al.
 const albumResolvesFrontArt = `(EXISTS (SELECT 1 FROM art_map am
 		WHERE am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front')
-	OR EXISTS (SELECT 1 FROM art_map tm JOIN track t ON t.item_id = tm.entity_id
-		WHERE tm.entity_type = 'track' AND tm.role = 'front' AND t.album_id = al.id))`
+	OR EXISTS (SELECT 1` + albumMemberFronts + `al.id))`
 
 // trackTakesGroupGenres is true for a member track the release-group genre fill reaches:
 // no genre yet and no genre lock. The fill and the queue's NeedsGenres read the same

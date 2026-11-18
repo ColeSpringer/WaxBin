@@ -483,12 +483,13 @@ type scanCtx struct {
 	open               []string
 	adoptOnly, unadopt bool
 	albums             map[string]string
-	// album, position, pin and job are FileOptions', for a single-file scan; job reaches
-	// the re-reads of the files its puts promote too.
-	album    string
-	position *int
-	pin      bool
-	job      model.PID
+	// album, position, pin, coverPending and job are FileOptions', for a single-file scan;
+	// job reaches the re-reads of the files its puts promote too.
+	album        string
+	position     *int
+	pin          bool
+	coverPending bool
+	job          model.PID
 	// rollups is the walk's settle cadence, nil outside a walk, where a put recomputes the
 	// rollups it touches itself.
 	rollups *rollupCadence
@@ -665,6 +666,10 @@ type FileOptions struct {
 	Job      model.PID
 	// ReResolve resolves the file's entities from its tags again (Request.ReResolve).
 	ReResolve bool
+	// CoverPending says the file's folder cover has yet to arrive, as an import's does,
+	// placed once the audio has landed. A read that finds no cover then says nothing
+	// about the item's cover, where it would otherwise say the file has none.
+	CoverPending bool
 }
 
 // ScanFileWith is ScanFileAs with the options an import passes. A file whose folder is
@@ -686,7 +691,7 @@ func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path str
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
 	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position,
-		pin: opts.Pin, job: opts.Job, reResolve: opts.ReResolve, ids: &identities{}}
+		pin: opts.Pin, job: opts.Job, reResolve: opts.ReResolve, coverPending: opts.CoverPending, ids: &identities{}}
 	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, opts.Kind); err != nil {
 		res.Errored++
 		return res, nil, err
@@ -871,7 +876,10 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		ScanState:   model.ScanIndexed,
 	}
 
-	cover := resolveCover(path, fm.CoverArt, sc.cache)
+	cover, looked := resolveCover(path, fm.CoverArt, sc.cache)
+	// A container the reader has no parser for had no tags read, so its having no
+	// picture is not a finding either.
+	noCover := cover == nil && looked && !sc.coverPending && !unsupportedFormat(fm.Diagnostics)
 	lyrics, aux, sidecarDiags := scanSidecars(path, fm.Lyrics, sc.cache)
 
 	// The reader's own observations (unsupported container, legacy-tag fallback,
@@ -991,7 +999,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		// TRACK is its own virtual track with an offset window, rather than the whole
 		// file cataloged as one track.
 		out, err = s.cat.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
-			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, AuxObservations: aux,
+			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, NoCover: noCover, AuxObservations: aux,
 			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
 			DeferRollups: sc.rollups != nil, Job: sc.job,
 		})
@@ -1008,7 +1016,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		if len(cueChapters) > 0 {
 			bin.Chapters, bin.ChapterSource = cueChapters, "cue"
 		}
-		bin.AuxObservations = aux
+		bin.AuxObservations, bin.NoCover = aux, noCover
 		bin.PreferredItemPID = adoptedPID(sc, fm)
 		bin.Diagnostics = diags
 		bin.PreserveLocks = sc.preserveLocks
@@ -1018,7 +1026,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		in := trackInput(lib.ID, file, tags, essenceHash)
-		in.Lyrics, in.CoverArt, in.AuxObservations = lyrics, cover, aux
+		in.Lyrics, in.CoverArt, in.NoCover, in.AuxObservations = lyrics, cover, noCover, aux
 		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
 		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
 		in.DeferRollups, in.ReResolve, in.Job = sc.rollups != nil, sc.reResolve, sc.job
@@ -1876,6 +1884,9 @@ func coverChangedFast(path string, stored map[string]model.AuxObservation, cache
 type dirCoverEntry struct {
 	img *model.ArtImage       // resolved cover (nil = none)
 	obs *model.AuxObservation // the cover FILE observation (nil = none)
+	// unread marks a nil img that is no finding: the folder could not be listed, or a
+	// cover file in it gave no picture.
+	unread bool
 }
 
 type artCache struct {
@@ -1918,7 +1929,7 @@ func (c *artCache) resolve(dir string) dirCoverEntry {
 	if e, ok := c.dirs[dir]; ok {
 		return e
 	}
-	img, coverPath := findDirCover(dir)
+	img, coverPath, unread := findDirCover(dir)
 	var obs *model.AuxObservation
 	if img != nil && coverPath != "" {
 		if info, err := os.Stat(coverPath); err == nil {
@@ -1928,13 +1939,10 @@ func (c *artCache) resolve(dir string) dirCoverEntry {
 			}
 		}
 	}
-	e := dirCoverEntry{img: img, obs: obs}
+	e := dirCoverEntry{img: img, obs: obs, unread: unread}
 	c.dirs[dir] = e
 	return e
 }
-
-// dirCover returns the directory's cover image (nil when there is none).
-func (c *artCache) dirCover(dir string) *model.ArtImage { return c.resolve(dir).img }
 
 // dirCoverObs returns the directory cover file's on-disk observation (nil none).
 func (c *artCache) dirCoverObs(dir string) *model.AuxObservation { return c.resolve(dir).obs }
@@ -1944,27 +1952,35 @@ func (c *artCache) dirCoverObs(dir string) *model.AuxObservation { return c.reso
 // a last resort. That keeps an embedded format without a registered decoder
 // available to serve, while a corrupt or placeholder embedded picture does not
 // shadow a valid cover.jpg next to the file.
-func resolveCover(path string, embedded *model.ArtImage, cache *artCache) *model.ArtImage {
+//
+// looked reports that a nil answer is a finding as far as the folders go: every cover
+// folder was listed and holds no cover file. With a folder it could not list, or a cover
+// file that gave no picture, the scan does not know what the file's cover is, and says so
+// by leaving looked unset. Whether the tags were read at all is the caller's to know.
+func resolveCover(path string, embedded *model.ArtImage, cache *artCache) (cover *model.ArtImage, looked bool) {
 	// finalizeArt also recognizes an exotic (AVIF/HEIC) embedded image by its magic
 	// bytes alone, carrying whatever dimensions its container declared. Only a picture a
 	// decoder here read wins at this point, so such an image does not shadow a decodable
 	// cover.jpg beside the file. It is still kept by the last-resort branch below.
 	if embedded != nil {
 		if recognized, decoded := finalizeArt(embedded); recognized && decoded {
-			return embedded
+			return embedded, true
 		}
 	}
+	looked = true
 	for _, d := range cache.coverDirs(path) {
-		if dir := cache.dirCover(d); dir != nil {
-			return dir // a valid (decodable) directory cover
+		e := cache.resolve(d)
+		if e.img != nil {
+			return e.img, true // a valid (decodable) directory cover
 		}
+		looked = looked && !e.unread
 	}
 	// No usable directory cover: keep the embedded bytes even if they did not decode,
 	// so a format without a local decoder is not dropped (finalizeArt set its hash).
 	if embedded != nil && len(embedded.Data) > 0 && embedded.Hash != "" {
-		return embedded
+		return embedded, true
 	}
-	return nil
+	return nil, looked
 }
 
 // coverFilesByLower lists dir once and returns a lowercase-name -> actual-name map of
@@ -1989,8 +2005,14 @@ func coverFilesByLower(dir string) map[string]string {
 // when there is none. The image is stamped "sidecar": it came off a companion file
 // beside the audio, not out of the tags. Its path is not carried as a source URL;
 // the on-disk location is recorded as the AuxCover observation instead.
-func findDirCover(dir string) (*model.ArtImage, string) {
+//
+// unread reports that it found none without knowing there is none: the directory would
+// not list, or a cover file is there and gave no picture, because it would not read or
+// because its bytes are not one. The second is how a cover caught mid-copy looks, empty
+// or cut short, so it is no more a finding of no cover than the first.
+func findDirCover(dir string) (img *model.ArtImage, path string, unread bool) {
 	byLower := coverFilesByLower(dir)
+	unread = byLower == nil
 	for _, cand := range model.CoverArtNames {
 		name, ok := byLower[cand]
 		if !ok {
@@ -1999,14 +2021,16 @@ func findDirCover(dir string) (*model.ArtImage, string) {
 		full := filepath.Join(dir, name)
 		data, err := os.ReadFile(full)
 		if err != nil {
+			unread = true
 			continue
 		}
 		img := &model.ArtImage{Data: data, Attribution: model.Attribution{Source: model.SourceSidecar}}
 		if recognized, _ := finalizeArt(img); recognized {
-			return img, full
+			return img, full, false
 		}
+		unread = true
 	}
-	return nil, ""
+	return nil, "", unread
 }
 
 // coverStat finds the highest-priority existing cover-candidate file in dir and

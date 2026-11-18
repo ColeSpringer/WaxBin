@@ -164,6 +164,11 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err := repointArtMap(ctx, tx, table, sid, lid); err != nil {
 		return nil, err
 	}
+	// The loser's groups and albums are the survivor's now and draw its cover, and the
+	// survivor may have taken the loser's.
+	if err := nameFrontHeirsTx(ctx, tx, table, sid); err != nil {
+		return nil, err
+	}
 	// Re-point the entity-curation rows (also polymorphic, no FK) with locked-wins.
 	if err := repointEntityCuration(ctx, tx, table, sid, lid); err != nil {
 		return nil, err

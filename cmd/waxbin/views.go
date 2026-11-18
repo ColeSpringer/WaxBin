@@ -387,6 +387,7 @@ type bucketView struct {
 	Count     int    `json:"count"`
 	Unknown   bool   `json:"unknown,omitempty"`
 	EntityPID string `json:"entityPid,omitempty"`
+	ArtHash   string `json:"artHash,omitempty"`
 }
 
 type facetView struct {
@@ -494,7 +495,7 @@ type playlistView struct {
 	Kind        string `json:"kind"`
 	Visibility  string `json:"visibility"`
 	ItemCount   int    `json:"itemCount"`
-	HasArt      bool   `json:"hasArt"`
+	ArtHash     string `json:"artHash,omitempty"`
 }
 
 // toPlaylistView takes the count rather than reading model.Playlist.ItemCount, which
@@ -504,7 +505,7 @@ type playlistView struct {
 func toPlaylistView(p *model.Playlist, count int) playlistView {
 	return playlistView{
 		PID: string(p.PID), Name: p.Name, Description: p.Description, Owner: p.OwnerName, OwnerPID: string(p.OwnerPID), Kind: string(p.Kind),
-		Visibility: string(p.Visibility), ItemCount: count, HasArt: p.HasArt,
+		Visibility: string(p.Visibility), ItemCount: count, ArtHash: p.ArtHash,
 	}
 }
 
@@ -548,6 +549,7 @@ type searchHitView struct {
 	Subtitle string  `json:"subtitle,omitempty"`
 	Score    float64 `json:"score"`
 	Exact    bool    `json:"exact,omitempty"`
+	ArtHash  string  `json:"artHash,omitempty"`
 }
 
 type searchView struct {
@@ -574,6 +576,7 @@ func hitViews(hits []read.SearchHit) []searchHitView {
 	for _, h := range hits {
 		out = append(out, searchHitView{
 			PID: string(h.PID), Kind: h.Kind, Title: h.Title, Subtitle: h.Subtitle, Score: h.Score, Exact: h.Exact,
+			ArtHash: h.ArtHash,
 		})
 	}
 	return out
@@ -584,6 +587,7 @@ func bucketViews(buckets []read.Bucket) []bucketView {
 	for _, b := range buckets {
 		out = append(out, bucketView{
 			Key: b.Key, Display: b.Display, Count: b.Count, Unknown: b.IsUnknown, EntityPID: string(b.EntityPID),
+			ArtHash: b.ArtHash,
 		})
 	}
 	return out

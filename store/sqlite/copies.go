@@ -430,10 +430,12 @@ func dropCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64) error 
 // does not take over, as an alternate. None of the item's writers run, since the
 // primary's tags own the item; the file keeps its own row, sidecar observations and
 // diagnostics, and the owed rows its tags already pay are settled against the catalog.
-// A missing item the file belongs to is present again, its primary being on disk. The
-// item emits one update when the edge is new or it came back.
+// Its cover is not the item's, though its read finding none can be what shows the item's
+// front is on disk nowhere (settleScannedFrontTx). A missing item the file belongs to is
+// present again, its primary being on disk. The item emits one update when the edge is
+// new, it came back, or its front went.
 func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, fileID int64, filePID model.PID,
-	itemID int64, primary *standingPrimary, fileTitle itemTitle, fileTrack model.Track, res *model.ScanItemResult, now int64, cover examinedArt) error {
+	itemID int64, primary *standingPrimary, fileTitle itemTitle, fileTrack model.Track, res *model.ScanItemResult, now int64, seen scannedCover) error {
 	const op = "store.PutScannedTrack"
 	var itemPID model.PID
 	if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", itemID).Scan(&itemPID); err != nil {
@@ -480,13 +482,22 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
+	// Ahead of the owed rows, which read the front as the put leaves it.
+	front, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, false, in.PreserveLocks)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := affected.announceFrontsTx(ctx, tx); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	res.SidecarsChanged = front
 	cur, curTitle, _, err := loadTrackForEditTx(ctx, tx, itemID)
 	if err != nil {
 		return err
 	}
 	if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 		fileTitle: fileTitle, title: curTitle, fileTrack: fileTrack, track: cur,
-		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: cover, fileTags: in.CustomTags,
+		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: seen.pic, fileTags: in.CustomTags,
 	}); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -496,7 +507,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
-	if changed || revived {
+	if changed || revived || front {
 		if err := appendChange(ctx, tx, "item", itemPID, model.OpUpdate); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

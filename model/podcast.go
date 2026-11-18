@@ -50,6 +50,9 @@ type Podcast struct {
 	// download the feed's image at all. Read-populated like the counts above.
 	CoverSourceURL string
 	CoverLocked    bool
+	// ArtHash is that cover's content hash, the one ArtHashes reports and ResolveArt
+	// serves it under, empty when the show holds none. Read-populated as well.
+	ArtHash string
 	// Persons are the show-level <podcast:person> credits. Populated by the detail
 	// read (PodcastByPID), not the list.
 	Persons []FeedPerson

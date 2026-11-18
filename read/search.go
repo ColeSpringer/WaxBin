@@ -80,6 +80,25 @@ type SearchHit struct {
 	// the same key once spaces are dropped ("jayz" is Jay-Z), or for a query of
 	// symbols alone the same sort key.
 	Exact bool
+	// ArtHash is the content hash of the front cover the hit resolves to, read under
+	// ArtRef as EntityInfo.ArtHash is read for a card: the cover's version, for its URL.
+	// Empty when the hit resolves no cover.
+	ArtHash string
+}
+
+// ArtRef is the reference the hit's cover is asked for under, by its Kind: an artist or
+// an album as itself, an episode in the episode slot, a track or a book in the track
+// slot. ResolveArt takes it.
+func (h SearchHit) ArtRef() model.EntityRef {
+	switch h.Kind {
+	case "artist":
+		return model.EntityRef{Type: model.ArtArtist, PID: h.PID}
+	case "album":
+		return model.EntityRef{Type: model.ArtAlbum, PID: h.PID}
+	case "episode":
+		return model.EntityRef{Type: model.ArtEpisode, PID: h.PID}
+	}
+	return model.EntityRef{Type: model.ArtTrack, PID: h.PID}
 }
 
 // SearchResult is the grouped answer for one query string, and each group's order is

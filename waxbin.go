@@ -1009,6 +1009,34 @@ func (l *Library) ArtProvenance(ctx context.Context, ref model.EntityRef, role m
 	return l.store.ArtProvenance(ctx, ref, role)
 }
 
+// ArtHashes answers, for each reference, the content hash of the front cover it resolves
+// to: the SourceHash a ResolveArt of that reference carries, found by the same walk of
+// the fallback chain without loading a picture. It is the version of an entity's cover,
+// and a reference that resolves no cover, or names no entity, has no entry, which makes
+// it the has-cover signal as well.
+//
+// A host puts the hash in the cover's URL and can then cache the response for good, on
+// one condition. Nothing fetches by hash: ResolveArt answers with whatever the entity
+// draws when it is asked, so a cover that changed between the listing and the fetch
+// comes back under the old URL. The host compares ArtBlob.SourceHash with the hash the
+// URL carries and gives the response the long lifetime only when they match.
+//
+// An entity card, a facet bucket, a search hit, a playlist and a podcast carry theirs
+// already, as ArtHash, so this is the read for a listing's items (ItemView.ArtRef): the
+// item view is read by far more than draws covers, and does not carry it. The change log
+// names an entity when its own cover is written, an album when the cover it borrows from
+// its tracks moves, and the albums and release groups that inherit a release group's or
+// an artist's cover when that one changes. An item is not named for a cover it inherits,
+// so a host refreshes the item covers under an entity the log names.
+//
+// References of any mix of types go in one call, so one call answers a page, and
+// entities that share a rung cost it once. The walk runs a statement per rung, so an
+// answer is not one snapshot of the catalog, as a ResolveArt never was. An unknown
+// entity type is CodeInvalid.
+func (l *Library) ArtHashes(ctx context.Context, refs []model.EntityRef) (map[model.EntityRef]string, error) {
+	return l.store.ArtHashes(ctx, refs)
+}
+
 // ArtRoles lists the artwork slots an entity holds at its own level (no chain
 // fallback): each stored role with the source image's format, dimensions, and
 // content hash.
@@ -1144,9 +1172,9 @@ func (l *Library) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*mo
 
 // EntityByPID returns the summary info for one shared entity (artist, release group,
 // album, genre, or series): name, sort key, external identifiers, parent links,
-// membership counts, and the libraries its members' files live in. It answers the pid a
-// facet bucket or an item view hands out, without a facet scan. An unknown kind is
-// CodeInvalid, an unknown pid CodeNotFound.
+// membership counts, the libraries its members' files live in, and the hash of the
+// cover it resolves. It answers the pid a facet bucket or an item view hands out,
+// without a facet scan. An unknown kind is CodeInvalid, an unknown pid CodeNotFound.
 func (l *Library) EntityByPID(ctx context.Context, kind read.EntityKind, pid model.PID) (*read.EntityInfo, error) {
 	return l.store.EntityByPID(ctx, kind, pid)
 }
@@ -2379,6 +2407,8 @@ type fileWrite struct {
 	res     *meta.WriteResult
 	refused []keyRefusal
 	settles []string
+	// front is set by a write of the file's picture (model.FileStateUpdate.Front).
+	front *string
 }
 
 type keyRefusal struct {
@@ -2569,6 +2599,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			NewSize:         res.Size,
 			NewMTimeNS:      res.MTimeNS,
 			NewContentHash:  res.ContentHash,
+			Front:           fw.front,
 		}); err != nil {
 			l.log.Warn("edit file-state update", "path", path, "err", err)
 		}

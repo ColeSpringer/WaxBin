@@ -33,6 +33,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	seen := scanned(cover, in.NoCover)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -56,6 +57,9 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		}
 		res.FilePID = filePID
 
+		if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -191,8 +195,13 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 					if err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
+					front, err := settleScannedFrontTx(ctx, tx, affected, primary.itemID, fileID, seen, false, in.PreserveLocks)
+					if err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, op, err)
+					}
 					joined, res.Revived = joined || changed, res.Revived || revived
-					if changed || revived {
+					setChanged = setChanged || front
+					if changed || revived || front {
 						if err := appendChange(ctx, tx, "item", primary.itemPID, model.OpUpdate); err != nil {
 							return waxerr.Wrap(waxerr.CodeIO, op, err)
 						}
@@ -232,11 +241,17 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-				if revived {
+				// The cover is read on every scan of the rip, as a plain track's is, so
+				// one that changed or went while the sheet stood still still lands.
+				artChanged, err := settleScannedFrontTx(ctx, tx, affected, ex.itemID, fileID, seen, true, in.PreserveLocks)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if revived || artChanged {
 					if err := appendItemUpdateTx(ctx, tx, ex.itemID); err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
-					setChanged, res.Revived = true, true
+					setChanged, res.Revived = true, res.Revived || revived
 				}
 				continue
 			}
@@ -284,7 +299,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			// with its album art. It respects a locked cover like the whole-file scan
 			// paths do (catalog.go, book.go), so re-reading the .cue does not undo a
 			// chosen cover on one of its tracks.
-			if _, err := attachArtRespectingLockTx(ctx, tx, itemID, cover, in.PreserveLocks); err != nil {
+			if _, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, true, in.PreserveLocks); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			// Origin provenance from the file's tags, recorded per track when absent.
@@ -339,6 +354,9 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+		}
+		if err := affected.announceFrontsTx(ctx, tx); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
 		if res.FileCreated || res.ContentChanged || res.Relinked {

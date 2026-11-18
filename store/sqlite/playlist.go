@@ -145,8 +145,8 @@ func insertPlaylistEntriesTx(ctx context.Context, tx *sql.Tx, op string, plID in
 const playlistSelect = `SELECT p.pid, p.name, p.description, u.pid, u.name, p.kind, p.visibility, p.rule,
 	p.created_at, p.updated_at,
 	(SELECT COUNT(*) FROM playlist_item pli WHERE pli.playlist_id = p.id),
-	EXISTS(SELECT 1 FROM art_map am
-	         WHERE am.entity_type = 'playlist' AND am.entity_id = p.id AND am.role = 'front')
+	COALESCE((SELECT am.source_hash FROM art_map am
+	         WHERE am.entity_type = 'playlist' AND am.entity_id = p.id AND am.role = 'front'), '')
 	FROM playlist p JOIN user u ON u.id = p.owner_user_id`
 
 func scanPlaylist(sc rowScanner) (*model.Playlist, error) {
@@ -154,7 +154,7 @@ func scanPlaylist(sc rowScanner) (*model.Playlist, error) {
 	var kind, vis string
 	var rule sql.NullString
 	if err := sc.Scan(&p.PID, &p.Name, &p.Description, &p.OwnerPID, &p.OwnerName, &kind, &vis, &rule,
-		&p.CreatedAt, &p.UpdatedAt, &p.ItemCount, &p.HasArt); err != nil {
+		&p.CreatedAt, &p.UpdatedAt, &p.ItemCount, &p.ArtHash); err != nil {
 		return nil, err
 	}
 	p.Kind = model.PlaylistKind(kind)

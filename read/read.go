@@ -5,6 +5,8 @@
 // clean, canonical, counted results; consumers decide pixels/UX.
 package read
 
+import "github.com/colespringer/waxbin/model"
+
 // GroupBy is a faceting dimension. The set is enumerated and individually
 // tested so every consumer (CLI --group-by, OpenSubsonic getGenres/getArtists,
 // stats) groups the same way.
@@ -99,6 +101,28 @@ func GroupBys() []GroupBy {
 	return []GroupBy{GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
 		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPrimaryLibrary, GroupPodcast,
 		GroupPlaylist, GroupSeries, GroupAuthor, GroupNarrator}
+}
+
+// ArtEntity is the art entity type a dimension's bucket pids are asked for art under,
+// so a Bucket's EntityPID becomes a model.EntityRef for ResolveArt, and the type its
+// buckets' ArtHash is read under. The dimensions whose buckets are no art entity (year,
+// kind, the two library dimensions, series, a custom tag) report false.
+func (g GroupBy) ArtEntity() (model.ArtEntity, bool) {
+	switch g {
+	case GroupGenre:
+		return model.ArtGenre, true
+	case GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAuthor, GroupNarrator:
+		return model.ArtArtist, true
+	case GroupAlbum:
+		return model.ArtAlbum, true
+	case GroupReleaseGroup:
+		return model.ArtReleaseGroup, true
+	case GroupPodcast:
+		return model.ArtPodcast, true
+	case GroupPlaylist:
+		return model.ArtPlaylist, true
+	}
+	return "", false
 }
 
 // UserScoped reports whether g's bucket set depends on the calling user. Only

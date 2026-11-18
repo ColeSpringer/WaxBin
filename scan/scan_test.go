@@ -41,7 +41,7 @@ func TestResolveCoverSkipsUndecodableEmbedded(t *testing.T) {
 	junk := &model.ArtImage{Data: []byte("this is not an image")}
 
 	// A junk/undecodable embedded picture must not shadow the valid directory cover.
-	got := resolveCover(audio, junk, newArtCache())
+	got, _ := resolveCover(audio, junk, newArtCache())
 	if got == nil {
 		t.Fatal("resolveCover returned nil; want the directory cover")
 	}
@@ -58,7 +58,7 @@ func TestResolveCoverKeepsUndecodableAsLastResort(t *testing.T) {
 	dir := t.TempDir() // no directory cover here
 	audio := filepath.Join(dir, "song.mp3")
 	junk := &model.ArtImage{Data: []byte("exotic-but-real-bytes")}
-	got := resolveCover(audio, junk, newArtCache())
+	got, _ := resolveCover(audio, junk, newArtCache())
 	if got == nil || string(got.Data) != string(junk.Data) {
 		t.Fatalf("with no directory cover, expected the embedded bytes as a last resort, got %v", got)
 	}
@@ -182,7 +182,7 @@ func TestResolveCoverExoticEmbeddedYieldsToDirCover(t *testing.T) {
 	audio := filepath.Join(dir, "song.m4a")
 	// An exotic embedded cover is recognized but has unknown dimensions (no pure-Go
 	// decoder). It must NOT shadow the genuinely-decodable directory cover.jpg.
-	got := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
+	got, _ := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
 	if got == nil {
 		t.Fatal("resolveCover returned nil; want the directory cover")
 	}
@@ -195,7 +195,7 @@ func TestResolveCoverExoticEmbeddedKeptWithoutDirCover(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir() // no directory cover
 	audio := filepath.Join(dir, "song.m4a")
-	got := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
+	got, _ := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
 	if got == nil || got.Format != "avif" {
 		t.Fatalf("with no dir cover, the exotic embedded cover should be kept as last resort, got %v", got)
 	}
@@ -305,7 +305,7 @@ func TestFindDirCoverAVIF(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cover.avif"), avif, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	img, path := findDirCover(dir)
+	img, path, _ := findDirCover(dir)
 	if img == nil {
 		t.Fatal("cover.avif not found (exotic covers must still be discovered)")
 	}
@@ -512,6 +512,7 @@ func TestVerdictOfPartitionsEveryOutcome(t *testing.T) {
 		{"a copy with new bytes", model.ScanItemResult{AttachedAsCopy: true, ContentChanged: true}, VerdictUpdated, updated},
 		{"a sidecar alone", model.ScanItemResult{SidecarsChanged: true}, VerdictSidecars, sidecars},
 		{"a copy read again", model.ScanItemResult{AttachedAsCopy: true}, VerdictUnchanged, unchanged},
+		{"a copy whose read took the item's cover away", model.ScanItemResult{AttachedAsCopy: true, SidecarsChanged: true}, VerdictSidecars, sidecars},
 		{"nothing", model.ScanItemResult{}, VerdictUnchanged, unchanged},
 	}
 	seen := map[Verdict]bool{}

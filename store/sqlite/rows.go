@@ -150,6 +150,13 @@ const (
 // album_pid its track_album_id seek, which TestLoweredIdentityFieldPlans catches, so a
 // column only the projection reads is added as a correlated scalar subquery even though
 // the per-row probe is the more expensive half.
+//
+// The front cover an item resolves is not here. Read per row it walks the art chain, and
+// cost a 50-item page 19% where every item holds its own cover and 35% where none does,
+// on every reader of the list. ArtHashes answers a page in one call for the reader that
+// draws covers, and the members of an album share its rungs there. The entity cards,
+// facet buckets and search hits do carry theirs (ArtHash), their readers being the ones
+// that draw.
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),

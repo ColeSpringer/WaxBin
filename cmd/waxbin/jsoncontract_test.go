@@ -215,6 +215,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"tag", "keys"}},
 		{args: []string{"lyrics", p(fx.one)}, wantErr: true},
 		{args: []string{"art", "roles", p(fx.one)}},
+		{args: []string{"art", "hashes", p(fx.one), p(fx.two)}},
 		{args: []string{"book", p(fx.book)}},
 		{args: []string{"chapters", p(fx.book)}},
 		{args: []string{"state", "show", p(fx.one)}},

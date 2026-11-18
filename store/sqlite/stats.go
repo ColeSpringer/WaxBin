@@ -66,17 +66,24 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 	// These are catalog-wide, deliberately user-agnostic (the query references no
 	// per-user field), so the empty user is a no-op.
 	all := query.New(query.EntityItems).Where("state", query.OpIsNot, string(model.StateArchived)).Build()
-	genreFacet, err := s.Facet(ctx, all, read.GroupGenre, "", 0, "")
+	genreFacet, err := s.facet(ctx, all, read.GroupGenre, "", 0, "", op)
 	if err != nil {
 		return nil, err
 	}
 	out.TopGenres = topBuckets(genreFacet.Buckets, topN)
-	artistFacet, err := s.Facet(ctx, all, read.GroupArtist, "", 0, "")
+	artistFacet, err := s.facet(ctx, all, read.GroupArtist, "", 0, "", op)
 	if err != nil {
 		return nil, err
 	}
 	out.TopArtists = topBuckets(artistFacet.Buckets, topN)
-	yearFacet, err := s.Facet(ctx, all, read.GroupYear, "", 0, "")
+	// The facets above only count; the covers are read for the buckets kept.
+	if err := s.fillBucketArt(ctx, read.GroupGenre, out.TopGenres, op); err != nil {
+		return nil, err
+	}
+	if err := s.fillBucketArt(ctx, read.GroupArtist, out.TopArtists, op); err != nil {
+		return nil, err
+	}
+	yearFacet, err := s.facet(ctx, all, read.GroupYear, "", 0, "", op)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +212,12 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 		  AND pi.kind IN ('track','book') AND pi.state <> 'archived' AND g.facet = 'genre'
 		GROUP BY g.id ORDER BY COUNT(*) DESC, g.sort_key LIMIT ?`, userID, lo, hi, topN)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.fillBucketArt(ctx, read.GroupArtist, yr.TopArtists, op); err != nil {
+		return nil, err
+	}
+	if err := s.fillBucketArt(ctx, read.GroupGenre, yr.TopGenres, op); err != nil {
 		return nil, err
 	}
 

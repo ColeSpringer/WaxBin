@@ -28,6 +28,23 @@ func (k EntityKind) Valid() bool {
 	}
 }
 
+// ArtEntity is the art entity type a kind's pid is asked for art under, so an EntityInfo
+// becomes a model.EntityRef for ResolveArt, and the type its ArtHash is read under. A
+// series holds no art and reports false.
+func (k EntityKind) ArtEntity() (model.ArtEntity, bool) {
+	switch k {
+	case EntityArtist:
+		return model.ArtArtist, true
+	case EntityReleaseGroup:
+		return model.ArtReleaseGroup, true
+	case EntityAlbum:
+		return model.ArtAlbum, true
+	case EntityGenre:
+		return model.ArtGenre, true
+	}
+	return "", false
+}
+
 // EntityKinds lists the supported entity kinds (for help text and tests).
 func EntityKinds() []EntityKind {
 	return []EntityKind{EntityArtist, EntityReleaseGroup, EntityAlbum, EntityGenre, EntitySeries}
@@ -106,6 +123,15 @@ type EntityInfo struct {
 	// Aliases are an artist's other names, by name: a merged loser's, a name a locked
 	// rename left, those enrichment found. Empty for every other kind.
 	Aliases []string
+
+	// ArtHash is the content hash of the front cover the entity resolves to, walking the
+	// fallback chain as ResolveArt does: the hash ArtHashes reports for it and the
+	// SourceHash its picture is served under. It is the cover's version, for the
+	// cover's URL (Library.ArtHashes says how a host caches by it), and the change log
+	// names the entity when it moves, a cover borrowed from its tracks or inherited
+	// from above included. Empty when the entity resolves no cover, and always for a
+	// series, which holds no art.
+	ArtHash string
 }
 
 // EntityPage is one keyset-paginated window of entity summaries in collation order

@@ -821,7 +821,8 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	if a.KindForced {
 		forced = a.Kind
 	}
-	opts := scan.FileOptions{Kind: forced, Album: a.Album}
+	// The staging folder's cover is placed after the batch's audio (placeCovers).
+	opts := scan.FileOptions{Kind: forced, Album: a.Album, CoverPending: !plan.Acquired}
 	if a.Kind == model.KindBook {
 		opts.Position = &a.Position
 	}

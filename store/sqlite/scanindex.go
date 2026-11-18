@@ -503,6 +503,15 @@ func (s *Store) UpdateFileStateIfUnchanged(ctx context.Context, in model.FileSta
 		}
 		if n > 0 {
 			updated = true
+			// A write that changed the file's picture leaves it stating that picture, with
+			// no read to say so. One that stripped it leaves a folder cover or none, which
+			// only a read can tell, so the column goes back to unknown.
+			if in.Front != nil {
+				if _, err := tx.ExecContext(ctx, "UPDATE file SET front_hash = NULLIF(?, '') WHERE pid = ?",
+					*in.Front, string(in.FilePID)); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
 			return appendChange(ctx, tx, "file", in.FilePID, model.OpUpdate)
 		}
 		return nil

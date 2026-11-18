@@ -29,6 +29,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	seen := scanned(cover, in.NoCover)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -61,6 +62,9 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// Replace the file's sidecar observations (prunes a since-deleted .cue/.lrc so it
 		// does not force a full re-hash forever).
 		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -286,7 +290,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// A copy of a part still on disk adds nothing to the book: no metadata, chapters,
 		// cover or acquisition, only its own file row and the alternate edge.
 		if role == alternateRole {
-			return s.attachBookCopyTx(ctx, tx, in, fileID, filePID, itemID, itemPID, link, stateChanged, fileTitle, title, fileBook, affected, res, now, cover)
+			return s.attachBookCopyTx(ctx, tx, in, fileID, filePID, itemID, itemPID, link, stateChanged, fileTitle, title, fileBook, affected, res, now, seen)
 		}
 
 		// Custom tags are owned by the primary part, like the book's other metadata.
@@ -358,16 +362,13 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 
 		// Cover art comes from the primary part (like the rest of the book's metadata),
-		// so a later, differently-covered part can't replace it. It runs every scan of
-		// the primary (idempotent) to still catch a directory cover added later. Its
-		// changed flag feeds the item delta so a cover-only change is not silent.
-		artChanged := false
-		if ownsMeta {
-			c, err := attachArtRespectingLockTx(ctx, tx, itemID, cover, in.PreserveLocks)
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			artChanged = c
+		// so a later, differently-covered part can't replace it. It runs every scan
+		// (idempotent) to still catch a directory cover added later, and for every part,
+		// since any part's read can be the one that shows the cover is gone from all of
+		// them. Its changed flag feeds the item delta so a cover-only change is not silent.
+		artChanged, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, ownsMeta, in.PreserveLocks)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// A book's .cue-sourced chapters are the sidecar analogue of a track's lyrics:
 		// both change without the audio bytes changing, so both must reach the scanner's
@@ -941,12 +942,13 @@ func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, p
 }
 
 // attachBookCopyTx is PutScannedBook's copy branch: the file is an alternate of the part
-// it copies, so the book's metadata, chapters, cover and acquisition are left alone. Any
-// chapters a former part edge stored for the file go, and the owed rows its tags pay are
-// settled against the stored book. The book emits an update when the edge changed or
-// the put brought it back from missing (stateChanged).
+// it copies, so the book's metadata, chapters, cover and acquisition are left alone,
+// save that its read finding no cover can be what shows the book's front is on disk
+// nowhere. Any chapters a former part edge stored for the file go, and the owed rows its
+// tags pay are settled against the stored book. The book emits an update when the edge
+// changed, the put brought it back from missing (stateChanged), or its front went.
 func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedBookInput, fileID int64, filePID model.PID,
-	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title itemTitle, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64, cover examinedArt) error {
+	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title itemTitle, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64, seen scannedCover) error {
 	const op = "store.PutScannedBook"
 	res.AttachedAsCopy, res.Joined = true, link.changed
 	d := model.FileDiagnostic{Code: model.DiagDuplicateCopy, Severity: model.SeverityInfo}
@@ -978,9 +980,15 @@ func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutSc
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
+	// Ahead of the owed rows, which read the front as the put leaves it.
+	front, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, false, in.PreserveLocks)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	res.SidecarsChanged = front
 	if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 		isBook: true, fileTitle: fileTitle, title: title, fileBook: fileBook,
-		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: cover, fileTags: in.CustomTags,
+		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: seen.pic, fileTags: in.CustomTags,
 	}); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -989,7 +997,7 @@ func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutSc
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
-	if link.changed || stateChanged {
+	if link.changed || stateChanged || front {
 		if err := appendChange(ctx, tx, "item", itemPID, model.OpUpdate); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

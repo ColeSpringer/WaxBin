@@ -33,11 +33,11 @@ func TestResolveCoverExoticWithDeclaredSizeYieldsToDirCover(t *testing.T) {
 	exotic := func() *model.ArtImage {
 		return &model.ArtImage{Data: exoticAVIF(), Format: "avif", Width: 600, Height: 600}
 	}
-	got := resolveCover(audio, exotic(), newArtCache())
+	got, _ := resolveCover(audio, exotic(), newArtCache())
 	if got == nil || got.Format != "jpeg" || got.Width != 64 {
 		t.Fatalf("resolved = %+v, want the 64x64 jpeg directory cover", got)
 	}
-	alone := resolveCover(filepath.Join(t.TempDir(), "song.flac"), exotic(), newArtCache())
+	alone, _ := resolveCover(filepath.Join(t.TempDir(), "song.flac"), exotic(), newArtCache())
 	if alone == nil || alone.Format != "avif" || alone.Width != 600 {
 		t.Fatalf("with no directory cover, resolved = %+v, want the 600x600 avif kept", alone)
 	}

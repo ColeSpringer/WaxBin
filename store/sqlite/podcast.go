@@ -126,7 +126,8 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 
 		// Ingest the feed image onto the podcast entity (idempotent on hash), unless the
 		// user chose this show's cover: the feed re-points on every image-URL change.
-		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, image); err != nil {
+		coverChanged, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, image)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -178,8 +179,9 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 
 		// The show delta fires only when the show or its content actually changed;
 		// a sync that just refreshed the validators/fetch time stays silent (the
-		// silent-no-op convention, matching UpsertEpisode's gate).
-		if up.created || up.metaChanged || personsChanged || in.Login != nil || res.EpisodesAdded > 0 || res.EpisodesUpdated > 0 {
+		// silent-no-op convention, matching UpsertEpisode's gate). A cover counts: one
+		// that downloads on a later sync than its URL arrived on changes nothing else.
+		if up.created || up.metaChanged || coverChanged || personsChanged || in.Login != nil || res.EpisodesAdded > 0 || res.EpisodesUpdated > 0 {
 			return appendChange(ctx, tx, "podcast", up.pid, opFor(up.created))
 		}
 		return nil
@@ -268,11 +270,12 @@ func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, image); err != nil {
+		coverChanged, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, image)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// Same gate as UpsertFeed: an identical re-upsert stays silent.
-		if up.created || up.metaChanged {
+		if up.created || up.metaChanged || coverChanged {
 			return appendChange(ctx, tx, "podcast", up.pid, opFor(up.created))
 		}
 		return nil

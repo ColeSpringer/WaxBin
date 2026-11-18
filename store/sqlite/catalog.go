@@ -353,6 +353,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	seen := scanned(cover, in.NoCover)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -385,6 +386,9 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// since-deleted sidecar's observation is pruned rather than forcing a full
 		// re-hash forever.
 		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -456,7 +460,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 					if primary, err = primaryFileTx(ctx, tx, prior.itemID); err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
-					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now, cover)
+					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now, seen)
 				}
 			}
 			if primary != nil && primary.fileID != fileID {
@@ -465,7 +469,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				if !better {
-					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now, cover)
+					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now, seen)
 				}
 				if err := demoteToAlternateTx(ctx, tx, prior.itemID, primary.fileID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -558,7 +562,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		artChanged, err := attachArtRespectingLockTx(ctx, tx, itemID, cover, in.PreserveLocks)
+		artChanged, err := settleScannedFrontTx(ctx, tx, affected, itemID, fileID, seen, true, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -623,6 +627,10 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+		}
+		// A cover that changed alone touched no rollup, and its album is named all the same.
+		if err := affected.announceFrontsTx(ctx, tx); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 			fileTitle: fileTitle, title: titleOf(in.Item), fileTrack: fileTrack, track: in.Track,
