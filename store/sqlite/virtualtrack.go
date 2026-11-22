@@ -796,7 +796,7 @@ func foldIntoRipTx(ctx context.Context, tx *sql.Tx, gone []int64, fileID int64, 
 			}
 		}
 		absorbed[pid] = openerPID
-		if err := appendChange(ctx, tx, "item", pid, model.OpDelete); err != nil {
+		if err := appendMergedChange(ctx, tx, "item", pid, openerPID); err != nil {
 			return nil, 0, err
 		}
 	}

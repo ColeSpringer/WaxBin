@@ -485,17 +485,27 @@ type EditEntityParams struct {
 	WriteBack  bool              `json:"writeBack"`
 }
 
+// EntityMerge is one entity a write merged into another, model.EntityMerge on the wire.
+type EntityMerge struct {
+	EntityType string `json:"entityType"`
+	Loser      string `json:"loser"`
+	Survivor   string `json:"survivor"`
+}
+
 // EditEntityResult is the edit_entity response payload. A committed entity edit whose
 // member-file fan-out partially failed returns the failed files here rather than as a
 // transport error, matching edit_fields. MergedInto names the survivor when clearing an
 // mbid re-keyed the entity onto a key a heuristic twin already owned, so the edited pid
-// no longer exists; it is empty for every other edit.
+// no longer exists; it is empty for every other edit. Merges names every entity the clear
+// merged into another, that one included, and MovedAlbums the albums a release-group clear
+// settled under a group of their own, which a client refetches to see where they went.
 //
-// It carries what the client shows, not every field of model.EntityEditReport: the
-// report's moved albums exist to steer the member-file fan, which runs in the server's own
-// process, so putting them on the wire would give a client a list it has no use for.
+// The report's member list and cleared ids are not carried: they steer the member-file
+// fan, which runs in the server's own process.
 type EditEntityResult struct {
 	MergedInto        string             `json:"mergedInto,omitempty"`
+	Merges            []EntityMerge      `json:"merges,omitempty"`
+	MovedAlbums       []string           `json:"movedAlbums,omitempty"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
@@ -518,17 +528,19 @@ type RenameEntityParams struct {
 
 // RenameEntityResult is the rename_entity response payload. Outcome is renamed, merged
 // or refreshed. MergedInto names the survivor when a taken key folded the entity into an
-// incumbent, so the pid the caller named no longer exists. MovedAlbums names albums that
+// incumbent, so the pid the caller named no longer exists, and Merges names every entity
+// the rename merged into another, that one included. MovedAlbums names albums that
 // came out under a different release group than they went in under, which unlike
 // EditEntityResult's omission a client does need: those albums' pids are what it has to
 // refetch to see where they went. A committed rename whose file write-back partially
 // failed returns the failed files here rather than as a transport error, matching
 // edit_fields.
 type RenameEntityResult struct {
-	Outcome     string   `json:"outcome"`
-	MergedInto  string   `json:"mergedInto,omitempty"`
-	MovedAlbums []string `json:"movedAlbums,omitempty"`
-	Members     int      `json:"members"`
+	Outcome     string        `json:"outcome"`
+	MergedInto  string        `json:"mergedInto,omitempty"`
+	Merges      []EntityMerge `json:"merges,omitempty"`
+	MovedAlbums []string      `json:"movedAlbums,omitempty"`
+	Members     int           `json:"members"`
 	// Credits is how many contributor-role credits moved with the rename. The per-item
 	// credit edits behind it are not carried: like MemberEdits they are local to the
 	// process that ran the rename, and a proxied write-back runs on the server.

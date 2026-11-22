@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,43 @@ func TestWriterRoundTripPreservesEssence(t *testing.T) {
 	}
 	if res2.Changed {
 		t.Error("identical re-write reported Changed=true")
+	}
+}
+
+// TestApplyDropsOnlyTheNamedValues: a clear narrowed to values takes those, matched without
+// case or surrounding space, and leaves a file that names another value as it was.
+func TestApplyDropsOnlyTheNamedValues(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const ours, theirs = "11111111-2222-3333-4444-555555555555", "66666666-7777-8888-9999-000000000000"
+	drop := []TagEdit{{Key: string(tag.MBReleaseGroupID), Drop: []string{ours}}}
+	w, r := NewWriter(), NewReader()
+	for _, c := range []struct {
+		name, group, want string
+		changed           bool
+	}{
+		{"ours.mp3", " " + strings.ToUpper(ours), "", true},
+		{"theirs.mp3", theirs, theirs, false},
+	} {
+		path := filepath.Join(t.TempDir(), c.name)
+		if err := os.WriteFile(path, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Artist: "A", Album: "B", Track: 1,
+			TXXX: []testaudio.TXXXFrame{{Desc: "MusicBrainz Release Group Id", Value: c.group}}}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := w.Apply(ctx, path, drop)
+		if err != nil {
+			t.Fatalf("%s: apply: %v", c.name, err)
+		}
+		if res.Changed != c.changed {
+			t.Errorf("%s: changed = %v, want %v", c.name, res.Changed, c.changed)
+		}
+		fm, err := r.Read(ctx, path)
+		if err != nil {
+			t.Fatalf("%s: read: %v", c.name, err)
+		}
+		if fm.Tags.MBReleaseGroupID != c.want {
+			t.Errorf("%s: group = %q, want %q", c.name, fm.Tags.MBReleaseGroupID, c.want)
+		}
 	}
 }
 

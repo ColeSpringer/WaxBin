@@ -444,7 +444,8 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				})
 			out := proxy.EditEntityResult{}
 			if rep != nil {
-				out.MergedInto = string(rep.MergedInto)
+				out.MergedInto, out.Merges = string(rep.MergedInto), mergesToWire(rep.Merges)
+				out.MovedAlbums = pidStrings(rep.MovedAlbums)
 			}
 			return writeBackResponse(editErr, func(f []proxy.WriteBackFailure) proxy.EditEntityResult {
 				out.WriteBackFailures = f
@@ -469,8 +470,8 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if rep != nil {
 				out = proxy.RenameEntityResult{
 					Outcome: string(rep.Outcome), MergedInto: string(rep.MergedInto),
-					MovedAlbums: pidStrings(rep.MovedAlbums), Members: rep.Members,
-					Credits: rep.Credits,
+					Merges: mergesToWire(rep.Merges), MovedAlbums: pidStrings(rep.MovedAlbums),
+					Members: rep.Members, Credits: rep.Credits,
 				}
 			}
 			return writeBackResponse(renameErr, func(f []proxy.WriteBackFailure) proxy.RenameEntityResult {
@@ -1066,6 +1067,18 @@ func creditEntries(edits []model.ItemCreditEdit) []proxy.ItemCreditsEdit {
 	out := make([]proxy.ItemCreditsEdit, len(edits))
 	for i, e := range edits {
 		out[i] = proxy.ItemCreditsEdit{ItemPID: string(e.ItemPID), Role: string(e.Role), Names: e.Names}
+	}
+	return out
+}
+
+// mergesToWire carries a report's merges on the wire, nil for none.
+func mergesToWire(ms []model.EntityMerge) []proxy.EntityMerge {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]proxy.EntityMerge, len(ms))
+	for i, m := range ms {
+		out[i] = proxy.EntityMerge{EntityType: string(m.EntityType), Loser: string(m.Loser), Survivor: string(m.Survivor)}
 	}
 	return out
 }

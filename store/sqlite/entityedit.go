@@ -174,6 +174,10 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		if err != nil {
 			return err
 		}
+		head, err := changeHeadTx(ctx, tx)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if !force {
 			for _, f := range fields {
 				locked, err := entityFieldLockedTx(ctx, tx, string(entityType), entityID, f)
@@ -202,7 +206,22 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		}
 
 		// Owed on the members before the edit: a clear that merges the entity away hands
-		// the survivor members whose files never carried what the clear removed.
+		// the survivor members whose files never carried what the clear removed. Those
+		// members are also the whole of what a write-back writes, for the same reason, and
+		// are read only when the edit has something a file carries.
+		v, edited := norm["mbid"]
+		cleared := edited && v == ""
+		strips := cleared && (entityType == model.MergeAlbum || entityType == model.MergeReleaseGroup)
+		if strips {
+			if rep.ClearedIDs, err = disownedIDsTx(ctx, tx, table, entityID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		if strips || slices.ContainsFunc(fields, func(f string) bool { return model.EntityFieldWritable(entityType, f) }) {
+			if rep.MemberPIDs, err = entityMemberPIDsTx(ctx, tx, entityType, entityID, op); err != nil {
+				return err
+			}
+		}
 		owed, err := entityOwedKeysTx(ctx, tx, entityType, table, entityID, fields, norm)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -274,7 +293,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		// from ever being re-decided. And the match key goes back to its heuristic form, so
 		// the members follow the row rather than staying pinned to the id.
 		var survivor model.PID
-		if v, edited := norm["mbid"]; edited && v == "" {
+		if cleared {
 			switch entityType {
 			case model.MergeAlbum:
 				if err := clearAlbumMarkerTx(ctx, tx, entityID); err != nil {
@@ -309,6 +328,13 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 					", which the other edited fields would not survive: clear the mbid on its own, then edit "+
 					string(survivor))
 		}
+		// The re-key merges at the group rung and the album rung alike, and each merge
+		// logged its loser's delete naming where it went, so the report reads them back.
+		if cleared {
+			if rep.Merges, err = entityMergesSinceTx(ctx, tx, head); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		// A merge already wrote the per-item updates, the survivor's update, and this
 		// entity's delete, and the row this edit named is gone. The caller is told which
 		// row absorbed it, since the pid it asked about no longer names anything.
@@ -341,6 +367,28 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 // mbidKeyPrefix marks an entity key anchored on a MusicBrainz id rather than derived from
 // tags and folder. See identity.AlbumKey.
 const mbidKeyPrefix = "mbid:"
+
+// disownedIDsTx reads the MusicBrainz ids an mbid clear takes back from an album or a
+// release group, before it does: the column's, and the one the key is anchored on where
+// that is another. A set by hand moves the column alone, and the member files go on naming
+// the key's id, which is the one their strip has to take.
+func disownedIDsTx(ctx context.Context, tx *sql.Tx, table string, id int64) ([]string, error) {
+	var col sql.NullString
+	var key string
+	if err := tx.QueryRowContext(ctx, "SELECT mbid, match_key FROM "+table+" WHERE id = ?", id).Scan(&col, &key); err != nil {
+		return nil, err
+	}
+	var out []string
+	if c := normMBID(col.String); c != "" {
+		out = append(out, c)
+	}
+	if k, ok := strings.CutPrefix(key, mbidKeyPrefix); ok {
+		if k = normMBID(k); k != "" && !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
 
 // rekeyAlbumHeuristicTx rewrites an album whose key is a release id onto the heuristic key
 // a scan of its members computes. It returns the surviving album's pid when the re-key
@@ -394,7 +442,8 @@ func rekeyAlbumHeuristicTx(ctx context.Context, tx *sql.Tx, albumID int64) (mode
 // when the re-key merged this group away, and an empty pid when the row is still there,
 // along with the pids of the albums it moved to a group of their own. Those albums'
 // members are no longer under this group, so a caller fanning over its members has to be
-// told where they went.
+// told where they went; one that merged into an album standing there is not among them,
+// since its delete in the change log names that album.
 func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64) (model.PID, []model.PID, error) {
 	var curKey, pid string
 	if err := tx.QueryRowContext(ctx,
@@ -459,9 +508,9 @@ func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, log logger, r
 // album title lives inside the group key. A key an album twin already owns merges, the
 // same as at every other re-key.
 //
-// It returns the pid the members of a re-parented album ended up under, which is that
-// album or the twin it merged into, and an empty pid for an album that stayed. Those
-// members are the ones the caller's own fan-out no longer reaches.
+// It returns the pid of a re-parented album that still stands, and an empty pid for one
+// that stayed under the group or merged into a twin, whose merge logs where it went.
+// Those members are the ones the caller's own fan-out no longer reaches.
 func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, log logger, d dependentAlbum, groupKey string, affected *affectedRollups) (model.PID, error) {
 	reparented := d.rgKey != groupKey
 	if reparented {
@@ -501,11 +550,7 @@ func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, log logger, d depen
 	}
 	merged, err := rewriteOrMergeEntityKeyTx(ctx, tx, model.MergeAlbum, d.id, model.PID(d.pid), d.newKey)
 	if err != nil || merged != "" {
-		if err == nil && reparented {
-			// A merge wrote its own deltas and rollups, and took the members with it, so
-			// the incumbent is the row they hang off now.
-			return merged, nil
-		}
+		// A merge wrote its own deltas and rollups, and took the members with it.
 		return "", err
 	}
 	// The row is still there on a new key, and possibly under a new group, which entity

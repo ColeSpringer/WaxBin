@@ -136,6 +136,41 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 	return out, nil
 }
 
+// MemberFiles returns the primary and alternate files of the given items, each file once.
+// It is EntityMemberFiles over a member list an edit read before it moved anything, so the
+// fan reaches those members wherever a clear took them, and no one else's files.
+func (s *Store) MemberFiles(ctx context.Context, items []model.PID) ([]model.ItemFileRef, error) {
+	const op = "store.MemberFiles"
+	var out []model.ItemFileRef
+	seen := map[model.PID]bool{}
+	err := chunkSlice(uniquePIDs(items), idBatchSize, func(chunk []model.PID) error {
+		rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, `+fileFactCols+`
+			FROM playable_item pi
+			JOIN item_file itf ON itf.item_id = pi.id AND itf.role IN ('primary', 'alternate')
+			JOIN file f ON f.id = itf.file_id
+			WHERE pi.pid IN `+inArray+` ORDER BY pi.id, itf.position, f.id`, pidArray(chunk))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var ref model.ItemFileRef
+			if err := rows.Scan(append([]any{&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position}, fileFactDests(&ref)...)...); err != nil {
+				return err
+			}
+			if !seen[ref.FilePID] {
+				seen[ref.FilePID] = true
+				out = append(out, ref)
+			}
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
 // FollowAlbumSortWrite gives each track of the album whose primary file is among files the
 // ALBUMSORT a write-back just put in those files, as the next scan of them would read it,
 // and settles the album's and its release group's derived spellings from it. A track whose

@@ -79,14 +79,30 @@ func ValidReleaseGroupType(s string) bool { return releaseGroupTypes[s] }
 // key a heuristic twin already owned, which is the one case where the entity the caller
 // named no longer exists afterwards. It is empty for every other edit.
 //
+// Merges names every entity an mbid clear merged into another, each with the one it ended
+// in: the edited entity when MergedInto is set, and every album the clear carried onto a
+// key another album already held. It is empty for every other edit.
+//
 // MovedAlbums names the albums a release-group clear settled onto a group of their own,
 // which a differently-titled edition sharing the id takes because the album title lives
-// inside a heuristic group key. Their members left the edited group, so a caller fanning
-// over that group's members no longer reaches them; write-back reads this to strip their
-// files too. It is empty for every other edit.
+// inside a heuristic group key; one that merged into an album already there is in Merges
+// instead. Their members left the edited group, so a caller fanning over that group's
+// members no longer reaches them. It is empty for every other edit.
+//
+// MemberPIDs is the items the edit fans onto, as it found them under the entity before any
+// write: an album's or a release group's tracks, and the tracks an artist is the primary
+// artist of. Write-back writes their files and no others, wherever a clear took them. It is
+// read only for an edit with something a file carries. ClearedIDs is the MusicBrainz ids
+// an album's or a release group's mbid clear took back: the column's, and the one its key
+// was anchored on where that was another. Write-back strips those from the member files
+// and leaves any other id a file names, such as one a merge brought in. Like
+// EntityRenameReport.MemberEdits, neither is carried on the wire.
 type EntityEditReport struct {
 	MergedInto  PID
+	Merges      []EntityMerge
 	MovedAlbums []PID
+	MemberPIDs  []PID
+	ClearedIDs  []string
 }
 
 // EntityRenamable reports whether an entity type can be renamed, which means it has
@@ -127,10 +143,17 @@ const (
 // talking about. MovedAlbums names albums that came out under a different release group
 // than they went in under, which an album rename can do when its new anchor or title
 // implies a group the album was not in.
+//
+// Merges names every entity the rename merged into another, each with the one it ended
+// in: the renamed entity when Outcome is merged, and every artist, release group or album
+// whose key the members' new values moved onto a key another entity held. An artist
+// renamed onto another takes along its release group of a title the other has, and its
+// album too where both editions sit in one folder.
 type EntityRenameReport struct {
 	EntityPID   PID
 	Outcome     EntityRenameOutcome
 	MergedInto  PID
+	Merges      []EntityMerge
 	MovedAlbums []PID
 	Members     int
 	// Credits is how many contributor-role credits moved with the rename: the roles that

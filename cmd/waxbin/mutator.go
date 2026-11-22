@@ -205,7 +205,9 @@ func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 		if err != nil {
 			return nil, err
 		}
-		rep := &model.EntityEditReport{MergedInto: model.PID(res.MergedInto)}
+		rep := &model.EntityEditReport{
+			MergedInto: model.PID(res.MergedInto), Merges: mergesFromWire(res.Merges), MovedAlbums: toPIDs(res.MovedAlbums),
+		}
 		return rep, writeBackErr(entityPID, edits, res.WriteBackFailures)
 	}
 	return m.lib.EditEntity(ctx, entityType, entityPID, edits, opts)
@@ -221,8 +223,8 @@ func (m *mutator) RenameEntity(ctx context.Context, entityType model.MergeEntity
 		}
 		rep := &model.EntityRenameReport{
 			EntityPID: entityPID, Outcome: model.EntityRenameOutcome(res.Outcome),
-			MergedInto: model.PID(res.MergedInto), MovedAlbums: toPIDs(res.MovedAlbums),
-			Members: res.Members, Credits: res.Credits,
+			MergedInto: model.PID(res.MergedInto), Merges: mergesFromWire(res.Merges),
+			MovedAlbums: toPIDs(res.MovedAlbums), Members: res.Members, Credits: res.Credits,
 		}
 		return rep, writeBackErr(entityPID, fields, res.WriteBackFailures)
 	}
@@ -598,6 +600,18 @@ func (m *mutator) RemoveRoot(ctx context.Context, pid model.PID, force bool,
 		return nil, uerr
 	}
 	return &rep, err
+}
+
+// mergesFromWire reads a report's merges off the wire, nil for none.
+func mergesFromWire(ws []proxy.EntityMerge) []model.EntityMerge {
+	if len(ws) == 0 {
+		return nil
+	}
+	out := make([]model.EntityMerge, len(ws))
+	for i, w := range ws {
+		out[i] = model.EntityMerge{EntityType: model.MergeEntity(w.EntityType), Loser: model.PID(w.Loser), Survivor: model.PID(w.Survivor)}
+	}
+	return out
 }
 
 // toPIDs converts a wire string slice into a PID slice.

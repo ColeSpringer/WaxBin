@@ -8,7 +8,10 @@ CREATE TABLE change_log (
   -- The library an item or file sits in as the row's transaction leaves it (an item's
   -- primary file's), '' for a fileless item, a delete and every other entity. A pid rather
   -- than a reference, so a library removed later leaves the history as it was.
-  library_pid TEXT    NOT NULL DEFAULT ''
+  library_pid TEXT    NOT NULL DEFAULT '',
+  -- On a delete whose row went into another of its type (a merge's loser, an item another
+  -- took in or whose pid another row carries on under), that row's pid; '' on every other row.
+  merged_into TEXT    NOT NULL DEFAULT ''
 );
 
 -- Mutating background work.

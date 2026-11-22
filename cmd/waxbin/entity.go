@@ -158,16 +158,23 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 			// A clear that re-keyed onto a twin took this entity with it, so naming the
 			// pid the user typed would name a row that no longer exists.
 			view := struct {
-				Type       string    `json:"type"`
-				PID        model.PID `json:"pid"`
-				Fields     int       `json:"fields"`
-				MergedInto model.PID `json:"mergedInto,omitempty"`
+				Type        string            `json:"type"`
+				PID         model.PID         `json:"pid"`
+				Fields      int               `json:"fields"`
+				MergedInto  model.PID         `json:"mergedInto,omitempty"`
+				Merges      []entityMergeView `json:"merges,omitempty"`
+				MovedAlbums []string          `json:"movedAlbums,omitempty"`
 			}{Type: string(et), PID: pid, Fields: len(edits)}
-			if rep != nil && rep.MergedInto != "" {
-				view.MergedInto = rep.MergedInto
-				return reply(cmd, g, view, fmt.Sprintf("cleared the mbid; %s %s merged into %s\n", et, pid, rep.MergedInto))
+			if rep == nil {
+				return reply(cmd, g, view, fmt.Sprintf("edited %d field(s) on %s %s\n", len(edits), et, pid))
 			}
-			return reply(cmd, g, view, fmt.Sprintf("edited %d field(s) on %s %s\n", len(edits), et, pid))
+			view.MergedInto, view.Merges = rep.MergedInto, entityMergeViews(rep.Merges)
+			view.MovedAlbums = pidStrings(rep.MovedAlbums)
+			text := fmt.Sprintf("edited %d field(s) on %s %s\n", len(edits), et, pid)
+			if rep.MergedInto != "" {
+				text = fmt.Sprintf("cleared the mbid; %s %s merged into %s\n", et, pid, rep.MergedInto)
+			}
+			return reply(cmd, g, view, text+mergeLines(pid, rep.Merges)+movedLines(rep.MovedAlbums))
 		},
 	}
 	f := cmd.Flags()
@@ -235,7 +242,9 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 			"An album whose members carry no ALBUMARTIST is anchored on the first credited " +
 			"artist, so renaming album_artist there moves the release-group anchor with it and " +
 			"the album can come out under a different group. The report names any album that " +
-			"moved.\n\n" +
+			"moved, and every artist, release group or album the rename merged into another: an " +
+			"artist renamed onto another takes along its groups of a title the other has, and an " +
+			"album whose edition sits in the other's folder.\n\n" +
 			"The rename is catalog-only by default, and a member's chain comes from the tags in " +
 			"its file, so it lasts until a scan re-resolves those members: their next retag, " +
 			"move, or content change. --write-back writes the new values into every member " +
@@ -270,14 +279,12 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, entityRenameView{
 					EntityPID: string(rep.EntityPID), Outcome: string(rep.Outcome),
-					MergedInto: string(rep.MergedInto), MovedAlbums: pidStrings(rep.MovedAlbums),
-					Members: rep.Members, Credits: rep.Credits,
+					MergedInto: string(rep.MergedInto), Merges: entityMergeViews(rep.Merges),
+					MovedAlbums: pidStrings(rep.MovedAlbums), Members: rep.Members, Credits: rep.Credits,
 				})
 			}
 			fmt.Fprintln(out(cmd), renameOutcomeLine(et, pid, rep))
-			for _, album := range rep.MovedAlbums {
-				fmt.Fprintf(out(cmd), "  album %s moved to a different release group\n", album)
-			}
+			fmt.Fprint(out(cmd), mergeLines(pid, rep.Merges)+movedLines(rep.MovedAlbums))
 			return nil
 		},
 	}
@@ -320,14 +327,55 @@ func pidStrings(pids []model.PID) []string {
 	return out
 }
 
+// entityMergeView is the --json shape of one merge a report names, in the merge command's
+// own words.
+type entityMergeView struct {
+	EntityType string `json:"entityType"`
+	Loser      string `json:"loser"`
+	Survivor   string `json:"survivor"`
+}
+
+func entityMergeViews(ms []model.EntityMerge) []entityMergeView {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]entityMergeView, len(ms))
+	for i, m := range ms {
+		out[i] = entityMergeView{EntityType: string(m.EntityType), Loser: string(m.Loser), Survivor: string(m.Survivor)}
+	}
+	return out
+}
+
+// mergeLines lists what a write merged beside the entity the caller named, whose own
+// merge the outcome line already says.
+func mergeLines(named model.PID, ms []model.EntityMerge) string {
+	var b strings.Builder
+	for _, m := range ms {
+		if m.Loser != named {
+			fmt.Fprintf(&b, "  %s %s merged into %s\n", m.EntityType, m.Loser, m.Survivor)
+		}
+	}
+	return b.String()
+}
+
+// movedLines lists the albums a write left under a different release group, one line each.
+func movedLines(albums []model.PID) string {
+	var b strings.Builder
+	for _, album := range albums {
+		fmt.Fprintf(&b, "  album %s moved to a different release group\n", album)
+	}
+	return b.String()
+}
+
 // entityRenameView is the --json shape of a rename report.
 type entityRenameView struct {
-	EntityPID   string   `json:"entityPid"`
-	Outcome     string   `json:"outcome"`
-	MergedInto  string   `json:"mergedInto,omitempty"`
-	MovedAlbums []string `json:"movedAlbums,omitempty"`
-	Members     int      `json:"members"`
-	Credits     int      `json:"credits,omitempty"`
+	EntityPID   string            `json:"entityPid"`
+	Outcome     string            `json:"outcome"`
+	MergedInto  string            `json:"mergedInto,omitempty"`
+	Merges      []entityMergeView `json:"merges,omitempty"`
+	MovedAlbums []string          `json:"movedAlbums,omitempty"`
+	Members     int               `json:"members"`
+	Credits     int               `json:"credits,omitempty"`
 }
 
 // renameDurabilityWarning returns the caveat to print after a rename, or "" when there is

@@ -53,7 +53,9 @@ func (o EntityEditOptions) Attribution() model.Attribution {
 // the returned report names so a caller does not go on talking about a pid that is gone;
 // only such a merging clear is refused alongside another field, with CodeConflict naming
 // the survivor to edit instead, since the merge deletes the row those other values were
-// written to.
+// written to. The report's Merges names every entity the clear merged into another, each
+// with the one it went into: the entity itself when it merged into its twin, and every
+// album the re-key carried onto a key another album held.
 //
 // With opts.WriteBack the edited values that round-trip through a rescan are also fanned
 // out across the entity's member files' on-disk tags, and an album's or a release group's
@@ -78,14 +80,14 @@ func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 // entityOwedKeys names the owed keys an entity write-back pays on the member files it
 // writes (model.DiagTagWriteOwed): "<entity>.<field>" for each edited field it fans out,
 // and the id an album's or a release group's mbid clear strips.
-func entityOwedKeys(entityType model.MergeEntity, edits map[string]string) []string {
+func entityOwedKeys(entityType model.MergeEntity, edits map[string]string, cleared []string) []string {
 	var out []string
 	for field := range edits {
 		if model.EntityFieldWritable(entityType, field) {
 			out = append(out, string(entityType)+"."+field)
 		}
 	}
-	if len(entityMBIDStripEdits(entityType, edits)) > 0 {
+	if len(entityMBIDStripEdits(entityType, edits, cleared)) > 0 {
 		out = append(out, string(entityType)+".mbid")
 	}
 	return out
@@ -106,39 +108,19 @@ func (l *Library) EntityCuration(ctx context.Context, entityType model.MergeEnti
 // release-group edit, a type edit, a set MBID) writes nothing to disk and returns nil,
 // since those values are DB-only by design.
 //
-// The file set follows both moves a clear can make. A merge redirects it to the survivor,
-// and a settled album adds its own members; the two compose, since one clear can merge the
-// group away and re-parent an edition in the same transaction.
+// The files are those of the members the edit found under the entity (rep.MemberPIDs), so
+// the fan follows them wherever a clear took them, merged into a twin or settled under a
+// group of their own, and never reaches the twin's or that group's other members, which
+// were no part of the edit.
 func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, rep *model.EntityEditReport) error {
 	tagEdits := append(entityTagEditsForFields(entityType, edits),
-		entityMBIDStripEdits(entityType, edits)...)
+		entityMBIDStripEdits(entityType, edits, rep.ClearedIDs)...)
 	if len(tagEdits) == 0 {
 		return nil
 	}
-	// A clear that landed on a heuristic twin merged this entity away, taking its rows
-	// with it, so the members to strip hang off the survivor now. The twin's own members
-	// never carried the id, so their strip is a no-op.
-	target, moved := entityPID, []model.PID(nil)
-	if rep != nil {
-		if rep.MergedInto != "" {
-			target = rep.MergedInto
-		}
-		moved = rep.MovedAlbums
-	}
-	files, err := l.store.EntityMemberFiles(ctx, entityType, target)
+	files, err := l.store.MemberFiles(ctx, rep.MemberPIDs)
 	if err != nil {
 		return writeBackSetupFailure(entityPID, edits, err)
-	}
-	// A release-group clear can settle a differently-titled edition onto a group of its
-	// own, which takes its members out of the group's fan while their files still name the
-	// id. The two sets can overlap; writeBackFiles writes a file once however many members
-	// it backs.
-	for _, album := range moved {
-		extra, err := l.store.EntityMemberFiles(ctx, model.MergeAlbum, album)
-		if err != nil {
-			return writeBackSetupFailure(entityPID, edits, err)
-		}
-		files = append(files, extra...)
 	}
 	// An entity with no present member files has nothing to fan out to; the catalog edit
 	// stands, so this is a clean no-op rather than a failure (unlike a single item's
@@ -147,7 +129,7 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: entityPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil, entityOwedKeys(entityType, edits),
+	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil, entityOwedKeys(entityType, edits, rep.ClearedIDs),
 		wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		})); err != nil {
@@ -166,18 +148,22 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		if entityType == model.MergeAlbum {
 			follow = l.store.FollowAlbumSortWrite
 		}
-		if err := follow(ctx, target, landed, strings.TrimSpace(v)); err != nil {
-			l.log.Warn("sort spelling after write-back", "entity", string(entityType), "pid", target, "err", err)
+		// A sort edit never rides a clear that merges (the store refuses the pair), so the
+		// entity is still the one the caller named.
+		if err := follow(ctx, entityPID, landed, strings.TrimSpace(v)); err != nil {
+			l.log.Warn("sort spelling after write-back", "entity", string(entityType), "pid", entityPID, "err", err)
 		}
 	}
 	return wbErr.result()
 }
 
 // entityMBIDStripEdits returns the tag strips an mbid clear fans across the entity's
-// member files, and nothing for any other edit. It strips exactly the id the catalog
-// clear re-keyed away: an album clear takes MUSICBRAINZ_ALBUMID, a release-group clear
-// takes MUSICBRAINZ_RELEASEGROUPID, and neither takes the other's. An artist clear
-// re-keys nothing, so it strips nothing.
+// member files, and nothing for any other edit. It strips exactly the ids the clear took
+// back (cleared, EntityEditReport.ClearedIDs), from the files that name one: an album
+// clear takes them from MUSICBRAINZ_ALBUMID, a release-group clear from
+// MUSICBRAINZ_RELEASEGROUPID, and neither touches the other's. A file naming another id,
+// such as one an album merge brought in, keeps it. An artist clear re-keys nothing, so it
+// strips nothing.
 //
 // Leaving the other id alone is the point of the rule. A release-group clear re-keys only
 // the albums whose own key embeds the group segment and leaves an album keyed on its own
@@ -186,16 +172,16 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 // and drain the identified album of its art and curation. Detach strips both ids because
 // it pulls one member out of the identified chain entirely, which is a different gesture
 // with a different answer.
-func entityMBIDStripEdits(entityType model.MergeEntity, edits map[string]string) []meta.TagEdit {
+func entityMBIDStripEdits(entityType model.MergeEntity, edits map[string]string, cleared []string) []meta.TagEdit {
 	v, ok := edits["mbid"]
-	if !ok || strings.TrimSpace(v) != "" {
+	if !ok || strings.TrimSpace(v) != "" || len(cleared) == 0 {
 		return nil
 	}
 	switch entityType {
 	case model.MergeAlbum:
-		return []meta.TagEdit{{Key: "MUSICBRAINZ_ALBUMID"}}
+		return []meta.TagEdit{{Key: "MUSICBRAINZ_ALBUMID", Drop: cleared}}
 	case model.MergeReleaseGroup:
-		return []meta.TagEdit{{Key: "MUSICBRAINZ_RELEASEGROUPID"}}
+		return []meta.TagEdit{{Key: "MUSICBRAINZ_RELEASEGROUPID", Drop: cleared}}
 	}
 	return nil
 }

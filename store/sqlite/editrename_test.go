@@ -1244,3 +1244,31 @@ func TestEditArtistCaseOnlyRespellKeepsMarker(t *testing.T) {
 	}
 	assertVerifyClean(t, st)
 }
+
+// TestEditRenamesAGroupPastAMemberlessAlbum: a batch covering every track of a group renames
+// the group in place even when an album under it holds no tracks, rather than moving the
+// album under a new group and stranding the old one with its pid and attachments.
+func TestEditRenamesAGroupPastAMemberlessAlbum(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Album 2/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Album"})
+	group := rgPIDOf(t, st, "Band", "Album")
+	leaveMemberless(t, st, "Two")
+	one := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title = 'One'"))
+
+	if _, err := st.EditManyFields(ctx, []model.PID{one}, map[string]string{"album": "Renamed"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
+		t.Fatalf("retitle: %v", err)
+	}
+	if got := rgPIDOf(t, st, "Band", "Renamed"); got != group {
+		t.Errorf("group under the new title = %s, want the original %s renamed in place", got, group)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
+		t.Errorf("release groups = %d, want the one, not a new row beside it", n)
+	}
+	assertVerifyClean(t, st)
+}

@@ -430,11 +430,11 @@ func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []credit
 // per-group walk would have the first album fork the group off to a fresh pid before
 // the second could show the whole set is moving. A release group is rewritten in
 // place (or auto-merged into the incumbent on a key collision) only when every album
-// under it is a batch group whose every member moves at once to one uniform new RG
-// key; a fully covered group whose key does not move (a case-only fold, or an
-// mbid-keyed group) still gets its display title refreshed when every member edited
-// the title to one value, since that title is the facet display and the MusicBrainz
-// search text. Partial coverage falls through to renameAlbumChainTx's per-album
+// under it that holds a track is a batch group whose every member moves at once to one
+// uniform new RG key; a fully covered group whose key does not move (a case-only fold,
+// or an mbid-keyed group) still gets its display title refreshed when every member
+// edited the title to one value, since that title is the facet display and the
+// MusicBrainz search text. Partial coverage falls through to renameAlbumChainTx's per-album
 // fallback, which moves the covered album under a found-or-created group and leaves
 // the old one with its remaining albums.
 func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[int64][]*renameMember, fold bool, op string) error {
@@ -496,10 +496,12 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 		if !agree {
 			continue
 		}
-		// Full coverage: every album under the group is one of the qualified groups.
+		// Full coverage: every album under the group is one of the qualified groups. An album
+		// left with no tracks has nothing to carry a rename, so it stays under the group for
+		// the orphan sweep rather than holding the group back.
 		var rgAlbums int
-		if err := tx.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM album WHERE release_group_id=?", rgID).Scan(&rgAlbums); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM album al WHERE al.release_group_id=?
+			AND EXISTS (SELECT 1 FROM track t WHERE t.album_id = al.id)`, rgID).Scan(&rgAlbums); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if rgAlbums != len(intents) {
@@ -865,8 +867,11 @@ func artistRenameCoveredTx(ctx context.Context, tx *sql.Tx, id int64, n, curKey 
 	// Every release group pointing at this artist must be one of this batch's album
 	// groups whose anchor target is n: a renamed-in-place RG keeps pointing at the
 	// artist, which then spells n, while a merged or re-resolved one gets repointed
-	// by the merge or the per-item on-hit adoption.
-	rgRefs, err := queryInt64sTx(ctx, tx, "SELECT id FROM release_group WHERE primary_artist_id=?", id)
+	// by the merge or the per-item on-hit adoption. A group with no track left under it
+	// anchors nothing, and goes on pointing at this row, renamed or merged, until the
+	// orphan sweep.
+	rgRefs, err := queryInt64sTx(ctx, tx, `SELECT rg.id FROM release_group rg WHERE rg.primary_artist_id=?
+		AND EXISTS (SELECT 1 FROM album al JOIN track t ON t.album_id = al.id WHERE al.release_group_id = rg.id)`, id)
 	if err != nil {
 		return false, err
 	}

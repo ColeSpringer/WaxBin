@@ -814,3 +814,27 @@ func TestPartAppendedAfterTheEndComesNext(t *testing.T) {
 		t.Errorf("book state = %+v (err %v), want 1000, the start of the part appended", ps, err)
 	}
 }
+
+// TestAbsorbedItemDeleteNamesItsTaker: an item another takes in leaves the change feed with
+// a delete naming that item, the same pair the put reports as absorbed.
+func TestAbsorbedItemDeleteNamesItsTaker(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	lib, file := diskLibrary(t, st)
+	const mbid = "4e2b1b2a-0000-4000-8000-0000000000cc"
+	flacPath, mp3Path := file("A/one.flac", "f"), file("B/one.mp3", "m")
+	enc := func(path, essence, codec, recording string) model.PutScannedTrackInput {
+		in := trackSpecInput(lib.ID, trackSpec{path: path, essence: essence, content: essence + "-bytes", title: "One",
+			artist: "A", album: "T", mbRecording: recording, durationMS: 1000})
+		in.File.Codec, in.File.SampleRate = codec, 44100
+		return in
+	}
+	putTrackInput(t, st, enc(flacPath, "lc-flac", "flac", mbid))
+	loser := putTrackInput(t, st, enc(mp3Path, "lc-mp3", "mp3", "")).ItemPID
+	seq0 := latestSeq(t, st)
+	out := putTrackInput(t, st, enc(mp3Path, "lc-mp3", "mp3", mbid))
+	if out.Absorbed[loser] != out.ItemPID {
+		t.Fatalf("put = %+v, want the mp3's track absorbed into the FLAC's", out)
+	}
+	assertDeletedInto(t, st, seq0, "item", loser, out.ItemPID)
+}

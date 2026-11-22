@@ -637,6 +637,13 @@ type Change struct {
 	// other entity. A consumer placing items per library reads it here rather than off
 	// the item, which may have moved again since.
 	LibraryPID PID
+	// MergedInto is set on a delete whose row went into another of its type rather than
+	// away: a merge's loser names its survivor, an item another took in (a copy or a rip
+	// folding it, ScanItemResult.Absorbed) names that item, and an item pid another row
+	// carries on under (a rip's opening track taking the whole file's, a rebuild's stamp)
+	// names that pid. The one named can merge on in a later row, whose delete names where it
+	// went in turn. Empty on every other row.
+	MergedInto PID
 }
 
 // ChangeCatalog is the EntityType of the row a maintenance hand-off appends, with no

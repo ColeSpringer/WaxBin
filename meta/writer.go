@@ -36,6 +36,10 @@ func NewWriter() *Writer { return &Writer{} }
 type TagEdit struct {
 	Key    string
 	Values []string
+	// Drop narrows a clear (no Values) to these values, matched without case or
+	// surrounding space as identifiers are written: the file keeps any other value the key
+	// holds, and one naming none of them is left as it was. Apply honors it.
+	Drop []string
 }
 
 // fieldTagKeys maps a catalog metadata field name to its canonical WaxLabel tag key.
@@ -520,12 +524,28 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 	if len(edits) == 0 && o.outputGain == nil {
 		return &WriteResult{Changed: false}, nil
 	}
-	return writeTags(ctx, "meta.Writer.Apply", path, func(_ *waxlabel.Document, ed *waxlabel.Editor) {
+	return writeTags(ctx, "meta.Writer.Apply", path, func(doc *waxlabel.Document, ed *waxlabel.Editor) {
 		for _, e := range edits {
-			if len(e.Values) == 0 {
-				ed.Clear(tag.Key(e.Key))
-			} else {
-				ed.Set(tag.Key(e.Key), e.Values...)
+			k := tag.Key(e.Key)
+			switch {
+			case len(e.Values) > 0:
+				ed.Set(k, e.Values...)
+			case len(e.Drop) > 0:
+				held, _ := doc.Get(k)
+				kept := slices.DeleteFunc(slices.Clone(held), func(v string) bool {
+					return slices.ContainsFunc(e.Drop, func(d string) bool {
+						return strings.EqualFold(strings.TrimSpace(v), strings.TrimSpace(d))
+					})
+				})
+				switch {
+				case len(kept) == len(held):
+				case len(kept) == 0:
+					ed.Clear(k)
+				default:
+					ed.Set(k, kept...)
+				}
+			default:
+				ed.Clear(k)
 			}
 		}
 		if o.outputGain != nil {

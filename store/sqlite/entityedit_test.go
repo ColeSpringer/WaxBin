@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -1148,9 +1149,20 @@ func TestEntityEditClearRGMBIDMergesIntoHeuristicTwin(t *testing.T) {
 	twinAlbumPID := entityPIDByCol(t, st, "album", "match_key",
 		identity.AlbumKey("", twinRGKey, 0, "/lib/Alpha/One"))
 	identified := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
+	identifiedAlbum := entityPIDByCol(t, st, "album", "match_key",
+		identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One"))
 
-	clearEntityMBID(t, st, model.MergeReleaseGroup, identified)
+	rep := clearEntityMBID(t, st, model.MergeReleaseGroup, identified)
 
+	// The album went with the group, into the twin's album in the same folder, and the
+	// report says so beside the group's own survivor.
+	if rep.MergedInto != twinRGPID {
+		t.Errorf("report merged into %q, want %q", rep.MergedInto, twinRGPID)
+	}
+	assertMerges(t, rep.Merges, []model.EntityMerge{
+		{EntityType: model.MergeReleaseGroup, Loser: identified, Survivor: twinRGPID},
+		{EntityType: model.MergeAlbum, Loser: identifiedAlbum, Survivor: twinAlbumPID},
+	})
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
 		t.Fatalf("release_group rows after the clear = %d, want 1", n)
 	}
@@ -1165,6 +1177,49 @@ func TestEntityEditClearRGMBIDMergesIntoHeuristicTwin(t *testing.T) {
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM track WHERE album_id IS NOT NULL"); n != 2 {
 		t.Fatalf("members still on an album = %d, want 2", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestEntityEditClearRGMBIDNamesAnEditionItMerged: the differently-titled edition a clear
+// re-parents lands on the key of an album already standing under that title in its folder,
+// and merges into it. It is gone rather than moved, so the report lists it among the
+// merges with the album it went into, not among the moved albums.
+func TestEntityEditClearRGMBIDNamesAnEditionItMerged(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	const rgMBID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1", title: "T1",
+		artist: "Alpha", albumArt: "Alpha", album: "One", mbReleaseGroup: rgMBID,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/One Deluxe/01.flac", essence: "e2", content: "c2", title: "T2",
+		artist: "Alpha", albumArt: "Alpha", album: "One (Deluxe Edition)", mbReleaseGroup: rgMBID,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/One Deluxe/02.flac", essence: "e3", content: "c3", title: "T3",
+		artist: "Alpha", albumArt: "Alpha", album: "One (Deluxe Edition)",
+	})
+	rgPID := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
+	edition := entityPIDByCol(t, st, "album", "match_key",
+		identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One Deluxe"))
+	standing := albumPIDOf(t, st, "Alpha", "One (Deluxe Edition)", "/lib/Alpha/One Deluxe")
+
+	rep := clearEntityMBID(t, st, model.MergeReleaseGroup, rgPID)
+
+	if rep.MergedInto != "" {
+		t.Errorf("report merged into %q, want the group kept", rep.MergedInto)
+	}
+	if len(rep.MovedAlbums) != 0 {
+		t.Errorf("moved albums = %v, want none: the edition that left merged away", rep.MovedAlbums)
+	}
+	assertMerges(t, rep.Merges, []model.EntityMerge{
+		{EntityType: model.MergeAlbum, Loser: edition, Survivor: standing},
+	})
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM track WHERE album_id=(SELECT id FROM album WHERE pid=?)", string(standing)); n != 2 {
+		t.Errorf("members on the standing edition = %d, want both", n)
 	}
 	assertVerifyClean(t, st)
 }
@@ -1241,4 +1296,59 @@ func TestEntityEditClearMBIDWithSiblingFieldsRefusesOnlyOnMerge(t *testing.T) {
 		t.Fatalf("album rows after the lone clear = %d, want 1", n)
 	}
 	assertVerifyClean(t, taken)
+}
+
+// TestEntityEditReadsMembersOnlyForAFileEdit: an edit no member file carries (a group's
+// type, an album's media) reads no member list, and one that writes a tag reads them all.
+func TestEntityEditReadsMembersOnlyForAFileEdit(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1", title: "T1",
+		artist: "Alpha", albumArt: "Alpha", album: "One"})
+	group, album := rgPIDOf(t, st, "Alpha", "One"), albumPIDOf(t, st, "Alpha", "One", "/lib/Alpha/One")
+	for _, c := range []struct {
+		et    model.MergeEntity
+		pid   model.PID
+		edits map[string]string
+		want  int
+	}{
+		{model.MergeReleaseGroup, group, map[string]string{"type": "ep"}, 0},
+		{model.MergeAlbum, album, map[string]string{"media": "CD"}, 0},
+		{model.MergeAlbum, album, map[string]string{"label": "Label"}, 1},
+	} {
+		rep, err := st.EditEntityFields(context.Background(), c.et, c.pid, c.edits,
+			model.Attribution{Source: model.SourceUser}, model.LockOf(false), false)
+		if err != nil {
+			t.Fatalf("edit %v: %v", c.edits, err)
+		}
+		if len(rep.MemberPIDs) != c.want {
+			t.Errorf("edit %v read %d members, want %d", c.edits, len(rep.MemberPIDs), c.want)
+		}
+	}
+}
+
+// TestEntityEditClearNamesTheIDsItTookBack: a clear names the id in the column, and the
+// one the key is anchored on when a set by hand moved the column away from it.
+func TestEntityEditClearNamesTheIDsItTookBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const keyed, handSet = "41414141-4141-4141-4141-414141414141", "42424242-4242-4242-4242-424242424242"
+	for _, set := range []string{"", handSet} {
+		st, lib := entityFixture(t)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1", title: "T1",
+			artist: "Alpha", albumArt: "Alpha", album: "One", mbReleaseGroup: keyed})
+		group := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+keyed)
+		want := []string{keyed}
+		if set != "" {
+			if _, err := st.EditEntityFields(ctx, model.MergeReleaseGroup, group, map[string]string{"mbid": set},
+				model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+				t.Fatalf("set by hand: %v", err)
+			}
+			want = []string{set, keyed}
+		}
+		rep := clearEntityMBID(t, st, model.MergeReleaseGroup, group)
+		if !slices.Equal(rep.ClearedIDs, want) {
+			t.Errorf("column set to %q: cleared ids = %v, want %v", set, rep.ClearedIDs, want)
+		}
+	}
 }

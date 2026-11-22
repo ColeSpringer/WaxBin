@@ -47,7 +47,10 @@ func (o RenameOptions) Attribution() model.Attribution {
 // fields of every one of its members in one transaction, so the entity's identity key
 // moves and the row stays: the pid, art, curation, stars and enrichment marker all
 // survive. The report says which branch it took, renamed, merged or refreshed, and names
-// the survivor when a taken key folded the entity into an incumbent.
+// the survivor when a taken key folded the entity into an incumbent. Its Merges names
+// every entity the rename merged into another with the one it went into, which reaches
+// past the renamed one: an artist renamed onto another takes along its release group of
+// a title the other has, and its album too where both editions sit in one folder.
 //
 // Renamable fields are the ones that key the rung: album and album_artist on an album
 // or a release group, and name on an artist. A year keys neither, so it is refused at

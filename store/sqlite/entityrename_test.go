@@ -2,9 +2,13 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -724,4 +728,276 @@ func TestRenameArtistRefusesAKeylessName(t *testing.T) {
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM item_contributor"); n != 2 {
 		t.Errorf("contributor rows = %d, want both kept: the refusal must write nothing", n)
 	}
+}
+
+// rgPIDOf and albumPIDOf read the heuristic release group an artist and a title key, and
+// the album of it whose members sit in folder.
+func rgPIDOf(t *testing.T, st *Store, artist, title string) model.PID {
+	t.Helper()
+	return entityPIDByCol(t, st, "release_group", "match_key",
+		identity.ReleaseGroupKey("", identity.MatchKey(artist), title))
+}
+
+func albumPIDOf(t *testing.T, st *Store, artist, title, folder string) model.PID {
+	t.Helper()
+	return entityPIDByCol(t, st, "album", "match_key",
+		identity.AlbumKey("", identity.ReleaseGroupKey("", identity.MatchKey(artist), title), 0, folder))
+}
+
+// assertMerges compares a report's merges with want, in any order.
+func assertMerges(t *testing.T, got, want []model.EntityMerge) {
+	t.Helper()
+	flat := func(ms []model.EntityMerge) []string {
+		out := make([]string, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, string(m.EntityType)+" "+string(m.Loser)+" into "+string(m.Survivor))
+		}
+		slices.Sort(out)
+		return out
+	}
+	if g, w := flat(got), flat(want); !slices.Equal(g, w) {
+		t.Errorf("merges = %v, want %v", g, w)
+	}
+}
+
+// assertMergeRows checks that the entity deletes the feed holds after seq are exactly the
+// merges in want, each naming the row it went into.
+func assertMergeRows(t *testing.T, st *Store, seq int64, want []model.EntityMerge) {
+	t.Helper()
+	changes, err := st.ChangesSince(context.Background(), seq)
+	if err != nil {
+		t.Fatalf("ChangesSince: %v", err)
+	}
+	var got []model.EntityMerge
+	for _, c := range changes {
+		if c.Op == model.OpDelete && model.MergeEntity(c.EntityType).Valid() {
+			got = append(got, model.EntityMerge{
+				EntityType: model.MergeEntity(c.EntityType), Loser: c.EntityPID, Survivor: c.MergedInto,
+			})
+		}
+	}
+	assertMerges(t, got, want)
+}
+
+// TestRenameArtistReportsTheReleasesItMerged: an artist merging into another takes along
+// its release groups whose titles the survivor already has, and an album whose edition
+// shares a folder with the survivor's. The report names each with the entity it went
+// into, and so does each delete in the change feed.
+func TestRenameArtistReportsTheReleasesItMerged(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, s := range []struct{ path, artist, album string }{
+		{"/lib/Shared/Same/01.flac", "Alpha", "Same"},
+		{"/lib/Shared/Same/02.flac", "Beta", "Same"},
+		{"/lib/Alpha/Other/03.flac", "Alpha", "Other"},
+		{"/lib/Beta/Other/04.flac", "Beta", "Other"},
+	} {
+		n := strconv.Itoa(i)
+		putTrack(t, st, lib.ID, trackSpec{path: s.path, essence: "e" + n, content: "c" + n, title: "T" + n,
+			artist: s.artist, album: s.album})
+	}
+	alpha, beta := entityPID(t, st, "artist", "Alpha"), entityPID(t, st, "artist", "Beta")
+	want := []model.EntityMerge{
+		{EntityType: model.MergeArtist, Loser: alpha, Survivor: beta},
+		{EntityType: model.MergeReleaseGroup, Loser: rgPIDOf(t, st, "Alpha", "Same"), Survivor: rgPIDOf(t, st, "Beta", "Same")},
+		{EntityType: model.MergeReleaseGroup, Loser: rgPIDOf(t, st, "Alpha", "Other"), Survivor: rgPIDOf(t, st, "Beta", "Other")},
+		{EntityType: model.MergeAlbum, Loser: albumPIDOf(t, st, "Alpha", "Same", "/lib/Shared/Same"),
+			Survivor: albumPIDOf(t, st, "Beta", "Same", "/lib/Shared/Same")},
+	}
+	moved := albumPIDOf(t, st, "Alpha", "Other", "/lib/Alpha/Other")
+	seq0 := latestSeq(t, st)
+
+	rep, err := st.RenameEntity(ctx, model.MergeArtist, alpha, map[string]string{"name": "Beta"},
+		model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity: %v", err)
+	}
+	if rep.Outcome != model.EntityRenameMerged || rep.MergedInto != beta {
+		t.Fatalf("outcome = %q into %q, want merged into %s", rep.Outcome, rep.MergedInto, beta)
+	}
+	assertMerges(t, rep.Merges, want)
+	// Its group merged away, but the album itself sits in a folder of its own and stands.
+	if !slices.Equal(rep.MovedAlbums, []model.PID{moved}) {
+		t.Errorf("moved albums = %v, want %s alone", rep.MovedAlbums, moved)
+	}
+	assertMergeRows(t, st, seq0, want)
+	assertVerifyClean(t, st)
+}
+
+// TestRenameReleaseGroupReportsTheAlbumItMerged: a group renamed onto a key another group
+// holds merges into it, and its album merges into the incumbent's where the two editions
+// sit in one folder.
+func TestRenameReleaseGroupReportsTheAlbumItMerged(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Shared/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", albumArt: "Band", album: "Album"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Shared/Album/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "The Band", albumArt: "The Band", album: "Album"})
+	loser, survivor := rgPIDOf(t, st, "Band", "Album"), rgPIDOf(t, st, "The Band", "Album")
+	want := []model.EntityMerge{
+		{EntityType: model.MergeReleaseGroup, Loser: loser, Survivor: survivor},
+		{EntityType: model.MergeAlbum, Loser: albumPIDOf(t, st, "Band", "Album", "/lib/Shared/Album"),
+			Survivor: albumPIDOf(t, st, "The Band", "Album", "/lib/Shared/Album")},
+	}
+
+	rep, err := st.RenameEntity(ctx, model.MergeReleaseGroup, loser, map[string]string{"album_artist": "The Band"},
+		model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity: %v", err)
+	}
+	if rep.Outcome != model.EntityRenameMerged || rep.MergedInto != survivor {
+		t.Fatalf("outcome = %q into %q, want merged into %s", rep.Outcome, rep.MergedInto, survivor)
+	}
+	assertMerges(t, rep.Merges, want)
+	if len(rep.MovedAlbums) != 0 {
+		t.Errorf("moved albums = %v, want none: the album merged away", rep.MovedAlbums)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestRenameAlbumReportsTheGroupItMerged: an album renamed to a title its artist already
+// has a group for takes its own group into that one, while the album, in a folder of its
+// own, keeps its row and comes out under the incumbent's group.
+func TestRenameAlbumReportsTheGroupItMerged(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Wrong/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Wrong"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Right/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Right"})
+	album := albumPIDOf(t, st, "Band", "Wrong", "/lib/Band/Wrong")
+	want := []model.EntityMerge{
+		{EntityType: model.MergeReleaseGroup, Loser: rgPIDOf(t, st, "Band", "Wrong"), Survivor: rgPIDOf(t, st, "Band", "Right")},
+	}
+
+	rep, err := st.RenameEntity(ctx, model.MergeAlbum, album, map[string]string{"album": "Right"},
+		model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed || rep.MergedInto != "" {
+		t.Fatalf("outcome = %q into %q, want renamed in place", rep.Outcome, rep.MergedInto)
+	}
+	assertMerges(t, rep.Merges, want)
+	if !slices.Equal(rep.MovedAlbums, []model.PID{album}) {
+		t.Errorf("moved albums = %v, want %s", rep.MovedAlbums, album)
+	}
+	assertVerifyClean(t, st)
+}
+
+// leaveMemberless deletes an item the way a fold does, leaving its album with no tracks,
+// the shape a split the re-key reconciliation cannot carry leaves until the orphan sweep.
+func leaveMemberless(t *testing.T, st *Store, title string) {
+	t.Helper()
+	ctx := context.Background()
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE title = ?", title).Scan(&id); err != nil {
+			return err
+		}
+		aff := newAffectedRollups()
+		if err := aff.collect(ctx, tx, id); err != nil {
+			return err
+		}
+		var batch entryHolders
+		if _, err := deleteItemCascade(ctx, tx, id, &batch); err != nil {
+			return err
+		}
+		if err := batch.settleTx(ctx, tx); err != nil {
+			return err
+		}
+		return maintainRollupsTx(ctx, tx, aff, nowNS())
+	})
+	if err != nil {
+		t.Fatalf("delete %q: %v", title, err)
+	}
+}
+
+// TestRenameReleaseGroupPastAMemberlessAlbum: an album left with no tracks has nothing to
+// carry the rename, so it does not hold the group back. The group moves in place, and the
+// memberless album stays under it for the orphan sweep.
+func TestRenameReleaseGroupPastAMemberlessAlbum(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Album 2/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Album"})
+	group := rgPIDOf(t, st, "Band", "Album")
+	empty := albumPIDOf(t, st, "Band", "Album", "/lib/Band/Album 2")
+	leaveMemberless(t, st, "Two")
+
+	rep, err := st.RenameEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"album": "Renamed"},
+		model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity past a memberless album: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed {
+		t.Errorf("outcome = %q, want renamed in place", rep.Outcome)
+	}
+	if got := rgPIDOf(t, st, "Band", "Renamed"); got != group {
+		t.Errorf("renamed group pid = %s, want the original %s", got, group)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album WHERE pid = ? AND release_group_id = (SELECT id FROM release_group WHERE pid = ?)",
+		string(empty), string(group)); n != 1 {
+		t.Errorf("the memberless album is gone or moved, want it left under the group")
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestRenameArtistPastAMemberlessGroup: a release group whose albums hold no tracks has no
+// anchor left to move, so it does not hold back a rename of the artist it points at.
+func TestRenameArtistPastAMemberlessGroup(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Band/Other/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Other"})
+	artist := entityPID(t, st, "artist", "Band")
+	leaveMemberless(t, st, "Two")
+
+	rep, err := st.RenameEntity(ctx, model.MergeArtist, artist, map[string]string{"name": "The Band"},
+		model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity past a memberless group: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed {
+		t.Errorf("outcome = %q, want renamed in place", rep.Outcome)
+	}
+	if got := scalarStr(t, st, "SELECT name FROM artist WHERE pid = ?", string(artist)); got != "The Band" {
+		t.Errorf("artist name = %q, want the new one", got)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestRenameReleaseGroupPastAMemberlessEdition: an edition titled apart from the rest has
+// its own title to keep, which refuses a group rename, unless it holds no tracks: then the
+// rename retitles nothing of it.
+func TestRenameReleaseGroupPastAMemberlessEdition(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	const rgMBID = "abababab-abab-abab-abab-abababababab"
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1", title: "T1",
+		artist: "Alpha", albumArt: "Alpha", album: "One", mbReleaseGroup: rgMBID})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/Alpha/One Deluxe/01.flac", essence: "e2", content: "c2", title: "T2",
+		artist: "Alpha", albumArt: "Alpha", album: "One (Deluxe Edition)", mbReleaseGroup: rgMBID})
+	group := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
+	leaveMemberless(t, st, "T2")
+
+	if _, err := st.RenameEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"album": "One Remastered"},
+		model.Attribution{}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("RenameEntity past a memberless edition: %v", err)
+	}
+	if got := scalarStr(t, st, "SELECT title FROM release_group WHERE pid = ?", string(group)); got != "One Remastered" {
+		t.Errorf("group title = %q, want the new one", got)
+	}
+	assertVerifyClean(t, st)
 }

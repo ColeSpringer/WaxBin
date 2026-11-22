@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"testing"
 	"time"
 
@@ -597,6 +598,91 @@ func TestMergeEmitsPerItemChangeLog(t *testing.T) {
 	}
 	if n == 0 {
 		t.Error("merge emitted no per-item change_log delta for the re-pointed track")
+	}
+}
+
+// assertDeletedInto checks that the feed after seq deletes pid once, naming into as where
+// it went.
+func assertDeletedInto(t *testing.T, st *Store, seq int64, entityType string, pid, into model.PID) {
+	t.Helper()
+	changes, err := st.ChangesSince(context.Background(), seq)
+	if err != nil {
+		t.Fatalf("ChangesSince: %v", err)
+	}
+	var got []model.PID
+	for _, c := range changes {
+		if c.Op == model.OpDelete && c.EntityType == entityType && c.EntityPID == pid {
+			got = append(got, c.MergedInto)
+		}
+	}
+	if !slices.Equal(got, []model.PID{into}) {
+		t.Errorf("%s %s deletes name %v, want one naming %s", entityType, pid, got, into)
+	}
+}
+
+// TestMergeNamesTheSurvivorOnTheLoserDelete: the loser's delete in the change feed names
+// the survivor, so a consumer holding the loser's pid can follow it, and no other row of
+// the merge names anything.
+func TestMergeNamesTheSurvivorOnTheLoserDelete(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "The Beatles", album: "B"})
+	survivor, loser := entityPID(t, st, "artist", "The Beatles"), entityPID(t, st, "artist", "Beatles")
+	seq0 := latestSeq(t, st)
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	assertDeletedInto(t, st, seq0, "artist", loser, survivor)
+	changes, err := st.ChangesSince(ctx, seq0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range changes {
+		if c.MergedInto != "" && c.EntityPID != loser {
+			t.Errorf("row %+v names %q, want only the loser's delete to name one", c, c.MergedInto)
+		}
+	}
+}
+
+// TestEntityMergesSinceSettlesChains: the merges a transaction reads back from its log
+// name where each loser ended, through a later merge of its survivor, and leave out a row
+// the transaction created, an item and a delete that merged nothing.
+func TestEntityMergesSinceSettlesChains(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	var got []model.EntityMerge
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		head, err := changeHeadTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for _, step := range []func() error{
+			func() error { return appendChange(ctx, tx, "album", "fresh", model.OpCreate) },
+			func() error { return appendMergedChange(ctx, tx, "album", "old", "fresh") },
+			func() error { return appendMergedChange(ctx, tx, "release_group", "rg-old", "rg-kept") },
+			func() error { return appendMergedChange(ctx, tx, "album", "fresh", "kept") },
+			func() error { return appendMergedChange(ctx, tx, "item", "it-old", "it-kept") },
+			func() error { return appendChange(ctx, tx, "album", "swept", model.OpDelete) },
+		} {
+			if err := step(); err != nil {
+				return err
+			}
+		}
+		got, err = entityMergesSinceTx(ctx, tx, head)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []model.EntityMerge{
+		{EntityType: model.MergeAlbum, Loser: "old", Survivor: "kept"},
+		{EntityType: model.MergeReleaseGroup, Loser: "rg-old", Survivor: "rg-kept"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("merges = %+v, want %+v", got, want)
 	}
 }
 

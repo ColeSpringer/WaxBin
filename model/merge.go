@@ -60,6 +60,16 @@ type MergeReport struct {
 	Folds []string
 }
 
+// EntityMerge is one entity a write merged into another of its type: the row Loser named
+// is gone, and Survivor holds what it held, followed through any later merge in the same
+// write. A report lists only entities that stood before the write, since a row it made and
+// merged away again had a pid no caller could know.
+type EntityMerge struct {
+	EntityType MergeEntity
+	Loser      PID
+	Survivor   PID
+}
+
 // EntityFold is one key a merge retired, still naming the entity it folded into: a scan
 // resolving that key reaches the entity instead of minting the loser the merge did away
 // with. Key is what the type's resolver looks up, the match key (a genre's with its facet

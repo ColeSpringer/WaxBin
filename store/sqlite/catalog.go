@@ -1356,17 +1356,18 @@ func (s *Store) NoteReopened(ctx context.Context) (int64, error) {
 }
 
 // changeCols reads a change_log row in scanChange's order.
-const changeCols = "seq, ts, entity_type, entity_pid, op, library_pid"
+const changeCols = "seq, ts, entity_type, entity_pid, op, library_pid, merged_into"
 
 func scanChange(sc rowScanner) (model.Change, error) {
 	var c model.Change
-	err := sc.Scan(&c.Seq, &c.TS, &c.EntityType, &c.EntityPID, &c.Op, &c.LibraryPID)
+	err := sc.Scan(&c.Seq, &c.TS, &c.EntityType, &c.EntityPID, &c.Op, &c.LibraryPID, &c.MergedInto)
 	return c, err
 }
 
-// appendChangeSQL is the one change_log insert. A bulk writer prepares it once
-// (see sortKeyPatch.flush) rather than re-parsing it per row. The row's library is
-// written when its transaction ends (placeChangesSQL).
+// appendChangeSQL is the change_log insert of every row but a merged delete
+// (appendMergedChange). A bulk writer prepares it once (see sortKeyPatch.flush) rather
+// than re-parsing it per row. The row's library is written when its transaction ends
+// (placeChangesSQL).
 const appendChangeSQL = "INSERT INTO change_log(ts, entity_type, entity_pid, op) VALUES (?,?,?,?)"
 
 func appendChange(ctx context.Context, tx *sql.Tx, entityType string, pid model.PID, op model.ChangeOp) error {
@@ -1374,8 +1375,78 @@ func appendChange(ctx context.Context, tx *sql.Tx, entityType string, pid model.
 	return err
 }
 
+// appendMergedChange logs the delete of a row whose contents went into another of its
+// type, into (model.Change.MergedInto).
+func appendMergedChange(ctx context.Context, tx *sql.Tx, entityType string, pid, into model.PID) error {
+	_, err := tx.ExecContext(ctx,
+		"INSERT INTO change_log(ts, entity_type, entity_pid, op, merged_into) VALUES (?,?,?,?,?)",
+		nowNS(), entityType, string(pid), string(model.OpDelete), string(into))
+	return err
+}
+
 // changeHeadSQL reads the change_log head a write transaction starts from.
 const changeHeadSQL = "SELECT COALESCE(MAX(seq), 0) FROM change_log"
+
+// changeHeadTx reads the change_log head inside a write transaction, for a writer that
+// reads back the rows it logs (entityMergesSinceTx).
+func changeHeadTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var seq int64
+	err := tx.QueryRowContext(ctx, changeHeadSQL).Scan(&seq)
+	return seq, err
+}
+
+// entityMergesSinceTx reads the entity merges a write transaction logged after head, in
+// the order they ran, each loser with the row it ended in through any later merge. It
+// reads the merges' own deletes, so every path that merges is covered, and leaves out a
+// row the same transaction created, whose pid no caller could know.
+func entityMergesSinceTx(ctx context.Context, tx *sql.Tx, head int64) ([]model.EntityMerge, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT entity_type, entity_pid, op, merged_into FROM change_log
+		WHERE seq > ? AND op IN ('create', 'delete') ORDER BY seq`, head)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	created := map[model.PID]bool{}
+	into := map[model.PID]model.PID{}
+	var merges []model.EntityMerge
+	for rows.Next() {
+		var et, op string
+		var pid, survivor model.PID
+		if err := rows.Scan(&et, &pid, &op, &survivor); err != nil {
+			return nil, err
+		}
+		if !model.MergeEntity(et).Valid() {
+			continue
+		}
+		switch {
+		case op == string(model.OpCreate):
+			created[pid] = true
+		case survivor != "":
+			into[pid] = survivor
+			merges = append(merges, model.EntityMerge{EntityType: model.MergeEntity(et), Loser: pid, Survivor: survivor})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := merges[:0]
+	for _, m := range merges {
+		if created[m.Loser] {
+			continue
+		}
+		// A deleted row is never a survivor afterwards, so the walk ends; the bound only
+		// keeps a broken log from spinning it.
+		for range len(into) {
+			next, ok := into[m.Survivor]
+			if !ok {
+				break
+			}
+			m.Survivor = next
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
 
 // placeChangesSQL writes where each item and file logged after the head sits now that the
 // transaction's writes are done (model.Change.LibraryPID): a file's library, and an

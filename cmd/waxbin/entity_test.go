@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 )
 
@@ -208,5 +213,75 @@ func TestEntityStateListText(t *testing.T) {
 		if got := strings.Fields(lines[i]); strings.Join(got, " ") != strings.Join(want, " ") {
 			t.Errorf("line %d = %q, want the fields %v", i, lines[i], want)
 		}
+	}
+}
+
+// TestEntityRenameNamesWhatItMerged: an artist renamed onto another takes along its
+// release group of a title the survivor has, and its album sharing the survivor's folder.
+// The text names each beside the outcome line, and --json lists every merge, the artist's
+// own included.
+func TestEntityRenameNamesWhatItMerged(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for i, artist := range []string{"Alpha", "Beta"} {
+		writeAsset(t, filepath.Join(root, "Same", artist+".mp3"),
+			testaudio.BuildMP3WithAudio("Song "+artist, artist, "Same", i+1, testaudio.AudioWithSeed(byte(91+i))))
+	}
+	lib, err := openSeeded(t, ctx, waxbin.Options{DBPath: db,
+		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items = %d (err %v), want 2", len(items), err)
+	}
+	byArtist := map[string]*model.ItemView{}
+	for _, it := range items {
+		byArtist[it.Artist] = it
+	}
+	alpha, beta := byArtist["Alpha"], byArtist["Beta"]
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := runLibraryCmd(t, db, false, "entity", "rename", "artist", string(alpha.ArtistPID), "--set", "name=Beta")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	for _, line := range []string{
+		"artist " + string(alpha.ArtistPID) + " merged into " + string(beta.ArtistPID),
+		"release_group " + string(alpha.ReleaseGroupPID) + " merged into " + string(beta.ReleaseGroupPID),
+		"album " + string(alpha.AlbumPID) + " merged into " + string(beta.AlbumPID),
+	} {
+		if !strings.Contains(text, line) {
+			t.Errorf("rename printed %q, want a line %q", text, line)
+		}
+	}
+	if n := strings.Count(text, string(alpha.ArtistPID)+" merged into"); n != 1 {
+		t.Errorf("rename printed the artist's own merge %d times, want once, on the outcome line", n)
+	}
+}
+
+// TestEntityMergeViewsJSON pins the --json shape of a report's merges, in the merge
+// command's own words.
+func TestEntityMergeViewsJSON(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(entityRenameView{Outcome: "merged", Merges: entityMergeViews([]model.EntityMerge{
+		{EntityType: model.MergeAlbum, Loser: "al-1", Survivor: "al-2"},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"merges":[{"entityType":"album","loser":"al-1","survivor":"al-2"}]`) {
+		t.Errorf("view = %s, want the merge under its documented names", b)
+	}
+	if b, _ := json.Marshal(entityRenameView{Outcome: "renamed"}); strings.Contains(string(b), "merges") {
+		t.Errorf("view = %s, want no merges key when nothing merged", b)
 	}
 }

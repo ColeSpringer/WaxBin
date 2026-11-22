@@ -298,7 +298,9 @@ func TestEditEntityRoundTrip(t *testing.T) {
 	handlers := map[string]proxy.Handler{
 		proxy.MethodEditEntity: func(_ context.Context, raw json.RawMessage) (any, error) {
 			_ = json.Unmarshal(raw, &got)
-			return proxy.EditEntityResult{MergedInto: "al-twin"}, nil
+			return proxy.EditEntityResult{MergedInto: "al-twin", Merges: []proxy.EntityMerge{
+				{EntityType: "album", Loser: "al-1", Survivor: "al-twin"},
+			}, MovedAlbums: []string{"al-moved"}}, nil
 		},
 	}
 	c := dial(t, startServer(t, handlers, nil))
@@ -314,6 +316,12 @@ func TestEditEntityRoundTrip(t *testing.T) {
 	if res.MergedInto != "al-twin" {
 		t.Errorf("mergedInto = %q, want the handler's survivor", res.MergedInto)
 	}
+	if len(res.Merges) != 1 || res.Merges[0] != (proxy.EntityMerge{EntityType: "album", Loser: "al-1", Survivor: "al-twin"}) {
+		t.Errorf("merges = %+v, want the handler's one pair", res.Merges)
+	}
+	if !slices.Equal(res.MovedAlbums, []string{"al-moved"}) {
+		t.Errorf("moved albums = %v, want the handler's one", res.MovedAlbums)
+	}
 
 	// An edit that merged nothing leaves the field out of the frame entirely, so an
 	// older server that never sets it decodes to the same empty value.
@@ -322,8 +330,8 @@ func TestEditEntityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if rawHas(b, "mergedInto") {
-		t.Errorf("result frame = %s, want no mergedInto key when nothing merged", b)
+	if rawHas(b, "mergedInto") || rawHas(b, "merges") || rawHas(b, "movedAlbums") {
+		t.Errorf("result frame = %s, want no mergedInto, merges or movedAlbums key when nothing moved", b)
 	}
 }
 
@@ -335,7 +343,9 @@ func TestRenameEntityRoundTrip(t *testing.T) {
 	handlers := map[string]proxy.Handler{
 		proxy.MethodRenameEntity: func(_ context.Context, raw json.RawMessage) (any, error) {
 			_ = json.Unmarshal(raw, &got)
-			return proxy.RenameEntityResult{Outcome: "renamed", Members: 2, Credits: 3}, nil
+			return proxy.RenameEntityResult{Outcome: "renamed", Members: 2, Credits: 3, Merges: []proxy.EntityMerge{
+				{EntityType: "release_group", Loser: "rg-1", Survivor: "rg-2"},
+			}}, nil
 		},
 	}
 	c := dial(t, startServer(t, handlers, nil))
@@ -351,6 +361,9 @@ func TestRenameEntityRoundTrip(t *testing.T) {
 	}
 	if res.Members != 2 || res.Credits != 3 {
 		t.Errorf("result = %+v, want both halves of the count", res)
+	}
+	if len(res.Merges) != 1 || res.Merges[0] != (proxy.EntityMerge{EntityType: "release_group", Loser: "rg-1", Survivor: "rg-2"}) {
+		t.Errorf("merges = %+v, want the group the rename took along", res.Merges)
 	}
 
 	// A rename that moved no credit leaves the key out of the frame, so a peer that

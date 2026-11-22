@@ -2093,6 +2093,77 @@ func TestServeProxiedRenameEntity(t *testing.T) {
 	}
 }
 
+// TestServeProxiedRenameNamesItsMerges: a proxied rename onto a title its artist already
+// has, in the same folder, merges the album and its group, and both pairs come back over
+// the wire.
+func TestServeProxiedRenameNamesItsMerges(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	for i, album := range []string{"Wrong", "Right"} {
+		writeFile(t, filepath.Join(root, fmt.Sprintf("0%d.mp3", i+1)), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: album, Artist: "Alpha", AlbumArtist: "Alpha", Album: album, Track: i + 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)),
+		}))
+	}
+	openServed(t, ctx, db, root, sock)
+	pidOf := func(table, title string) string {
+		return catalogScalar[string](t, ctx, db, "SELECT pid FROM "+table+" WHERE title = ?", title)
+	}
+	wrong, right := pidOf("album", "Wrong"), pidOf("album", "Right")
+	want := []proxy.EntityMerge{
+		{EntityType: "release_group", Loser: pidOf("release_group", "Wrong"), Survivor: pidOf("release_group", "Right")},
+		{EntityType: "album", Loser: wrong, Survivor: right},
+	}
+	c := dialWhenReady(t, sock)
+
+	res, err := c.RenameEntity(ctx, model.MergeAlbum, model.PID(wrong),
+		map[string]string{"album": "Right"}, false, model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("proxied rename: %v", err)
+	}
+	if res.Outcome != string(model.EntityRenameMerged) || res.MergedInto != right {
+		t.Fatalf("rename result = %+v, want merged into %s", res, right)
+	}
+	if !slices.Equal(res.Merges, want) {
+		t.Errorf("merges = %+v, want %+v", res.Merges, want)
+	}
+}
+
+// TestServeProxiedEditEntityNamesMovedAlbums: a proxied release-group clear that settles a
+// differently-titled edition under a group of its own names that album in the result, so
+// the client knows to refetch it.
+func TestServeProxiedEditEntityNamesMovedAlbums(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	const rgMBID = "40404040-4040-4040-4040-404040404040"
+	for i, album := range []string{"One", "Two"} {
+		writeFile(t, filepath.Join(root, album, "01.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: album, Artist: "Alpha", AlbumArtist: "Alpha", Album: album, Track: 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)),
+			TXXX:  []testaudio.TXXXFrame{{Desc: "MusicBrainz Release Group Id", Value: rgMBID}},
+		}))
+	}
+	openServed(t, ctx, db, root, sock)
+	group := catalogScalar[string](t, ctx, db, "SELECT pid FROM release_group WHERE match_key = ?", "mbid:"+rgMBID)
+	edition := catalogScalar[string](t, ctx, db, "SELECT pid FROM album WHERE title = 'Two'")
+	c := dialWhenReady(t, sock)
+
+	res, err := c.EditEntity(ctx, model.MergeReleaseGroup, model.PID(group), map[string]string{"mbid": ""},
+		false, model.Attribution{Source: model.SourceUser}, model.LockOn, false)
+	if err != nil {
+		t.Fatalf("proxied clear: %v", err)
+	}
+	if !slices.Equal(res.MovedAlbums, []string{edition}) || len(res.Merges) != 0 {
+		t.Errorf("result = %+v, want the edition %s moved and nothing merged", res, edition)
+	}
+}
+
 // TestServeAcquisitionCuration runs both acquisition verbs end to end over the socket:
 // the correction, the clear's default lock, and the CodeLocked refusal surviving the
 // wire so the CLI's exit code matches a local run.

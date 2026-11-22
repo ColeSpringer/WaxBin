@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -1195,6 +1196,226 @@ func TestEditEntityWriteBackStripsReparentedAlbumFiles(t *testing.T) {
 	}
 	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
 		t.Errorf("verify derived = %+v (err %v), want clean", dr, err)
+	}
+}
+
+// TestEditEntityWriteBackFollowsAnEditionMergedAway: the edition a clear re-parents lands
+// on the key of an album already standing in its folder and merges into it, so neither the
+// group's members nor a moved album reach its file. The report's merges do, and the strip
+// follows them.
+func TestEditEntityWriteBackFollowsAnEditionMergedAway(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const rgMBID = "33333333-3434-3535-3636-373737373737"
+	mbTags := []testaudio.TXXXFrame{{Desc: "MusicBrainz Release Group Id", Value: rgMBID}}
+	plain := filepath.Join(root, "01 One", "01.mp3")
+	edition := filepath.Join(root, "02 Two", "01.mp3")
+	writeFile(t, plain, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "One", Track: 1,
+		Audio: testaudio.AudioWithSeed(1), TXXX: mbTags,
+	}))
+	writeFile(t, edition, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Two", Track: 1,
+		Audio: testaudio.AudioWithSeed(2), TXXX: mbTags,
+	}))
+	// No id: an album of its own under a heuristic group, in the edition's folder.
+	writeFile(t, filepath.Join(root, "02 Two", "02.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two Again", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Two", Track: 2,
+		Audio: testaudio.AudioWithSeed(3),
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 3 {
+		t.Fatalf("album rows = %d, want two identified editions and the standing one", n)
+	}
+	group := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM release_group WHERE match_key = ?", "mbid:"+rgMBID))
+
+	rep, err := lib.EditEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"mbid": ""},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn})
+	if err != nil {
+		t.Fatalf("clear with write-back: %v", err)
+	}
+	if len(rep.MovedAlbums) != 0 || len(rep.Merges) != 1 || rep.Merges[0].EntityType != model.MergeAlbum {
+		t.Fatalf("report = %+v, want the edition merged away and nothing moved", rep)
+	}
+
+	r := meta.NewReader()
+	for _, p := range []string{plain, edition} {
+		fm, err := r.Read(ctx, p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		if fm.Tags.MBReleaseGroupID != "" {
+			t.Errorf("%s still names group %q, want it stripped", filepath.Base(filepath.Dir(p)), fm.Tags.MBReleaseGroupID)
+		}
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	if n := catalogScalar[int](t, ctx, db,
+		"SELECT COUNT(*) FROM release_group WHERE match_key = ?", "mbid:"+rgMBID); n != 0 {
+		t.Errorf("identified release groups after the forced rescan = %d, want none", n)
+	}
+	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
+		t.Errorf("verify derived = %+v (err %v), want clean", dr, err)
+	}
+}
+
+// TestEditEntityWriteBackWritesOnlyTheClearedMembers: a clear that merges the group into its
+// heuristic twin strips the files of the members the group had, and leaves the twin's own
+// alone, here one an earlier album merge brought in that names a group of its own.
+func TestEditEntityWriteBackWritesOnlyTheClearedMembers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const cleared, other = "34343434-3434-3434-3434-343434343434", "35353535-3535-3535-3535-353535353535"
+	spec := func(seed byte, group string) []byte {
+		s := testaudio.MP3Spec{Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "One", Track: 1,
+			Audio: testaudio.AudioWithSeed(seed)}
+		if group != "" {
+			s.TXXX = []testaudio.TXXXFrame{{Desc: "MusicBrainz Release Group Id", Value: group}}
+		}
+		return testaudio.BuildMP3FromSpec(s)
+	}
+	member, elsewhere := filepath.Join(root, "a", "01.mp3"), filepath.Join(root, "c", "01.mp3")
+	writeFile(t, member, spec(1, cleared))
+	writeFile(t, filepath.Join(root, "b", "01.mp3"), spec(2, ""))
+	writeFile(t, elsewhere, spec(3, other))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	albumKeyed := func(group string) model.PID {
+		return model.PID(catalogScalar[string](t, ctx, db, `SELECT al.pid FROM album al
+			JOIN release_group rg ON rg.id = al.release_group_id WHERE rg.match_key = ?`, group))
+	}
+	twinAlbum := albumKeyed(identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One"))
+	if _, err := lib.Merge(ctx, model.MergeAlbum, twinAlbum, albumKeyed("mbid:"+other)); err != nil {
+		t.Fatalf("merge the other group's album into the twin: %v", err)
+	}
+	group := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM release_group WHERE match_key = ?", "mbid:"+cleared))
+
+	rep, err := lib.EditEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"mbid": ""},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn})
+	if err != nil {
+		t.Fatalf("clear with write-back: %v", err)
+	}
+	if rep.MergedInto == "" {
+		t.Fatalf("report = %+v, want the group merged into its twin", rep)
+	}
+	r := meta.NewReader()
+	for path, want := range map[string]string{member: "", elsewhere: other} {
+		fm, err := r.Read(ctx, path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if fm.Tags.MBReleaseGroupID != want {
+			t.Errorf("%s names group %q, want %q", filepath.Base(filepath.Dir(path)), fm.Tags.MBReleaseGroupID, want)
+		}
+	}
+}
+
+// TestEditEntityWriteBackStripsOnlyTheClearedID: a member an album merge brought into the
+// group still names its own group, which the clear never claimed, so the strip takes the
+// cleared id from the group's other files and leaves that one alone.
+func TestEditEntityWriteBackStripsOnlyTheClearedID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const cleared, other = "36363636-3636-3636-3636-363636363636", "37373737-3737-3737-3737-373737373737"
+	own, merged := filepath.Join(root, "a", "01.mp3"), filepath.Join(root, "c", "01.mp3")
+	for i, f := range []struct{ path, group string }{{own, cleared}, {merged, other}} {
+		writeFile(t, f.path, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "One", Track: 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)), TXXX: []testaudio.TXXXFrame{{Desc: "MusicBrainz Release Group Id", Value: f.group}},
+		}))
+	}
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	albumUnder := func(group string) model.PID {
+		return model.PID(catalogScalar[string](t, ctx, db, `SELECT al.pid FROM album al
+			JOIN release_group rg ON rg.id = al.release_group_id WHERE rg.match_key = ?`, "mbid:"+group))
+	}
+	if _, err := lib.Merge(ctx, model.MergeAlbum, albumUnder(cleared), albumUnder(other)); err != nil {
+		t.Fatalf("merge the other group's album in: %v", err)
+	}
+	group := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM release_group WHERE match_key = ?", "mbid:"+cleared))
+
+	if _, err := lib.EditEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"mbid": ""},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
+		t.Fatalf("clear with write-back: %v", err)
+	}
+	r := meta.NewReader()
+	for path, want := range map[string]string{own: "", merged: other} {
+		fm, err := r.Read(ctx, path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if fm.Tags.MBReleaseGroupID != want {
+			t.Errorf("%s names group %q, want %q", filepath.Base(filepath.Dir(path)), fm.Tags.MBReleaseGroupID, want)
+		}
+	}
+	// The kept file never named the cleared id, so it is not left owing the clear.
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "One").Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items = %d (err %v), want both members", len(items), err)
+	}
+	for _, it := range items {
+		if owed := owedOn(t, ctx, lib, it.PID); len(owed) != 0 {
+			t.Errorf("item %s still owes %v after the write-back", it.PID, owed)
+		}
+	}
+}
+
+// TestEditEntityWriteBackStripsTheKeyedIDUnderAHandSetColumn: a group keyed on the id its
+// files name can have its column set to another by hand, which moves the column alone. A
+// clear disowns both, so the strip still takes the id the files name, which is what keeps
+// them from forking the identity back.
+func TestEditEntityWriteBackStripsTheKeyedIDUnderAHandSetColumn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const keyed, handSet = "38383838-3838-3838-3838-383838383838", "39393939-3939-3939-3939-393939393939"
+	path := filepath.Join(root, "a", "01.mp3")
+	writeFile(t, path, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "One", Track: 1,
+		Audio: testaudio.AudioWithSeed(1), TXXX: []testaudio.TXXXFrame{{Desc: "MusicBrainz Release Group Id", Value: keyed}},
+	}))
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	group := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM release_group WHERE match_key = ?", "mbid:"+keyed))
+	if _, err := lib.EditEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"mbid": handSet},
+		waxbin.EntityEditOptions{}); err != nil {
+		t.Fatalf("set the column by hand: %v", err)
+	}
+
+	if _, err := lib.EditEntity(ctx, model.MergeReleaseGroup, group, map[string]string{"mbid": ""},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
+		t.Fatalf("clear with write-back: %v", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if fm.Tags.MBReleaseGroupID != "" {
+		t.Errorf("file still names group %q, want the keyed id stripped", fm.Tags.MBReleaseGroupID)
 	}
 }
 

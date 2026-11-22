@@ -29,8 +29,8 @@ type departure struct {
 // handPIDTx moves pid to onto the item holding from, unless another item holds to, and
 // reports whether it did. It is how an item keeps the identity a client knows across the
 // conversions between a whole file and a cue rip, and how a rebuild restores a stamp. A
-// from the change log has named goes with a delete there (fromLogged); the caller logs
-// to, as an update where a client knew it and as a create where none could.
+// from the change log has named goes with a delete there naming to (fromLogged); the
+// caller logs to, as an update where a client knew it and as a create where none could.
 func handPIDTx(ctx context.Context, tx *sql.Tx, from, to model.PID, fromLogged bool) (bool, error) {
 	r, err := tx.ExecContext(ctx, `UPDATE playable_item SET pid = ?1 WHERE pid = ?2
 		AND NOT EXISTS (SELECT 1 FROM playable_item WHERE pid = ?1)`, string(to), string(from))
@@ -47,7 +47,7 @@ func handPIDTx(ctx context.Context, tx *sql.Tx, from, to model.PID, fromLogged b
 		}
 	}
 	if fromLogged {
-		return true, appendChange(ctx, tx, "item", from, model.OpDelete)
+		return true, appendMergedChange(ctx, tx, "item", from, to)
 	}
 	return true, nil
 }

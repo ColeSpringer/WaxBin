@@ -339,11 +339,20 @@ func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
 		t.Fatalf("put whole-file track: %v", err)
 	}
 	wholePID := r.ItemPID
+	seq0, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Re-catalog the same file as a two-track rip.
 	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 360,
 		[][2]int64{{0, 9}, {9, 27}})); err != nil {
 		t.Fatalf("put virtual tracks: %v", err)
+	}
+	// The opening track the put made carries on under the whole file's pid, so the feed's
+	// delete of the pid it was made with names the one it took.
+	if gone := itemDeletes(t, st, seq0); len(gone) != 1 || gone[0].EntityPID == wholePID || gone[0].MergedInto != wholePID {
+		t.Errorf("item deletes = %+v, want the opening track's first pid naming %s", gone, wholePID)
 	}
 
 	if v, err := st.ItemByPID(ctx, wholePID); err != nil || !v.Virtual || v.StartMS != 0 {
@@ -895,6 +904,22 @@ func TestRipRelinkFollowsAChangedWindow(t *testing.T) {
 	}
 }
 
+// itemDeletes returns the item deletes the change feed holds after seq.
+func itemDeletes(t *testing.T, st *sqlite.Store, seq int64) []model.Change {
+	t.Helper()
+	changes, err := st.ChangesSince(context.Background(), seq)
+	if err != nil {
+		t.Fatalf("ChangesSince: %v", err)
+	}
+	var out []model.Change
+	for _, c := range changes {
+		if c.EntityType == "item" && c.Op == model.OpDelete {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // TestAWholeFileBecomingARipCopyFoldsIntoItsTracks: a byte copy of a rip read as one
 // whole-file track before its sheet arrived, then read with the sheet, backs the rip's
 // tracks as alternates; the whole-file item folds into them rather than staying present
@@ -929,6 +954,10 @@ func TestAWholeFileBecomingARipCopyFoldsIntoItsTracks(t *testing.T) {
 	if _, err := st.SetStar(ctx, "", whole, true, nil); err != nil {
 		t.Fatal(err)
 	}
+	seq0, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, f, "sha256:VE", "sha256:F", 8000, windows)); err != nil {
 		t.Fatal(err)
 	}
@@ -939,6 +968,7 @@ func TestAWholeFileBecomingARipCopyFoldsIntoItsTracks(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("items = %d, want the rip's two tracks", len(items))
 	}
+	var opener model.PID
 	for _, it := range items {
 		ps, err := st.PlayStateFor(ctx, "", it.PID)
 		if err != nil {
@@ -947,6 +977,12 @@ func TestAWholeFileBecomingARipCopyFoldsIntoItsTracks(t *testing.T) {
 		if want := it.StartMS == 0; ps.Starred != want {
 			t.Errorf("track at %d ms starred = %v, want %v (the star goes to the opening track)", it.StartMS, ps.Starred, want)
 		}
+		if it.StartMS == 0 {
+			opener = it.PID
+		}
+	}
+	if gone := itemDeletes(t, st, seq0); len(gone) != 1 || gone[0].EntityPID != whole || gone[0].MergedInto != opener {
+		t.Errorf("item deletes = %+v, want the whole-file item's naming the opening track %s", gone, opener)
 	}
 	rep, err := st.VerifyDerived(ctx)
 	if err != nil || !rep.Consistent() {

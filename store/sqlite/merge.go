@@ -28,7 +28,8 @@ func (s *Store) MergeEntity(ctx context.Context, et model.MergeEntity, survivorP
 // marker when the survivor lacks one, recomputes the affected rollups, deletes the
 // loser, and writes change_log deltas: a per-item update for every re-pointed item
 // (so a delta-sync consumer sees the moved item/entity associations), a survivor
-// update, and a loser delete. The survivor keeps its PID.
+// update, and a loser delete naming the survivor (model.Change.MergedInto). The survivor
+// keeps its PID.
 //
 // This is the first-class merge primitive of Section 13. It backs the audit
 // duplicate-entity repair and the late-enrichment unification of two heuristic
@@ -308,7 +309,7 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err := appendChange(ctx, tx, table, survivorPID, model.OpUpdate); err != nil {
 		return nil, err
 	}
-	if err := appendChange(ctx, tx, table, loserPID, model.OpDelete); err != nil {
+	if err := appendMergedChange(ctx, tx, table, loserPID, survivorPID); err != nil {
 		return nil, err
 	}
 	return rep, nil

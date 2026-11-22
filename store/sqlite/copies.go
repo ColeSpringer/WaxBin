@@ -661,9 +661,23 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 		}
 		if fold {
 			folded = append(folded, opid)
+			continue
 		}
 		if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
 			return orphaned{}, err
+		}
+	}
+	// Logged after the loop, so each names the pid the taker ends with: an opener later in
+	// the loop can hand it its own.
+	if len(folded) > 0 {
+		var into model.PID
+		if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", dep.into).Scan(&into); err != nil {
+			return orphaned{}, err
+		}
+		for _, p := range folded {
+			if err := appendMergedChange(ctx, tx, "item", p, into); err != nil {
+				return orphaned{}, err
+			}
 		}
 	}
 	if err := finishTx(ctx, tx, []int64{dep.into}, whole, nowNS()); err != nil {

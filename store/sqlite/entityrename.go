@@ -117,13 +117,19 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 		if err != nil {
 			return err
 		}
+		// Every merge below logs its loser's delete after this, which is how the report
+		// learns what the rename merged, at whatever rung and on whatever path it ran.
+		head, err := changeHeadTx(ctx, tx)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		var targets []editEntry
 		var creditTargets []creditEntry
 		if entityType == model.MergeArtist {
 			targets, creditTargets, err = artistRenameTargetsTx(ctx, tx, entityID, fields["name"], force, op)
 		} else {
 			var members []model.PID
-			members, err = renameMemberPIDsTx(ctx, tx, entityType, entityID, op)
+			members, err = entityMemberPIDsTx(ctx, tx, entityType, entityID, op)
 			if err == nil {
 				targets, err = renameTargetsFor(members, fields, op)
 			}
@@ -213,7 +219,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 		if err := checkRenameLandedTx(ctx, tx, entityType, entityID, table, fields, keys, op); err != nil {
 			return err
 		}
-		return finishRenameReportTx(ctx, tx, entityType, entityID, table, curKey, fields, before, members, rep, op)
+		return finishRenameReportTx(ctx, tx, entityType, entityID, table, curKey, head, before, members, rep, op)
 	})
 	if err != nil {
 		return nil, err
@@ -221,16 +227,21 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 	return rep, nil
 }
 
-// renameMemberPIDsTx lists every item the entity is made of, in id order. For an album
-// that is its tracks; for a release group, the tracks of all its albums.
-func renameMemberPIDsTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, entityID int64, op string) ([]model.PID, error) {
+// entityMemberPIDsTx lists every item the entity is made of, in id order. For an album
+// that is its tracks; for a release group, the tracks of all its albums; for an artist,
+// the tracks it is the primary artist of, the ones EntityMemberFiles fans an edit onto.
+func entityMemberPIDsTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, entityID int64, op string) ([]model.PID, error) {
 	q := `SELECT pi.pid FROM track t JOIN playable_item pi ON pi.id = t.item_id
 		WHERE t.album_id = ? ORDER BY t.item_id`
-	if entityType == model.MergeReleaseGroup {
+	switch entityType {
+	case model.MergeReleaseGroup:
 		q = `SELECT pi.pid FROM track t
 			JOIN album al ON al.id = t.album_id
 			JOIN playable_item pi ON pi.id = t.item_id
 			WHERE al.release_group_id = ? ORDER BY t.item_id`
+	case model.MergeArtist:
+		q = `SELECT pi.pid FROM track t JOIN playable_item pi ON pi.id = t.item_id
+			WHERE t.artist_id = ? ORDER BY t.item_id`
 	}
 	rows, err := tx.QueryContext(ctx, q, entityID)
 	if err != nil {
@@ -663,10 +674,11 @@ func checkRenameLandedTx(ctx context.Context, tx *sql.Tx, entityType model.Merge
 }
 
 // distinctAlbumTitleKeysTx returns the normalized titles the group's albums carry, in
-// title order, deduped the way identity does so a case difference is not a conflict.
+// title order, deduped the way identity does so a case difference is not a conflict. An
+// album with no tracks is left out: the rename retitles nothing of it.
 func distinctAlbumTitleKeysTx(ctx context.Context, tx *sql.Tx, rgID int64) ([]string, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT title FROM album WHERE release_group_id = ? ORDER BY title", rgID)
+	rows, err := tx.QueryContext(ctx, `SELECT al.title FROM album al WHERE al.release_group_id = ?
+		AND EXISTS (SELECT 1 FROM track t WHERE t.album_id = al.id) ORDER BY al.title`, rgID)
 	if err != nil {
 		return nil, err
 	}
@@ -747,20 +759,30 @@ func entityMatchKeyTx(ctx context.Context, tx *sql.Tx, table string, entityID in
 // runs, and threading an outcome out of it would be a second contract to keep in step
 // with the first.
 //
-// A row that is gone was merged away, and the survivor is wherever the members landed,
-// which is also the only answer that stays right if a merge ever chains.
+// The merges are read from the deletes the transaction logged after head. A row that is
+// gone was merged away, and its own merge names the survivor, followed through any merge
+// after it.
 func finishRenameReportTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, entityID int64,
-	table, curKey string, fields map[string]string, before map[string]int64, members []model.PID,
+	table, curKey string, head int64, before map[string]int64, members []model.PID,
 	rep *model.EntityRenameReport, op string) error {
+	merges, err := entityMergesSinceTx(ctx, tx, head)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	rep.Merges = merges
 	newKey, err := entityMatchKeyTx(ctx, tx, table, entityID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		rep.Outcome = model.EntityRenameMerged
-		survivor, err := renameSurvivorPIDTx(ctx, tx, entityType, fields, members)
-		if err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		for _, m := range merges {
+			if m.EntityType == entityType && m.Loser == rep.EntityPID {
+				rep.MergedInto = m.Survivor
+			}
 		}
-		rep.MergedInto = survivor
+		if rep.MergedInto == "" {
+			return waxerr.New(waxerr.CodeInternal, op,
+				"the rename removed the "+string(entityType)+" without merging it into another")
+		}
 	case err != nil:
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	case newKey == curKey:
@@ -777,44 +799,10 @@ func finishRenameReportTx(ctx context.Context, tx *sql.Tx, entityType model.Merg
 	return nil
 }
 
-// renameSurvivorPIDTx finds the entity the members ended up on after a merge folded the
-// renamed row away.
-func renameSurvivorPIDTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity,
-	fields map[string]string, members []model.PID) (model.PID, error) {
-	// The artist rung is the one that knows its destination key outright, since the key
-	// is the name it was handed, held by a row or named by a fold. The chain rungs derive
-	// theirs from tags and folder, so there the survivor is read from where the members
-	// ended up.
-	if entityType == model.MergeArtist {
-		return keyHolderTx(ctx, tx, model.MergeArtist, identity.MatchKey(fields["name"]), 0)
-	}
-	col, table := "t.album_id", "album"
-	if entityType == model.MergeReleaseGroup {
-		col, table = "al.release_group_id", "release_group"
-	}
-	q := `SELECT e.pid FROM track t
-		JOIN playable_item pi ON pi.id = t.item_id
-		LEFT JOIN album al ON al.id = t.album_id
-		JOIN ` + table + ` e ON e.id = ` + col + `
-		WHERE pi.pid = ? LIMIT 1`
-	for _, pid := range members {
-		var survivor string
-		err := tx.QueryRowContext(ctx, q, string(pid)).Scan(&survivor)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		return model.PID(survivor), nil
-	}
-	return "", nil
-}
-
 // movedAlbumsTx names the albums whose release group changed across the rename, comparing
 // the map albumGroupsTx built beforehand against the same read taken after. An album the
 // members left entirely is not "moved": the before map is keyed on album pid, so it simply
-// does not appear in the after map.
+// does not appear in the after map, and one that merged away is among the report's merges.
 func movedAlbumsTx(ctx context.Context, tx *sql.Tx, before map[string]int64, members []model.PID) ([]model.PID, error) {
 	after, err := albumGroupsTx(ctx, tx, members)
 	if err != nil {
