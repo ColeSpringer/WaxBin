@@ -4,11 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
+	"github.com/colespringer/waxbin/read"
 )
+
+// TestSearchViewCarriesEveryGroup: the JSON view has a key for each group of the result,
+// each holding that group's hits.
+func TestSearchViewCarriesEveryGroup(t *testing.T) {
+	t.Parallel()
+	res := &read.SearchResult{
+		Artists: []read.SearchHit{{Kind: "artist"}}, Albums: []read.SearchHit{{Kind: "album"}},
+		Tracks: []read.SearchHit{{Kind: "track"}}, Authors: []read.SearchHit{{Kind: "author"}},
+		Narrators: []read.SearchHit{{Kind: "narrator"}}, Series: []read.SearchHit{{Kind: "series"}},
+		Books: []read.SearchHit{{Kind: "book"}}, Podcasts: []read.SearchHit{{Kind: "podcast"}},
+		Episodes: []read.SearchHit{{Kind: "episode"}},
+	}
+	raw, err := json.Marshal(toSearchView(res))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]string{"artists": "artist", "albums": "album", "tracks": "track", "authors": "author",
+		"narrators": "narrator", "series": "series", "books": "book", "podcasts": "podcast", "episodes": "episode"}
+	if len(keys) != len(res.Groups()) {
+		t.Fatalf("the test names %d groups, the result has %d", len(keys), len(res.Groups()))
+	}
+	for key, kind := range keys {
+		var hits []struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(got[key], &hits); err != nil || len(hits) != 1 || hits[0].Kind != kind {
+			t.Errorf("%s = %s (err %v), want its one %s hit", key, got[key], err, kind)
+		}
+	}
+}
 
 // TestSearchJSONMarksExactNames: the JSON view carries a hit's exact mark, so a client
 // can tell the artist the query names from the ones its items brought in.
@@ -36,7 +72,7 @@ func TestSearchJSONMarksExactNames(t *testing.T) {
 }
 
 // TestSearchPodcastFlagScopesEpisodes: --podcast keeps the episodes of the named shows
-// and leaves the rest out.
+// and leaves the rest out, their shows with them.
 func TestSearchPodcastFlagScopesEpisodes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -62,11 +98,15 @@ func TestSearchPodcastFlagScopesEpisodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
+	type hit struct {
+		PID   string `json:"pid"`
+		Kind  string `json:"kind"`
+		Title string `json:"title"`
+	}
 	var env struct {
 		Data struct {
-			Episodes []struct {
-				Title string `json:"title"`
-			} `json:"episodes"`
+			Podcasts []hit `json:"podcasts"`
+			Episodes []hit `json:"episodes"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
@@ -74,5 +114,13 @@ func TestSearchPodcastFlagScopesEpisodes(t *testing.T) {
 	}
 	if e := env.Data.Episodes; len(e) != 1 || e[0].Title != "Harbor Followed" {
 		t.Errorf("episodes = %+v, want only the followed show's", e)
+	}
+	want := hit{PID: string(shows["Followed"]), Kind: "podcast", Title: "Followed"}
+	if p := env.Data.Podcasts; len(p) != 1 || p[0] != want {
+		t.Errorf("podcasts = %+v, want only the followed show", p)
+	}
+	text, err := runCLIText(t, db, root, "search", "harbor")
+	if err != nil || !strings.Contains(text, "PODCASTS\n") || !strings.Contains(text, "EPISODES\n") {
+		t.Errorf("search printed %q (err %v), want its podcasts and episodes groups", text, err)
 	}
 }

@@ -557,7 +557,11 @@ type searchView struct {
 	Artists   []searchHitView `json:"artists"`
 	Albums    []searchHitView `json:"albums"`
 	Tracks    []searchHitView `json:"tracks"`
+	Authors   []searchHitView `json:"authors"`
+	Narrators []searchHitView `json:"narrators"`
+	Series    []searchHitView `json:"series"`
 	Books     []searchHitView `json:"books"`
+	Podcasts  []searchHitView `json:"podcasts"`
 	Episodes  []searchHitView `json:"episodes"`
 	Truncated bool            `json:"truncated,omitempty"`
 }
@@ -565,9 +569,10 @@ type searchView struct {
 func toSearchView(r *read.SearchResult) searchView {
 	return searchView{
 		Query:   r.Query,
-		Artists: hitViews(r.Artists), Albums: hitViews(r.Albums),
-		Tracks: hitViews(r.Tracks), Books: hitViews(r.Books),
-		Episodes: hitViews(r.Episodes), Truncated: r.Truncated,
+		Artists: hitViews(r.Artists), Albums: hitViews(r.Albums), Tracks: hitViews(r.Tracks),
+		Authors: hitViews(r.Authors), Narrators: hitViews(r.Narrators), Series: hitViews(r.Series),
+		Books: hitViews(r.Books), Podcasts: hitViews(r.Podcasts), Episodes: hitViews(r.Episodes),
+		Truncated: r.Truncated,
 	}
 }
 

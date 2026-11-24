@@ -465,11 +465,18 @@ func TestSearchHitsCarryTheCoverHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("search %q: %v", q, err)
 		}
-		for _, hits := range [][]read.SearchHit{res.Artists, res.Albums, res.Tracks, res.Books, res.Episodes} {
+		for _, hits := range res.Groups() {
 			for _, h := range hits {
-				want, listed := c.want[h.ArtRef()]
+				ref, ok := h.ArtRef()
+				if !ok {
+					if h.ArtHash != "" {
+						t.Errorf("search %q: the %s hit %q holds no art and carries %q", q, h.Kind, h.Title, h.ArtHash)
+					}
+					continue
+				}
+				want, listed := c.want[ref]
 				if !listed {
-					t.Errorf("search %q: the %s hit %q is asked for under %s, which the catalog does not expect", q, h.Kind, h.Title, h.ArtRef().Type)
+					t.Errorf("search %q: the %s hit %q is asked for under %s, which the catalog does not expect", q, h.Kind, h.Title, ref.Type)
 					continue
 				}
 				if h.ArtHash != want {

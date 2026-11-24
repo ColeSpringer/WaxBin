@@ -235,6 +235,20 @@ func BenchmarkSearchAtScale(b *testing.B) {
 	}
 }
 
+// BenchmarkSearchInLibraryAtScale measures a search scoped to a library that finds a few
+// rows, which is what a host granting a reader one library runs on every keystroke. Its
+// cost must not follow the size of the library.
+func BenchmarkSearchInLibraryAtScale(b *testing.B) {
+	st, lib := benchStore(b)
+	populate(b, st, lib.ID, benchScale)
+	opt := read.SearchOptions{Limit: 20, PrimaryLibraries: []model.PID{lib.PID}}
+	for b.Loop() {
+		if _, err := st.Search(context.Background(), "track 777", opt); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkRefreshSortKeys measures the whole-catalog sort-key refold, the bulk
 // write path behind `db verify --fix`. Every key of every seeded artist is stale,
 // so it is the worst case: one update and one delta per artist, rewriting all its keys.

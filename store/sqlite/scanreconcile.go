@@ -218,8 +218,8 @@ func reconcileAlbumRekeyTx(ctx context.Context, tx *sql.Tx, priorAlbumID, newAlb
 		rgID = dest.rgID
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE album SET match_key=?, title=?, title_key=?, release_group_id=? WHERE id=?",
-		dest.key, dest.title, model.SortKey(dest.title), rgID, prior.id); err != nil {
+		"UPDATE album SET match_key=?, title=?, title_key=?, title_joined_key=?, release_group_id=? WHERE id=?",
+		dest.key, dest.title, model.SortKey(dest.title), joinedKey(dest.title), rgID, prior.id); err != nil {
 		return err
 	}
 	if err := dropFoldTx(ctx, tx, model.MergeAlbum, dest.key); err != nil {

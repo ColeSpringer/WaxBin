@@ -15,6 +15,9 @@ CREATE TABLE series (
 -- Keyset enumeration in collation order (EntityPage) walks this index, matching
 -- artist/release_group/album/genre, so all five entity kinds page the same way.
 CREATE INDEX series_sort ON series(sort_key);
+-- Search finds a series as it finds an artist (artist_joined_key), so "enders game" is
+-- Ender's Game.
+CREATE INDEX series_joined_key ON series(replace(match_key, ' ', ''));
 
 -- Audiobook subtype. Shares its PK with playable_item, mirroring track. It
 -- keeps denormalized display columns (author/narrator/series sequence)

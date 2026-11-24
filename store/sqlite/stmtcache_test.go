@@ -188,8 +188,11 @@ func TestHotReadsWriteTheirLimit(t *testing.T) {
 	capped, _, _ := searchStmt("a", 10, 25, searchScope{})
 	stmts["search candidates"] = limited{capped, "LIMIT 26"}
 	stmts["search by sort key"] = limited{itemsBySortKeyQ("", 11), "LIMIT 11"}
-	stmts["search artists"] = limited{artistByNameQ("", 1, 10), "LIMIT 10"}
-	stmts["search albums"] = limited{albumByNameQ("", 10), "LIMIT 10"}
+	stmts["search artists"] = limited{artistByName.q("''", trackCredited(""), 1, 10), "LIMIT 10"}
+	stmts["search book people"] = limited{artistByName.q("''", bookCredited(""), 1, 10), "LIMIT 10"}
+	stmts["search albums"] = limited{albumByName.q(albumSubtitle(""), albumHeld(""), 1, 10), "LIMIT 10"}
+	stmts["search series"] = limited{seriesByName.q("''", seriesHeld(""), 1, 10), "LIMIT 10"}
+	stmts["search shows"] = limited{podcastByName.q("pod.author", "", 1, 10), "LIMIT 10"}
 	stmts["search transcripts"] = limited{transcriptsStmt("", 0, 30), "LIMIT 30"}
 	for name, l := range stmts {
 		if strings.Contains(l.stmt, "LIMIT ?") || !strings.Contains(l.stmt, l.limit) {
@@ -213,13 +216,14 @@ func TestSearchRunsCachedStatements(t *testing.T) {
 		}
 	}
 	search("alpha")
-	// The match, the artists and albums by name, and the transcripts; then the art walks
-	// its hits make, which for a coverless track, its artist and its album are seven:
-	// the track's and the artist's own rows, the album's by id and by pid, its members'
-	// covers, the rows above it, and the track's genre.
+	// The match; the artists, the book people (one statement for both roles), the albums,
+	// the series and the shows by name; and the transcripts. Then the art walks its hits
+	// make, which for a coverless track, its artist and its album are seven: the track's
+	// and the artist's own rows, the album's by id and by pid, its members' covers, the
+	// rows above it, and the track's genre.
 	prepared := st.rstmts.stats().prepares
-	if prepared != 11 {
-		t.Fatalf("the search prepared %d statements through the cache, want its 11", prepared)
+	if prepared != 14 {
+		t.Fatalf("the search prepared %d statements through the cache, want its 14", prepared)
 	}
 	for _, q := range []string{"alpha", "song", "beta"} {
 		search(q)

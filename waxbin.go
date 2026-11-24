@@ -958,11 +958,13 @@ func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.
 	return l.store.BrowsePage(ctx, list, opt)
 }
 
-// Search runs a grouped, BM25-ranked search across artists, albums, tracks, books,
-// and episodes (transcript-body hits rank below metadata hits). Field weighting puts
-// title hits above artist and album hits. opt.MaxCandidates bounds how many matches
-// are ranked, and opt.Libraries, opt.PrimaryLibraries, opt.States and opt.Podcasts scope
-// the search; see read.SearchOptions for those contracts.
+// Search runs a grouped, BM25-ranked search across tracks, books and episodes
+// (transcript-body hits rank below metadata hits) and the entities they belong to:
+// artists and albums, authors, narrators and series, and podcasts, each also found by
+// its own name. Field weighting puts title hits above artist and album hits.
+// opt.MaxCandidates bounds how many matches are ranked, and opt.Libraries,
+// opt.PrimaryLibraries, opt.States and opt.Podcasts scope the search; see
+// read.SearchOptions for those contracts and read.SearchResult for the groups.
 func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
 	return l.store.Search(ctx, q, opt)
 }

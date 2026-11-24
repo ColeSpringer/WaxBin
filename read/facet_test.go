@@ -90,14 +90,18 @@ func TestArtEntityClassifiesEveryDimensionAndKind(t *testing.T) {
 }
 
 // TestSearchHitArtRefFollowsItsKind: a hit is asked for art as the kind it is, a book
-// sharing the track slot.
+// sharing the track slot and an author or a narrator the artist's, and a series for none.
 func TestSearchHitArtRefFollowsItsKind(t *testing.T) {
 	for kind, want := range map[string]model.ArtEntity{
 		"artist": model.ArtArtist, "album": model.ArtAlbum, "track": model.ArtTrack,
-		"book": model.ArtTrack, "episode": model.ArtEpisode,
+		"author": model.ArtArtist, "narrator": model.ArtArtist,
+		"book": model.ArtTrack, "podcast": model.ArtPodcast, "episode": model.ArtEpisode,
 	} {
-		if got := (SearchHit{PID: "p", Kind: kind}).ArtRef(); got != (model.EntityRef{Type: want, PID: "p"}) {
+		if got, ok := (SearchHit{PID: "p", Kind: kind}).ArtRef(); !ok || got != (model.EntityRef{Type: want, PID: "p"}) {
 			t.Errorf("a %s hit is asked for under %+v, want %s", kind, got, want)
 		}
+	}
+	if got, ok := (SearchHit{PID: "p", Kind: "series"}).ArtRef(); ok || got != (model.EntityRef{}) {
+		t.Errorf("a series hit is asked for art under %+v, want no reference", got)
 	}
 }

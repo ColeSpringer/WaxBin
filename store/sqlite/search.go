@@ -35,21 +35,39 @@ func searchFetchCap(limit int) int {
 	return min(max(limit*searchFetchPerLimit, searchFetchMin), searchFetchMax)
 }
 
-// searchDisplayCols and searchDisplayJoins render one matched item row (its own
-// fields plus the artist/album entities a track hit fans out to, by their own names).
-// They are shared by the flat statement, the candidate-capped wrap and the sort-key
-// lookup so the row shapes can never drift.
-const searchDisplayCols = `pi.pid, pi.kind, pi.title,
-		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
-		COALESCE(art.pid,''), COALESCE(art.name,''), COALESCE(al.pid,''), COALESCE(al.title,'')`
-
-const searchDisplayJoins = `
-		LEFT JOIN track t ON t.item_id = pi.id
-		LEFT JOIN book bk ON bk.item_id = pi.id
-		LEFT JOIN episode ep ON ep.item_id = pi.id
+// searchRowsQ renders the items a ranked statement keeps. ranked selects them as (rid,
+// pid, kind, title, score) rows already cut to its limit, and order restates its order
+// over those columns, so that SQLite reads the rows in the order they come and sorts only
+// an item's own credits. A row holds the item's own fields and the entities it brings to
+// the groups, by their own names: the album, series or show it sits in with that one's
+// byline (a track's album artist, a show's author), its first artist or author, a
+// track's album artist where that is someone else, and one artist it credits. So an item
+// repeats once for each credit, a track's artist credit before its other credits and each
+// role in credited order, and comes once when it has none. The joins sit outside the
+// ranking so that a match the limit drops pays for none of them, and every item statement
+// is built here so the row shapes can never drift.
+func searchRowsQ(ranked, order string) string {
+	return `SELECT r.pid, r.kind, r.title,
+		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist, pod.author, ''),
+		COALESCE(al.pid, ser.pid, pod.pid, ''), COALESCE(al.title, ser.name, pod.title, ''),
+		COALESCE(art.pid,''), COALESCE(art.name,''), COALESCE(aart.pid,''), COALESCE(aart.name,''),
+		COALESCE(ic.role,''), COALESCE(ca.pid,''), COALESCE(ca.name,''), r.score
+		FROM (` + ranked + `) r
+		LEFT JOIN track t ON t.item_id = r.rid
+		LEFT JOIN book bk ON bk.item_id = r.rid
+		LEFT JOIN episode ep ON ep.item_id = r.rid
 		LEFT JOIN podcast pod ON pod.id = ep.podcast_id
-		LEFT JOIN artist art ON art.id = t.artist_id
-		LEFT JOIN album al ON al.id = t.album_id`
+		LEFT JOIN album al ON al.id = t.album_id
+		LEFT JOIN series ser ON ser.id = bk.series_id
+		LEFT JOIN artist art ON art.id = ` + itemArtistIDExpr + `
+		LEFT JOIN artist aart ON aart.id = NULLIF(t.album_artist_id, t.artist_id)
+		LEFT JOIN item_contributor ic ON ic.item_id = r.rid
+		LEFT JOIN artist ca ON ca.id = ic.artist_id
+		ORDER BY ` + order + `, ic.role <> 'artist', ic.role, ic.position`
+}
+
+// rankedCols is what a ranked statement selects beside its score, from its pi.
+const rankedCols = `pi.id AS rid, pi.pid AS pid, pi.kind AS kind, pi.title AS title`
 
 // searchScope is what narrows a search's matched items: the libraries their files sit
 // in, the libraries their primary files sit in, their states, and for an episode its
@@ -67,12 +85,12 @@ type searchScope struct {
 // whether the join is wanted when nothing narrows at all. For libIDs=[7],
 // primaryLibIDs=[7], states=[present remote] and shows=[3] it returns:
 //
-//	` AND pi.state IN (?,?) AND pi.id IN (SELECT spf.item_id FROM file sf
-//		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN (SELECT value FROM json_each(?)))
-//		AND pi.id IN (SELECT spf.item_id FROM file sf
-//		JOIN item_file spf ON spf.file_id = sf.id AND spf.role = 'primary' WHERE sf.library_id IN (SELECT value FROM json_each(?)))
-//		AND (pi.kind <> 'episode' OR pi.id IN (SELECT se.item_id FROM episode se
-//		WHERE se.podcast_id IN (SELECT value FROM json_each(?))))`
+//	` AND pi.state IN (?,?) AND EXISTS (SELECT 1 FROM item_file spf JOIN file sf ON sf.id = spf.file_id
+//		WHERE spf.item_id = pi.id AND sf.library_id IN (SELECT value FROM json_each(?)))
+//		AND EXISTS (SELECT 1 FROM item_file spf JOIN file sf ON sf.id = spf.file_id
+//		WHERE spf.item_id = pi.id AND spf.role = 'primary' AND sf.library_id IN (SELECT value FROM json_each(?)))
+//		AND (pi.kind <> 'episode' OR EXISTS (SELECT 1 FROM episode se
+//		WHERE se.item_id = pi.id AND se.podcast_id IN (SELECT value FROM json_each(?))))`
 //
 // Every narrowing rides the pi join's ON clause. pi is INNER-joined in both rungs, so ON
 // and WHERE are equivalent here, and keeping them in one contiguous fragment is what
@@ -83,9 +101,12 @@ type searchScope struct {
 // primary form counts it in its primary file's library alone, where the item view places
 // it. One with no file at all (an undownloaded episode) drops out of either scope. Each
 // id list binds as one JSON array, so a caller's list of any length runs one statement
-// text; the membership subqueries seek file_library and the show list seeks
-// episode_podcast. A part left empty contributes nothing, except an empty non-nil show
-// list, which keeps every episode out.
+// text. A library or a show is asked of each item in turn, by a seek of the item's own
+// file edges or episode row, rather than looked up in a list of the scope's members:
+// SQLite builds such a list whole before the first row, a walk of every file in the
+// library on each statement, where a search reads far fewer items than a library holds.
+// A part left empty contributes nothing, except an empty non-nil show list, which keeps
+// every episode out.
 func searchNarrow(sc searchScope) (string, []any) {
 	if len(sc.libIDs) == 0 && len(sc.primaryLibIDs) == 0 && len(sc.states) == 0 && sc.shows == nil {
 		return "", nil
@@ -119,8 +140,8 @@ func searchNarrow(sc searchScope) (string, []any) {
 	case len(sc.shows) == 0:
 		frag += ` AND pi.kind <> 'episode'`
 	default:
-		frag += ` AND (pi.kind <> 'episode' OR pi.id IN (SELECT se.item_id FROM episode se
-		WHERE se.podcast_id IN ` + inArray + `))`
+		frag += ` AND (pi.kind <> 'episode' OR EXISTS (SELECT 1 FROM episode se
+		WHERE se.item_id = pi.id AND se.podcast_id IN ` + inArray + `))`
 		args = append(args, idArray(sc.shows))
 	}
 	return frag, args
@@ -130,8 +151,8 @@ func searchNarrow(sc searchScope) (string, []any) {
 // through every edge or, with edge naming the primary role, the primary alone. The list
 // binds as one JSON array (inArray).
 func libraryMembersFrag(edge string) string {
-	return ` AND pi.id IN (SELECT spf.item_id FROM file sf
-		JOIN item_file spf ON spf.file_id = sf.id` + edge + ` WHERE sf.library_id IN ` + inArray + `)`
+	return ` AND EXISTS (SELECT 1 FROM item_file spf JOIN file sf ON sf.id = spf.file_id
+		WHERE spf.item_id = pi.id` + edge + ` AND sf.library_id IN ` + inArray + `)`
 }
 
 // podcastIDsByPIDs resolves a show list to podcast ids in one statement, keeping a nil
@@ -187,12 +208,12 @@ func checkItemStates(states []model.ItemState, op string) error {
 }
 
 // searchStmt builds the grouped-search statement for one option set, returning
-// the statement, its bind args in clause order, and the ranked-row scan cap the
-// caller's loop enforces (one row past it sets Truncated). Its limits are written into
+// the statement, its bind args in clause order, and the ranked-item scan cap the
+// caller's loop enforces (one item past it sets Truncated). Its limits are written into
 // the text, as every statement the cache keeps writes them: SQLite plans with a bound
 // LIMIT's value, so binding one has the statement prepared again on every run.
 //
-// With no candidate cap the statement is the flat FTS query, which with an empty
+// With no candidate cap the ranking is the flat FTS query, which with an empty
 // scope too is the option-free statement TestSearchStmtZeroPathGolden pins. With
 // maxCandidates > 0 the match is wrapped: the inner query walks it in rowid-DESC
 // order and keeps the newest maxCandidates rows (+1 so pool exhaustion is
@@ -211,15 +232,16 @@ func checkItemStates(states []model.ItemState, op string) error {
 func searchStmt(match string, limit, maxCandidates int, sc searchScope) (string, []any, int) {
 	scanCap := searchScanCap(limit, maxCandidates)
 	narrow, narrowArgs := searchNarrow(sc)
+	const order = "r.score, r.pid"
 
 	if maxCandidates <= 0 {
-		stmt := `SELECT ` + searchDisplayCols + `, ` + searchBM25 + ` AS score
-		FROM search_fts
-		JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow + searchDisplayJoins + `
-		WHERE search_fts MATCH ?
-		ORDER BY score, pi.pid
-		LIMIT ` + strconv.Itoa(scanCap+1)
-		return stmt, append(narrowArgs, match), scanCap
+		ranked := `SELECT ` + rankedCols + `, ` + searchBM25 + ` AS score
+			FROM search_fts
+			JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow + `
+			WHERE search_fts MATCH ?
+			ORDER BY score, pid
+			LIMIT ` + strconv.Itoa(scanCap+1)
+		return searchRowsQ(ranked, order), append(narrowArgs, match), scanCap
 	}
 
 	// Guarded rather than joined unconditionally: with nothing to narrow, the inner
@@ -230,18 +252,18 @@ func searchStmt(match string, limit, maxCandidates int, sc searchScope) (string,
 	innerNarrow := ""
 	if narrow != "" {
 		innerNarrow = `
-			JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow
+				JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow
 	}
-	stmt := `SELECT ` + searchDisplayCols + `, c.score AS score
-		FROM (SELECT search_fts.rowid AS rid, ` + searchBM25 + ` AS score
-			FROM search_fts` + innerNarrow + `
-			WHERE search_fts MATCH ?
-			ORDER BY search_fts.rowid DESC
-			LIMIT ` + strconv.Itoa(maxCandidates+1) + `) c
-		JOIN playable_item pi ON pi.id = c.rid` + searchDisplayJoins + `
-		ORDER BY score, pi.pid
-		LIMIT ` + strconv.Itoa(scanCap+1)
-	return stmt, append(narrowArgs, match), scanCap
+	ranked := `SELECT ` + rankedCols + `, c.score AS score
+			FROM (SELECT search_fts.rowid AS rid, ` + searchBM25 + ` AS score
+				FROM search_fts` + innerNarrow + `
+				WHERE search_fts MATCH ?
+				ORDER BY search_fts.rowid DESC
+				LIMIT ` + strconv.Itoa(maxCandidates+1) + `) c
+			JOIN playable_item pi ON pi.id = c.rid
+			ORDER BY score, pid
+			LIMIT ` + strconv.Itoa(scanCap+1)
+	return searchRowsQ(ranked, order), append(narrowArgs, match), scanCap
 }
 
 // searchScanCap is how many ranked rows a search reads before it reports truncation: the
@@ -256,12 +278,13 @@ func searchScanCap(limit, maxCandidates int) int {
 
 // Search runs a grouped, BM25-ranked metadata search. It queries the metadata FTS
 // once with field weighting, then derives the groups from the ranked matches: a
-// matched track contributes itself to Tracks and its album and artist entities to
-// Albums and Artists, books and episodes form their own groups, and transcript-body
-// hits are appended to Episodes after the metadata hits. The entity groups add the
-// artists and albums whose own name is the query (searchEntitiesByName), which the
-// ranked rows can miss when better-scoring items fill the pool, and are then ordered
-// by how each name meets the query (searchTier), first-seen order breaking ties. A
+// matched track, book or episode fills its own group, with transcript-body hits
+// appended to Episodes after the metadata hits, and brings the entities it belongs to
+// into theirs, which are a track's album and artists, a book's series, authors and
+// narrators, and an episode's show. The entity groups
+// add the entities whose own name is the query (searchEntitiesByName), which the ranked
+// rows can miss when better-scoring items fill the pool, and are then ordered by how
+// each name meets the query (searchTier), first-seen order breaking ties. A
 // query of symbols alone, which has no word to match, is looked up by sort key
 // instead (searchItemsBySortKey); an empty one returns an empty result, not an error.
 // opt.MaxCandidates bounds the match pool, while opt.Libraries, opt.PrimaryLibraries,
@@ -307,6 +330,9 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	g.rankEntities()
+	if err := s.fillSeriesAuthors(ctx, res.Series, sc); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 
 	// Append transcript-body hits to the Episodes group, after the metadata hits, so
 	// a title match outranks a body match. Episodes already surfaced by metadata are
@@ -323,14 +349,16 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 }
 
 // fillSearchArt sets each hit's ArtHash, with one art walk per entity type the hits are
-// asked for art under, so the tracks and the books share theirs.
+// asked for art under, so the tracks and the books share theirs, as the artists, the
+// authors and the narrators do.
 func (s *Store) fillSearchArt(ctx context.Context, res *read.SearchResult, op string) error {
-	groups := [][]read.SearchHit{res.Artists, res.Albums, res.Tracks, res.Books, res.Episodes}
+	groups := res.Groups()
 	byType := map[model.ArtEntity][]model.PID{}
 	for _, hits := range groups {
 		for _, h := range hits {
-			typ := h.ArtRef().Type
-			byType[typ] = append(byType[typ], h.PID)
+			if ref, ok := h.ArtRef(); ok {
+				byType[ref.Type] = append(byType[ref.Type], h.PID)
+			}
 		}
 	}
 	hashes := make(map[model.ArtEntity]map[model.PID]string, len(byType))
@@ -343,7 +371,9 @@ func (s *Store) fillSearchArt(ctx context.Context, res *read.SearchResult, op st
 	}
 	for _, hits := range groups {
 		for i := range hits {
-			hits[i].ArtHash = hashes[hits[i].ArtRef().Type][hits[i].PID]
+			if ref, ok := hits[i].ArtRef(); ok {
+				hits[i].ArtHash = hashes[ref.Type][ref.PID]
+			}
 		}
 	}
 	return nil
@@ -354,62 +384,111 @@ func (s *Store) fillSearchArt(ctx context.Context, res *read.SearchResult, op st
 // spent ranked-row scan alike) rather than silently dropping matches. score is
 // tie-broken by pid so equal-score rows come back in a stable, deterministic order.
 func (s *Store) searchMatches(ctx context.Context, match string, limit, maxCandidates int, sc searchScope, g *searchGroups) error {
-	stmt, args, cap := searchStmt(match, limit, maxCandidates, sc)
+	stmt, args, scanCap := searchStmt(match, limit, maxCandidates, sc)
 	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	scanned := 0
-	for rows.Next() {
-		scanned++
-		if scanned > cap {
-			g.res.Truncated = true
-			break
-		}
-		if err := g.scanItem(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return g.readItems(rows, scanCap)
 }
 
-// searchGroups fills a result's groups from matched rows in rank order. Artists and
-// albums are gathered whole and cut to the limit only once rankEntities has ordered
-// them. best is the best score of the rows read, which an entity found by its own name
-// alone takes.
+// searchGroups fills a result's groups from the rows of an item statement, in rank order.
+// The entity groups are gathered whole and cut to the limit only once rankEntities has
+// ordered them. best is the best score of the items read, which an entity found by its
+// own name alone takes, and named remembers whether the query names each artist asked.
 type searchGroups struct {
-	res                                *read.SearchResult
-	limit                              int
-	q                                  nameKeys
-	best                               float64
-	artists, albums                    []read.SearchHit
-	albumSeen, artistSeen, episodeSeen map[model.PID]bool
+	res                *read.SearchResult
+	limit              int
+	q                  nameKeys
+	best               float64
+	artists, albums    entityHits
+	authors, narrators entityHits
+	series, podcasts   entityHits
+	episodeSeen        map[model.PID]bool
+	named              map[model.PID]bool
 }
 
 func newSearchGroups(res *read.SearchResult, limit int, query string) *searchGroups {
 	return &searchGroups{res: res, limit: limit, q: newNameKeys(query, true),
-		albumSeen: map[model.PID]bool{}, artistSeen: map[model.PID]bool{}, episodeSeen: map[model.PID]bool{}}
+		episodeSeen: map[model.PID]bool{}, named: map[model.PID]bool{},
+		artists: entityHits{kind: "artist"}, albums: entityHits{kind: "album"},
+		authors: entityHits{kind: "author"}, narrators: entityHits{kind: "narrator"},
+		series: entityHits{kind: "series"}, podcasts: entityHits{kind: "podcast"}}
 }
 
-// scanItem reads one row of searchDisplayCols plus a score and files it.
-func (g *searchGroups) scanItem(rows *sql.Rows) error {
-	var pid, kind, title, artist, albumArtist, artistPID, artistName, albumPID, albumTitle string
-	var score float64
-	if err := rows.Scan(&pid, &kind, &title, &artist, &albumArtist, &artistPID, &artistName, &albumPID, &albumTitle, &score); err != nil {
-		return err
+// entityHits is one entity group as gathered: each entity once, in first-seen order.
+type entityHits struct {
+	kind string
+	hits []read.SearchHit
+	seen map[model.PID]bool
+}
+
+func (e *entityHits) add(h read.SearchHit) {
+	if h.PID == "" || e.seen[h.PID] {
+		return
 	}
-	g.best = min(g.best, score)
-	res := g.res
-	hit := read.SearchHit{PID: model.PID(pid), Kind: kind, Title: title, Subtitle: artist, Score: score}
-	switch kind {
-	// A book has no track/artist/album entities, so it forms its own group keyed
-	// by title with its author as the subtitle, rather than the Tracks group.
-	case string(model.KindBook):
-		if len(res.Books) < g.limit {
-			res.Books = append(res.Books, hit)
+	if e.seen == nil {
+		e.seen = map[model.PID]bool{}
+	}
+	e.seen[h.PID] = true
+	h.Kind = e.kind
+	e.hits = append(e.hits, h)
+}
+
+// itemRow is one row of searchRowsQ.
+type itemRow struct {
+	pid, kind, title, subtitle, byline                  string
+	inPID, inTitle, firstPID, firstName, albumArtistPID string
+	albumArtistName, role, creditPID, creditName        string
+	score                                               float64
+}
+
+// entity is one of a row's entities as a hit, scored as its item.
+func (r *itemRow) entity(pid, title string) read.SearchHit {
+	return read.SearchHit{PID: model.PID(pid), Title: title, Score: r.score}
+}
+
+// readItems files the rows of an item statement, the item where a row begins one and the
+// credit every row holds, and stops at the first item past scanCap, which marks the
+// result truncated. A track's album artist waits for the track's last row, so that it
+// follows the credits.
+func (g *searchGroups) readItems(rows *sql.Rows, scanCap int) error {
+	items, last := 0, ""
+	var albumArtist read.SearchHit
+	for rows.Next() {
+		var r itemRow
+		if err := rows.Scan(&r.pid, &r.kind, &r.title, &r.subtitle, &r.byline, &r.inPID, &r.inTitle,
+			&r.firstPID, &r.firstName, &r.albumArtistPID, &r.albumArtistName,
+			&r.role, &r.creditPID, &r.creditName, &r.score); err != nil {
+			return err
 		}
-		return nil
+		if r.pid != last {
+			g.addNamed(albumArtist)
+			albumArtist = read.SearchHit{}
+			if items == scanCap {
+				g.res.Truncated = true
+				break
+			}
+			items, last = items+1, r.pid
+			g.addItem(&r)
+			albumArtist = r.entity(r.albumArtistPID, r.albumArtistName)
+		}
+		g.addCredit(&r)
+	}
+	g.addNamed(albumArtist)
+	return rows.Err()
+}
+
+// addItem files an item in its own group, and in theirs the album, series or show it sits
+// in and its first artist or author.
+func (g *searchGroups) addItem(r *itemRow) {
+	g.best = min(g.best, r.score)
+	res := g.res
+	hit := read.SearchHit{PID: model.PID(r.pid), Kind: r.kind, Title: r.title, Subtitle: r.subtitle, Score: r.score}
+	in := r.entity(r.inPID, r.inTitle)
+	in.Subtitle = r.byline
+	switch r.kind {
 	// An episode forms the Episodes group, keyed by title with its podcast as the
 	// subtitle. These are the title/metadata hits; transcript-body hits are appended
 	// after, so a title match always outranks a body match.
@@ -418,38 +497,105 @@ func (g *searchGroups) scanItem(rows *sql.Rows) error {
 		if len(res.Episodes) < g.limit {
 			res.Episodes = append(res.Episodes, hit)
 		}
-		return nil
-	}
-	if len(res.Tracks) < g.limit {
-		res.Tracks = append(res.Tracks, hit)
-	}
-	if albumArtist == "" {
-		albumArtist = artist
-	}
-	g.addAlbum(read.SearchHit{PID: model.PID(albumPID), Kind: "album", Title: albumTitle, Subtitle: albumArtist, Score: score})
-	g.addArtist(read.SearchHit{PID: model.PID(artistPID), Kind: "artist", Title: artistName, Score: score})
-	return nil
-}
-
-func (g *searchGroups) addAlbum(h read.SearchHit) {
-	if h.PID != "" && !g.albumSeen[h.PID] {
-		g.albumSeen[h.PID] = true
-		g.albums = append(g.albums, h)
-	}
-}
-
-func (g *searchGroups) addArtist(h read.SearchHit) {
-	if h.PID != "" && !g.artistSeen[h.PID] {
-		g.artistSeen[h.PID] = true
-		g.artists = append(g.artists, h)
+		g.podcasts.add(in)
+	// A book forms its own group, keyed by title with its author as the subtitle. Its
+	// series is subtitled once the group is cut (fillSeriesAuthors).
+	case string(model.KindBook):
+		if len(res.Books) < g.limit {
+			res.Books = append(res.Books, hit)
+		}
+		g.series.add(in)
+		g.authors.add(r.entity(r.firstPID, r.firstName))
+	default:
+		if len(res.Tracks) < g.limit {
+			res.Tracks = append(res.Tracks, hit)
+		}
+		if r.byline == "" {
+			in.Subtitle = r.subtitle
+		}
+		g.albums.add(in)
+		g.artists.add(r.entity(r.firstPID, r.firstName))
 	}
 }
 
-// rankEntities orders the gathered artists and albums by tier, keeping first-seen
-// order within one, marks the exact ones, and cuts each group to the limit.
+// addCredit files the artist a row credits its item with. The artists of a track's artist
+// credit join Artists whatever their names. Its album artist (readItems) and the artists
+// it credits in any other role, a performer's included, join only when the query names
+// them, so a title match does not list its producers. A book's authors and narrators
+// fill their groups, from the rows the author and narrator facets read, and its other
+// credits have no group.
+func (g *searchGroups) addCredit(r *itemRow) {
+	credit, role := r.entity(r.creditPID, r.creditName), model.ContributorRole(r.role)
+	switch book := r.kind == string(model.KindBook); {
+	case book && role == model.RoleAuthor:
+		g.authors.add(credit)
+	case book && role == model.RoleNarrator:
+		g.narrators.add(credit)
+	case book:
+	case role == model.RoleArtist:
+		g.artists.add(credit)
+	default:
+		g.addNamed(credit)
+	}
+}
+
+// addNamed files an artist in Artists when the query names it: the name is the query, or
+// each word of the query begins a word of the name, which is how the match itself reads
+// a word. A name that merely holds the query's letters is not named, or typing "son"
+// would list every Jason a matched track credits.
+func (g *searchGroups) addNamed(h read.SearchHit) {
+	if h.PID == "" {
+		return
+	}
+	named, ok := g.named[h.PID]
+	if !ok {
+		named = searchTier(newNameKeys(h.Title, g.q.key == ""), g.q) == 0 || wordsBegin(g.q.key, h.Title)
+		g.named[h.PID] = named
+	}
+	if named {
+		g.artists.add(h)
+	}
+}
+
+// wordsBegin reports whether each word of a query's key begins a word of name, read as
+// the index holds a name: its tokens, and each written word run together ("K.R.I.T." is
+// krit). A query word that is a run of an unspaced script is looked for anywhere inside
+// one, where the match finds it.
+func wordsBegin(queryKey, name string) bool {
+	if queryKey == "" {
+		return false
+	}
+	var forms []string
+	for word := range strings.FieldsSeq(norm.NFKC.String(name)) {
+		k := foldKana(identity.MatchKey(word))
+		forms = append(forms, strings.Fields(k)...)
+		forms = append(forms, strings.ReplaceAll(k, " ", ""))
+	}
+	for w := range strings.FieldsSeq(queryKey) {
+		inside := strings.HasPrefix
+		if runPairs(w) != nil {
+			inside = strings.Contains
+		}
+		if !slices.ContainsFunc(forms, func(f string) bool { return inside(f, w) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// rankEntities orders each gathered entity group by tier, keeping first-seen order within
+// one, marks the exact ones, and cuts the group to the limit.
 func (g *searchGroups) rankEntities() {
-	g.res.Artists = rankByTier(g.artists, g.q, g.limit)
-	g.res.Albums = rankByTier(g.albums, g.q, g.limit)
+	r := g.res
+	for _, e := range []struct {
+		into *[]read.SearchHit
+		from entityHits
+	}{
+		{&r.Artists, g.artists}, {&r.Albums, g.albums}, {&r.Authors, g.authors},
+		{&r.Narrators, g.narrators}, {&r.Series, g.series}, {&r.Podcasts, g.podcasts},
+	} {
+		*e.into = rankByTier(e.from.hits, g.q, g.limit)
+	}
 }
 
 func rankByTier(hits []read.SearchHit, q nameKeys, limit int) []read.SearchHit {
@@ -514,86 +660,95 @@ func searchTier(name, q nameKeys) int {
 // under the same narrowing. An artist named without a letter or digit has no entity of
 // its own, so a track's artist display is read for it, whole or as one name of a
 // comma-joined list, as well as its sort, which an artist sort tag can spell otherwise
-// ("Chk Chk Chk" for "!!!"). Newest first, it reads one row past its cap as the ranked
+// ("Chk Chk Chk" for "!!!"). Newest first, it reads one item past its cap as the ranked
 // search does, so a full result sets Truncated, and a smaller candidate cap is the cap.
 func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, maxCandidates int, sc searchScope, g *searchGroups) error {
 	narrow, narrowArgs := searchNarrow(sc)
-	cap := searchScanCap(limit, maxCandidates)
-	rows, err := s.rstmts.queryContext(ctx, s.rdb(), itemsBySortKeyQ(narrow, cap+1), append([]any{key}, narrowArgs...)...)
+	scanCap := searchScanCap(limit, maxCandidates)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), itemsBySortKeyQ(narrow, scanCap+1), append([]any{key}, narrowArgs...)...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	for n := 1; rows.Next(); n++ {
-		if n > cap {
-			g.res.Truncated = true
-			break
-		}
-		if err := g.scanItem(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return g.readItems(rows, scanCap)
 }
 
 // itemsBySortKeyQ is the statement searchItemsBySortKey runs, binding the key once as
-// ?1 and reading at most fetch rows. The lookups drive (CROSS JOIN keeps them
+// ?1 and reading at most fetch items. The lookups drive (CROSS JOIN keeps them
 // outermost), so a library narrowing is a residual test rather than a walk of every item
 // in the library. The display has no index, so that arm reads the track table, which
 // only a query of symbols alone pays.
 func itemsBySortKeyQ(narrow string, fetch int) string {
-	return `SELECT ` + searchDisplayCols + `, 0.0
-		FROM (SELECT id FROM playable_item WHERE title_key = ?1
-			UNION SELECT item_id FROM track WHERE artist_sort_key = ?1
-			UNION SELECT item_id FROM track WHERE instr(artist, ?1) > 0
-				AND instr(', ' || artist || ', ', ', ' || ?1 || ', ') > 0) m
-		CROSS JOIN playable_item pi ON pi.id = m.id` + narrow + searchDisplayJoins + `
-		ORDER BY pi.id DESC LIMIT ` + strconv.Itoa(fetch)
+	return searchRowsQ(`SELECT `+rankedCols+`, 0.0 AS score
+			FROM (SELECT id FROM playable_item WHERE title_key = ?1
+				UNION SELECT item_id FROM track WHERE artist_sort_key = ?1
+				UNION SELECT item_id FROM track WHERE instr(artist, ?1) > 0
+					AND instr(', ' || artist || ', ', ', ' || ?1 || ', ') > 0) m
+			CROSS JOIN playable_item pi ON pi.id = m.id`+narrow+`
+			ORDER BY rid DESC LIMIT `+strconv.Itoa(fetch), "r.rid DESC")
 }
 
-// searchEntitiesByName adds the artists and albums whose own name is the query to the
-// gathered groups, under the same narrowing: an artist by its match key with the
-// spaces dropped (artistLookupKeys), or by its name's sort key (name_key), and an album
-// by its title's (title_key; an album keeps no match key of its title). The name keys
-// are compared, not the sort keys, which a curated sort or a spelling moves. A query of symbols alone looks up albums
-// only, since such a name has no match key and never becomes an artist; an album gets
-// one when an MBID keys it. Every lookup is an equality on an indexed column.
+// searchEntitiesByName adds the entities whose own name is the query to the gathered
+// groups, under the same narrowing, each by its nameLookup. A person is looked up once
+// for each group: Artists keeps one a track credits, Authors and Narrators one a book
+// credits in that role. A query of symbols alone looks up no person, since such a name
+// has no match key and never becomes an artist, and the others by their sort keys alone.
+// Every lookup is an equality on an indexed column.
 func (s *Store) searchEntitiesByName(ctx context.Context, query string, limit int, sc searchScope, g *searchGroups) error {
 	narrow, narrowArgs := searchNarrow(sc)
-	if keys := artistLookupKeys(query); len(keys) > 0 {
-		args := append(anySlice(keys), g.q.sort)
-		artists, err := s.searchEntities(ctx, artistByNameQ(narrow, len(keys), limit),
-			append(append(args, narrowArgs...), narrowArgs...)...)
+	lookup := func(e *entityHits, q string, args ...[]any) error {
+		hits, err := s.searchEntities(ctx, q, slices.Concat(args...)...)
 		if err != nil {
 			return err
 		}
-		for _, h := range artists {
-			h.Kind, h.Score = "artist", g.best
-			g.addArtist(h)
+		for _, h := range hits {
+			h.Score = g.best
+			e.add(h)
+		}
+		return nil
+	}
+	keys, sortKey := anySlice(joinedLookupKeys(query)), []any{g.q.sort}
+	if len(keys) > 0 {
+		err := lookup(&g.artists, artistByName.q("''", trackCredited(narrow), len(keys), limit), keys, sortKey, narrowArgs, narrowArgs)
+		if err != nil {
+			return err
+		}
+		for _, p := range []struct {
+			e    *entityHits
+			role model.ContributorRole
+		}{{&g.authors, model.RoleAuthor}, {&g.narrators, model.RoleNarrator}} {
+			err := lookup(p.e, artistByName.q("''", bookCredited(narrow), len(keys), limit), keys, sortKey, narrowArgs, []any{string(p.role)})
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if g.q.sort == "" {
 		return nil
 	}
-	albums, err := s.searchEntities(ctx, albumByNameQ(narrow, limit), append([]any{g.q.sort}, narrowArgs...)...)
-	if err != nil {
+	// The album's subtitle is in the select list, so its narrowing binds first.
+	if err := lookup(&g.albums, albumByName.q(albumSubtitle(narrow), albumHeld(narrow), len(keys), limit),
+		narrowArgs, keys, sortKey, narrowArgs); err != nil {
 		return err
 	}
-	for _, h := range albums {
-		h.Kind, h.Score = "album", g.best
-		g.addAlbum(h)
+	if err := lookup(&g.series, seriesByName.q("''", seriesHeld(narrow), len(keys), limit), keys, sortKey, narrowArgs); err != nil {
+		return err
 	}
-	return nil
+	member, memberArgs, ok := showMember(sc)
+	if !ok {
+		return nil
+	}
+	return lookup(&g.podcasts, podcastByName.q("pod.author", member, len(keys), limit), keys, sortKey, memberArgs)
 }
 
-// artistLookupKeys returns the keys a stored artist's match key, its spaces dropped, is
-// looked up by: the query's own, and the query's read past compatibility forms, each in
-// both kana. A stored key keeps the name's own forms, so these are the spellings of a
-// name the tiers read as the query (newNameKeys) that a lookup can reach.
-func artistLookupKeys(query string) []string {
+// joinedLookupKeys returns the keys a stored joined key (joinedKey) is looked up by: the
+// query's own, and the query's read past compatibility forms, each in both kana. A
+// stored key keeps the name's own forms, so these are the spellings of a name the tiers
+// read as the query (newNameKeys) that a lookup can reach.
+func joinedLookupKeys(query string) []string {
 	var keys []string
 	for _, s := range []string{query, norm.NFKC.String(query)} {
-		k := strings.ReplaceAll(identity.MatchKey(s), " ", "")
+		k := joinedKey(s)
 		if k == "" {
 			continue
 		}
@@ -606,34 +761,140 @@ func artistLookupKeys(query string) []string {
 	return keys
 }
 
-// artistByNameQ looks artists up by match key with the spaces dropped (the
-// artist_joined_key index), against keys bound values, which equal match keys also
-// pass, and by name key, keeping one credited on, or the album artist of, a track the
-// narrowing keeps, at most limit of them. narrow is spliced twice, so its args bind
-// twice.
-func artistByNameQ(narrow string, keys, limit int) string {
-	return `SELECT art.pid, art.name, '' FROM artist art
-		WHERE (replace(art.match_key, ' ', '') IN ` + placeholders(keys) + ` OR art.name_key = ?)
-		AND (EXISTS (SELECT 1 FROM item_contributor ic JOIN track t ON t.item_id = ic.item_id
-			JOIN playable_item pi ON pi.id = ic.item_id` + narrow + ` WHERE ic.artist_id = art.id)
-		OR EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
-			WHERE t.album_artist_id = art.id))
-		ORDER BY art.pid LIMIT ` + strconv.Itoa(limit)
+// nameLookup is how one kind of entity is found by its own name: by its joined key
+// (joinedKey), which reads past how inner punctuation was typed, so that "jayz" is Jay-Z
+// and "whats going on" is What's Going On, and by its name's sort key, which reads past
+// a leading article and is all a name of symbols alone has. The name keys are compared,
+// not the sort keys a curated sort or a spelling moves; a series and a show take
+// neither, so their sort keys are their names'.
+type nameLookup struct{ from, pid, name, joined, key string }
+
+var (
+	artistByName  = nameLookup{"artist art", "art.pid", "art.name", "replace(art.match_key, ' ', '')", "art.name_key"}
+	albumByName   = nameLookup{"album al", "al.pid", "al.title", "al.title_joined_key", "al.title_key"}
+	seriesByName  = nameLookup{"series ser", "ser.pid", "ser.name", "replace(ser.match_key, ' ', '')", "ser.sort_key"}
+	podcastByName = nameLookup{"podcast pod", "pod.pid", "pod.title", "pod.title_joined_key", "pod.sort_key"}
+)
+
+// q is the lookup's statement: the pid, name and subtitle of at most limit entities named
+// by any of keys bound joined keys or by one sort key, bound after them, or with no keys
+// by the sort key alone, that member admits. An empty member admits all.
+func (l nameLookup) q(subtitle, member string, keys, limit int) string {
+	named := l.key + ` = ?`
+	if keys > 0 {
+		named = `(` + l.joined + ` IN ` + placeholders(keys) + ` OR ` + l.key + ` = ?)`
+	}
+	if member != "" {
+		named += `
+		AND ` + member
+	}
+	return `SELECT ` + l.pid + `, ` + l.name + `, ` + subtitle + ` FROM ` + l.from + `
+		WHERE ` + named + `
+		ORDER BY ` + l.pid + ` LIMIT ` + strconv.Itoa(limit)
 }
 
-// albumByNameQ looks albums up by title key, keeping at most limit that hold a track the
-// narrowing keeps.
-func albumByNameQ(narrow string, limit int) string {
-	return `SELECT al.pid, al.title, ` + albumSubtitle + ` FROM album al
-		WHERE al.title_key = ? AND EXISTS (SELECT 1 FROM track t JOIN playable_item pi ON pi.id = t.item_id` + narrow + `
-			WHERE t.album_id = al.id)
-		ORDER BY al.pid LIMIT ` + strconv.Itoa(limit)
+// holdsItem admits an entity when the narrowing keeps one of its items, which are the
+// rows of from that where picks, each naming its item by itemID.
+func holdsItem(from, itemID, where, narrow string) string {
+	return `EXISTS (SELECT 1 FROM ` + from + ` JOIN playable_item pi ON pi.id = ` + itemID + narrow + `
+			WHERE ` + where + `)`
+}
+
+// trackCredited admits an artist credited on, or the album artist of, a track the
+// narrowing keeps. narrow is spliced twice, so its args bind twice.
+func trackCredited(narrow string) string {
+	return `(` + holdsItem("item_contributor ic JOIN track t ON t.item_id = ic.item_id", "ic.item_id", "ic.artist_id = art.id", narrow) + `
+		OR ` + holdsItem("track t", "t.item_id", "t.album_artist_id = art.id", narrow) + `)`
+}
+
+// bookCredited admits an artist credited in one role, bound after the narrowing's args,
+// on a book the narrowing keeps, which is who that role's facet counts.
+func bookCredited(narrow string) string {
+	return holdsItem("item_contributor ic JOIN book bk ON bk.item_id = ic.item_id", "ic.item_id",
+		"ic.artist_id = art.id AND ic.role = ?", narrow)
+}
+
+func albumHeld(narrow string) string {
+	return holdsItem("track t", "t.item_id", "t.album_id = al.id", narrow)
+}
+
+func seriesHeld(narrow string) string {
+	return holdsItem("book bk", "bk.item_id", "bk.series_id = ser.id", narrow)
+}
+
+// showMember returns what admits a show to the lookup by name, with its args. A library,
+// a placement and a state are an episode's to meet, so under any of them a show must
+// hold an episode the narrowing keeps. Under none a show needs no episode, so one is
+// found before its first arrives, and a show list is asked of the show itself; ok is
+// false when that list is empty and admits no show.
+func showMember(sc searchScope) (member string, args []any, ok bool) {
+	if len(sc.libIDs)+len(sc.primaryLibIDs)+len(sc.states) > 0 {
+		narrow, narrowArgs := searchNarrow(sc)
+		return holdsItem("episode ep", "ep.item_id", "ep.podcast_id = pod.id", narrow), narrowArgs, true
+	}
+	switch {
+	case sc.shows == nil:
+		return "", nil, true
+	case len(sc.shows) == 0:
+		return "", nil, false
+	}
+	return "pod.id IN " + inArray, []any{idArray(sc.shows)}, true
+}
+
+// firstItem renders col of the first of an entity's items the narrowing keeps, the rows
+// of from that where picks in itemID order, or ” with none. Reading it under the
+// narrowing keeps a subtitle from naming an artist or an author out of an item the
+// search was told to leave out.
+func firstItem(col, from, itemID, where, narrow string) string {
+	return `COALESCE((SELECT ` + col + ` FROM ` + from + ` JOIN playable_item pi ON pi.id = ` + itemID + narrow + `
+			WHERE ` + where + ` ORDER BY ` + itemID + ` LIMIT 1), '')`
 }
 
 // albumSubtitle renders an album's artist for a hit found by the album itself rather
 // than through one of its tracks, as a track hit renders it.
-const albumSubtitle = `COALESCE((SELECT COALESCE(NULLIF(t.album_artist,''), t.artist) FROM track t
-		WHERE t.album_id = al.id ORDER BY t.item_id LIMIT 1), '')`
+func albumSubtitle(narrow string) string {
+	return firstItem("COALESCE(NULLIF(t.album_artist,''), t.artist)", "track t", "t.item_id", "t.album_id = al.id", narrow)
+}
+
+// seriesAuthorsQ reads the author of each series of a bound pid array, binding the
+// narrowing's args first.
+func seriesAuthorsQ(narrow string) string {
+	return `SELECT ser.pid, ` + firstItem("bk.author", "book bk", "bk.item_id", "bk.series_id = ser.id", narrow) + `
+		FROM series ser WHERE ser.pid IN ` + inArray
+}
+
+// fillSeriesAuthors subtitles each series hit with the author of the first of its books
+// the narrowing keeps, so a series reads the same whichever of its books found it.
+func (s *Store) fillSeriesAuthors(ctx context.Context, hits []read.SearchHit, sc searchScope) error {
+	if len(hits) == 0 {
+		return nil
+	}
+	narrow, narrowArgs := searchNarrow(sc)
+	pids := make([]model.PID, len(hits))
+	for i, h := range hits {
+		pids[i] = h.PID
+	}
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), seriesAuthorsQ(narrow), append(narrowArgs, pidArray(pids))...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	authors := make(map[model.PID]string, len(hits))
+	for rows.Next() {
+		var pid, author string
+		if err := rows.Scan(&pid, &author); err != nil {
+			return err
+		}
+		authors[model.PID(pid)] = author
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range hits {
+		hits[i].Subtitle = authors[hits[i].PID]
+	}
+	return nil
+}
 
 // searchEntities reads (pid, title, subtitle) entity hits.
 func (s *Store) searchEntities(ctx context.Context, q string, args ...any) ([]read.SearchHit, error) {

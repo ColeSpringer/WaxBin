@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -26,9 +27,20 @@ import (
 // just leaves the rest drifted for a second --fix.
 const sortKeyBatch = 2000
 
-// sortKey is a generated key column and the SQL text over its table's row that
-// model.SortKey folds into it.
-type sortKey struct{ col, text string }
+// sortKey is a generated key column and the SQL text over its table's row that fold
+// makes it from, which is model.SortKey where none is named.
+type sortKey struct {
+	col, text string
+	fold      func(string) string
+}
+
+// joinedKey is a name's match key with the spaces dropped, the key a search finds a name
+// by however its inner punctuation was typed ("jayz" is Jay-Z, "whats going on" is
+// What's Going On). An artist and a series index it off their match key; an album and a
+// show, whose match keys are not their titles', store it (title_joined_key).
+func joinedKey(name string) string {
+	return strings.ReplaceAll(identity.MatchKey(name), " ", "")
+}
 
 // sortKeyTable is a table whose generated keys a row rewrites in one statement. as is its
 // alias in the walk and on joins its row to the entity's own; the own table is aliased t
@@ -48,51 +60,56 @@ type sortKeyEntity struct {
 	tables    []sortKeyTable
 }
 
-// sortKeyEntities is every generated key. A name's own key (title_key, name_key) folds
-// the name alone, which a lookup by name compares while sort_key orders.
+// sortKeyEntities is every generated key. A name's own keys (title_key, name_key,
+// title_joined_key) fold the name alone, which a lookup by name compares while sort_key
+// orders.
 var sortKeyEntities = []sortKeyEntity{
 	{deltaType: "item", tables: []sortKeyTable{
 		{table: "playable_item", as: "t", idCol: "id", keys: []sortKey{
-			{"sort_key", "COALESCE(NULLIF(t.title_sort, ''), t.title)"},
-			{"title_key", "t.title"},
+			{col: "sort_key", text: "COALESCE(NULLIF(t.title_sort, ''), t.title)"},
+			{col: "title_key", text: "t.title"},
 		}},
 		// The keys beside the sort spellings, in the SQL form of artistSortKey and friends.
 		{table: "track", as: "tr", idCol: "item_id", on: "tr.item_id = t.id", keys: []sortKey{
-			{"artist_sort_key", "COALESCE(NULLIF(tr.artist_sort, ''), NULLIF(tr.artist, ''), tr.album_artist)"},
-			{"composer_sort_key", "COALESCE(NULLIF(tr.composer_sort, ''), tr.composer)"},
+			{col: "artist_sort_key", text: "COALESCE(NULLIF(tr.artist_sort, ''), NULLIF(tr.artist, ''), tr.album_artist)"},
+			{col: "composer_sort_key", text: "COALESCE(NULLIF(tr.composer_sort, ''), tr.composer)"},
 		}},
 		{table: "book", as: "bk", idCol: "item_id", on: "bk.item_id = t.id", keys: []sortKey{
-			{"series_seq_sort", "bk.series_seq"},
-			{"author_sort_key", "COALESCE(NULLIF(bk.author_sort, ''), bk.author)"},
+			{col: "series_seq_sort", text: "bk.series_seq"},
+			{col: "author_sort_key", text: "COALESCE(NULLIF(bk.author_sort, ''), bk.author)"},
 		}},
 	}},
 	{deltaType: "artist", curated: string(model.MergeArtist), tables: []sortKeyTable{
 		{table: "artist", as: "t", idCol: "id", keys: []sortKey{
-			{"sort_key", curatedSort("name_sort", "name")},
-			{"name_key", "t.name"},
+			{col: "sort_key", text: curatedSort("name_sort", "name")},
+			{col: "name_key", text: "t.name"},
 		}},
 		// An alias has no pid of its own, so a rewritten one is its artist's delta.
 		{table: "artist_alias", as: "al", idCol: "id", on: "al.artist_id = t.id", keys: []sortKey{
-			{"sort_key", "al.name"},
+			{col: "sort_key", text: "al.name"},
 		}},
 	}},
 	{deltaType: "genre", tables: []sortKeyTable{
-		{table: "genre", as: "t", idCol: "id", keys: []sortKey{{"sort_key", "t.name"}}},
+		{table: "genre", as: "t", idCol: "id", keys: []sortKey{{col: "sort_key", text: "t.name"}}},
 	}},
 	{deltaType: "release_group", curated: string(model.MergeReleaseGroup), tables: []sortKeyTable{
-		{table: "release_group", as: "t", idCol: "id", keys: []sortKey{{"sort_key", curatedSort("title_sort", "title")}}},
+		{table: "release_group", as: "t", idCol: "id", keys: []sortKey{{col: "sort_key", text: curatedSort("title_sort", "title")}}},
 	}},
 	{deltaType: "album", curated: string(model.MergeAlbum), tables: []sortKeyTable{
 		{table: "album", as: "t", idCol: "id", keys: []sortKey{
-			{"sort_key", curatedSort("title_sort", "title")},
-			{"title_key", "t.title"},
+			{col: "sort_key", text: curatedSort("title_sort", "title")},
+			{col: "title_key", text: "t.title"},
+			{col: "title_joined_key", text: "t.title", fold: joinedKey},
 		}},
 	}},
 	{deltaType: "series", tables: []sortKeyTable{
-		{table: "series", as: "t", idCol: "id", keys: []sortKey{{"sort_key", "t.name"}}},
+		{table: "series", as: "t", idCol: "id", keys: []sortKey{{col: "sort_key", text: "t.name"}}},
 	}},
 	{deltaType: "podcast", tables: []sortKeyTable{
-		{table: "podcast", as: "t", idCol: "id", keys: []sortKey{{"sort_key", "t.title"}}},
+		{table: "podcast", as: "t", idCol: "id", keys: []sortKey{
+			{col: "sort_key", text: "t.title"},
+			{col: "title_joined_key", text: "t.title", fold: joinedKey},
+		}},
 	}},
 }
 
@@ -255,7 +272,11 @@ func (s *Store) walkSortKeys(ctx context.Context, op string, e sortKeyEntity, fn
 			}
 			row := sortKeyRow{table: tb.table, idCol: tb.idCol, id: ids[i].Int64}
 			for j, k := range tb.keys {
-				if want, was := model.SortKey(vals[i][2*j].String), vals[i][2*j+1].String; want != was {
+				fold := model.SortKey
+				if k.fold != nil {
+					fold = k.fold
+				}
+				if want, was := fold(vals[i][2*j].String), vals[i][2*j+1].String; want != was {
 					row.cols = append(row.cols, k.col)
 					row.was = append(row.was, was)
 					row.want = append(row.want, want)

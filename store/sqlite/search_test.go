@@ -328,24 +328,32 @@ func TestSearchValidatesOptionsBeforeTheQuery(t *testing.T) {
 }
 
 // TestSearchStmtZeroPathGolden pins the option-free statement to its exact text, the
-// flat FTS query with no candidate wrap and no narrowing, so the default path changes
-// only when this golden does.
+// flat FTS ranking with no candidate wrap and no narrowing, joined to its display columns
+// and credits only once it is cut, so the default path changes only when this golden does.
 func TestSearchStmtZeroPathGolden(t *testing.T) {
 	t.Parallel()
-	want := `SELECT pi.pid, pi.kind, pi.title,
-		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
-		COALESCE(art.pid,''), COALESCE(art.name,''), COALESCE(al.pid,''), COALESCE(al.title,''), ` + searchBM25 + ` AS score
-		FROM search_fts
-		JOIN playable_item pi ON pi.id = search_fts.rowid
-		LEFT JOIN track t ON t.item_id = pi.id
-		LEFT JOIN book bk ON bk.item_id = pi.id
-		LEFT JOIN episode ep ON ep.item_id = pi.id
+	want := `SELECT r.pid, r.kind, r.title,
+		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist, pod.author, ''),
+		COALESCE(al.pid, ser.pid, pod.pid, ''), COALESCE(al.title, ser.name, pod.title, ''),
+		COALESCE(art.pid,''), COALESCE(art.name,''), COALESCE(aart.pid,''), COALESCE(aart.name,''),
+		COALESCE(ic.role,''), COALESCE(ca.pid,''), COALESCE(ca.name,''), r.score
+		FROM (SELECT pi.id AS rid, pi.pid AS pid, pi.kind AS kind, pi.title AS title, ` + searchBM25 + ` AS score
+			FROM search_fts
+			JOIN playable_item pi ON pi.id = search_fts.rowid
+			WHERE search_fts MATCH ?
+			ORDER BY score, pid
+			LIMIT 501) r
+		LEFT JOIN track t ON t.item_id = r.rid
+		LEFT JOIN book bk ON bk.item_id = r.rid
+		LEFT JOIN episode ep ON ep.item_id = r.rid
 		LEFT JOIN podcast pod ON pod.id = ep.podcast_id
-		LEFT JOIN artist art ON art.id = t.artist_id
 		LEFT JOIN album al ON al.id = t.album_id
-		WHERE search_fts MATCH ?
-		ORDER BY score, pi.pid
-		LIMIT 501`
+		LEFT JOIN series ser ON ser.id = bk.series_id
+		LEFT JOIN artist art ON art.id = COALESCE(t.artist_id, bk.author_id)
+		LEFT JOIN artist aart ON aart.id = NULLIF(t.album_artist_id, t.artist_id)
+		LEFT JOIN item_contributor ic ON ic.item_id = r.rid
+		LEFT JOIN artist ca ON ca.id = ic.artist_id
+		ORDER BY r.score, r.pid, ic.role <> 'artist', ic.role, ic.position`
 	stmt, args, cap := searchStmt("beatles*", 20, 0, searchScope{})
 	if stmt != want {
 		t.Errorf("zero-option statement drifted:\ngot:\n%s\nwant:\n%s", stmt, want)
@@ -1027,13 +1035,20 @@ func TestSearchNarrowPlan(t *testing.T) {
 		t.Errorf("pi is no longer reached by rowid seek, so the state test is not a residual:\n%s", plan)
 	}
 
-	// Both library narrowings bind their list as one JSON array and still seek
-	// file_library inside their list subqueries.
-	scoped, scopedArgs, _ := searchStmt("harbor*", 20, 0, searchScope{libIDs: []int64{lib.ID}, primaryLibIDs: []int64{lib.ID}})
+	// Both library narrowings and the show list ask each item in turn, by a seek of its
+	// file edges or its episode row, and build no list of the scope's members first.
+	scoped, scopedArgs, _ := searchStmt("harbor*", 20, 0,
+		searchScope{libIDs: []int64{lib.ID}, primaryLibIDs: []int64{lib.ID}, shows: []int64{1}})
 	splan := explainPlan(t, st, scoped, scopedArgs...)
-	t.Logf("library scoped plan:\n%s", splan)
-	if strings.Count(splan, "file_library") < 2 || !strings.Contains(splan, "SEARCH pi USING INTEGER PRIMARY KEY") {
-		t.Errorf("a library narrowing lost its file_library seek or the rowid seek on pi:\n%s", splan)
+	t.Logf("scoped plan:\n%s", splan)
+	if strings.Count(splan, "SEARCH spf USING") < 2 || strings.Count(splan, "SEARCH sf USING INTEGER PRIMARY KEY") < 2 ||
+		!strings.Contains(splan, "SEARCH se USING INTEGER PRIMARY KEY") || !strings.Contains(splan, "SEARCH pi USING INTEGER PRIMARY KEY") {
+		t.Errorf("a narrowing lost the seek of its item's own rows, or the rowid seek on pi:\n%s", splan)
+	}
+	for _, list := range []string{"file_library", "episode_podcast", "item_file_file"} {
+		if strings.Contains(splan, list) {
+			t.Errorf("a narrowing walks its scope's members (%s) rather than asking each item:\n%s", list, splan)
+		}
 	}
 
 	capped, cappedArgs, _ := searchStmt("harbor*", 20, 50, searchScope{states: []model.ItemState{model.StatePresent},
@@ -1063,17 +1078,23 @@ func TestSearchNarrowPlan(t *testing.T) {
 
 // TestSearchByNamePlans pins that the direct name lookups seek their indexes rather than
 // scan their tables on every search, the space-dropped artist key included
-// (artist_joined_key) and the name keys, with a narrowing as with none, and that the
-// sort-key item lookup a query of symbols alone runs seeks its keys and reads only the
-// track table whole, for the artist display.
+// (artist_joined_key) and the name keys, with a narrowing as with none, that each then
+// walks the named entity's own items rather than the scope's, and that the sort-key item
+// lookup a query of symbols alone runs seeks its keys and reads only the track table
+// whole, for the artist display.
 func TestSearchByNamePlans(t *testing.T) {
 	t.Parallel()
 	st, _ := entityFixture(t)
 	for _, states := range [][]model.ItemState{nil, {model.StatePresent}} {
 		narrow, args := searchNarrow(searchScope{libIDs: []int64{1}, primaryLibIDs: []int64{1}, states: states, shows: []int64{2}})
-		artists := strings.Join(explainPlanLines(t, st, artistByNameQ(narrow, 2, 5),
-			append(append([]any{"a", "b", "a"}, args...), args...)...), "\n")
-		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_name_key"} {
+		plan := func(q string, args ...[]any) string {
+			t.Helper()
+			return strings.Join(explainPlanLines(t, st, q, slices.Concat(args...)...), "\n")
+		}
+		named := []any{"a", "b", "a"}
+		artists := plan(artistByName.q("''", trackCredited(narrow), 2, 5), named, args, args)
+		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_name_key",
+			"SEARCH ic USING INDEX item_contributor_artist", "SEARCH t USING COVERING INDEX track_album_artist_id (album_artist_id=?)"} {
 			if !strings.Contains(artists, want) {
 				t.Errorf("artist lookup plan lacks %q:\n%s", want, artists)
 			}
@@ -1081,9 +1102,21 @@ func TestSearchByNamePlans(t *testing.T) {
 		if strings.Contains(artists, "SCAN art") {
 			t.Errorf("artist lookup scans the table:\n%s", artists)
 		}
-		albums := strings.Join(explainPlanLines(t, st, albumByNameQ(narrow, 5), append([]any{"a"}, args...)...), "\n")
-		if !strings.Contains(albums, "SEARCH al USING INDEX album_title_key") {
-			t.Errorf("album lookup does not seek album_title_key:\n%s", albums)
+		// The album's subtitle reads its first kept track in the index's own order, so
+		// the one sort is the statement's.
+		albums := plan(albumByName.q(albumSubtitle(narrow), albumHeld(narrow), 2, 5), args, named, args)
+		for _, want := range []string{"MULTI-INDEX OR", "album_title_joined_key", "album_title_key",
+			"SEARCH t USING COVERING INDEX track_album_id (album_id=?)", "SEARCH t USING INDEX track_album_id (album_id=?)"} {
+			if !strings.Contains(albums, want) {
+				t.Errorf("album lookup plan lacks %q:\n%s", want, albums)
+			}
+		}
+		if n := strings.Count(albums, "TEMP B-TREE"); n != 1 {
+			t.Errorf("album lookup sorts %d times, want once:\n%s", n, albums)
+		}
+		bySort := plan(albumByName.q(albumSubtitle(narrow), albumHeld(narrow), 0, 5), args, named[:1], args)
+		if !strings.Contains(bySort, "SEARCH al USING INDEX album_title_key") {
+			t.Errorf("album lookup by sort key alone does not seek album_title_key:\n%s", bySort)
 		}
 		items := strings.Join(explainPlanLines(t, st, itemsBySortKeyQ(narrow, 5), append([]any{"a"}, args...)...), "\n")
 		for _, want := range []string{"item_title_key", "track_artist", "SCAN track", "SCAN m", "SEARCH pi USING INTEGER PRIMARY KEY"} {

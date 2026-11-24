@@ -87,6 +87,7 @@ CREATE TABLE album (
   title_sort       TEXT    NOT NULL DEFAULT '',  -- derived from the album sort spellings its members state, '' when none
   sort_key         TEXT    NOT NULL,
   title_key        TEXT    NOT NULL DEFAULT '',  -- the title alone folded (model.SortKey), what a lookup by title compares
+  title_joined_key TEXT    NOT NULL DEFAULT '',  -- the title's match key with the spaces dropped, as artist_joined_key reads a name
   year             INTEGER,
   disc_total       INTEGER,
   mbid             TEXT,
@@ -100,6 +101,7 @@ CREATE TABLE album (
 CREATE INDEX album_rg   ON album(release_group_id);
 CREATE INDEX album_sort ON album(sort_key);
 CREATE INDEX album_title_key ON album(title_key);
+CREATE INDEX album_title_joined_key ON album(title_joined_key);
 -- See release_group_mbid: same role, same reason for staying non-unique and for the
 -- predicate stopping at IS NOT NULL.
 CREATE INDEX album_mbid ON album(mbid) WHERE mbid IS NOT NULL;

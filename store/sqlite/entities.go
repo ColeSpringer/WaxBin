@@ -542,9 +542,10 @@ func newAlbumTx(ctx context.Context, tx *sql.Tx, log logger, key string, release
 	}
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		`INSERT INTO album(pid, release_group_id, title, sort_key, title_key, year, disc_total, mbid,
-			barcode, label, catalog_number, media, country, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), model.SortKey(tr.Album), nullInt(tr.Year),
+		`INSERT INTO album(pid, release_group_id, title, sort_key, title_key, title_joined_key, year, disc_total, mbid,
+			barcode, label, catalog_number, media, country, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), model.SortKey(tr.Album),
+		joinedKey(tr.Album), nullInt(tr.Year),
 		nullInt(tr.DiscTotal), nullStr(normMBID(tr.MBReleaseID)),
 		nullStr(strings.TrimSpace(tr.Barcode)), nullStr(strings.TrimSpace(tr.Label)),
 		nullStr(strings.TrimSpace(tr.CatalogNumber)), nullStr(strings.TrimSpace(tr.Media)),

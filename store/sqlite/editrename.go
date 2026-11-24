@@ -1263,8 +1263,8 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 		// consults identifiers and the RG's mbid, never the album title or year, so a
 		// rename is not new evidence at that level.
 		if titleEdited && newTitle != curTitle {
-			if _, err := tx.ExecContext(ctx, "UPDATE album SET title=?, title_key=? WHERE id=?", newTitle,
-				model.SortKey(newTitle), albumID); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE album SET title=?, title_key=?, title_joined_key=? WHERE id=?", newTitle,
+				model.SortKey(newTitle), joinedKey(newTitle), albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, albumID); err != nil {
@@ -1314,8 +1314,8 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 				}
 			}
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE album SET match_key=?, title=?, title_key=? WHERE id=?",
-				newAlbumKey, title, model.SortKey(title), albumID); err != nil {
+				"UPDATE album SET match_key=?, title=?, title_key=?, title_joined_key=? WHERE id=?",
+				newAlbumKey, title, model.SortKey(title), joinedKey(title), albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := renameFoldsTx(ctx, tx, model.MergeAlbum, curKey, newAlbumKey, model.PID(curPID), fold, left); err != nil {

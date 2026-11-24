@@ -13,6 +13,7 @@ CREATE TABLE podcast (
   source_type     TEXT    NOT NULL DEFAULT 'rss', -- rss|youtube|manual
   title           TEXT    NOT NULL,
   sort_key        TEXT    NOT NULL,
+  title_joined_key TEXT   NOT NULL DEFAULT '',     -- the title's match key with the spaces dropped, as artist_joined_key reads a name
   author          TEXT    NOT NULL DEFAULT '',
   description     TEXT    NOT NULL DEFAULT '',
   link            TEXT    NOT NULL DEFAULT '',     -- show website
@@ -37,6 +38,7 @@ CREATE TABLE podcast (
   updated_at      INTEGER NOT NULL
 );
 CREATE INDEX podcast_sort ON podcast(sort_key);
+CREATE INDEX podcast_title_joined_key ON podcast(title_joined_key);
 
 -- Podcast episode subtype. Shares its PK with playable_item (kind='episode'),
 -- mirroring track/book. Episodes are cataloged from the feed with

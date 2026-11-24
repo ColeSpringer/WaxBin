@@ -67,18 +67,28 @@ type SearchOptions struct {
 
 // SearchHit is one ranked search result: an entity reference plus its display
 // fields and BM25 score. Score is the SQLite bm25 value, where a lower (more
-// negative) score is a better match; an artist or album hit carries the score of the
-// best item row that brought it in, or, found by its own name alone, the best score the
-// search read. A query of symbols alone has no bm25, so its hits score 0.
+// negative) score is a better match; a hit in an entity group (an artist, an album, an
+// author, a narrator, a series or a podcast) carries the score of the best item row that
+// brought it in, or, found by its own name alone, the best score the search read. A
+// query of symbols alone has no bm25, so its hits score 0.
 type SearchHit struct {
-	PID      model.PID
-	Kind     string  // artist|album|track|book|episode
-	Title    string  // primary display (track/album/book title, or the artist's or album's own name)
-	Subtitle string  // secondary display (artist for a track/album, author for a book; empty for an artist)
+	PID model.PID
+	// Kind is the group the hit is in: artist|album|track|author|narrator|series|book|
+	// podcast|episode. An author or a narrator is an artist entity under the role it was
+	// found in, so one person can be a hit in Artists, Authors and Narrators at once,
+	// with the same PID in each.
+	Kind string
+	// Title is the primary display: an item's title, or an entity's own name.
+	Title string
+	// Subtitle is the secondary display: the artist for a track or an album, the author
+	// for a book, the show for an episode and the show's own author for a podcast. A
+	// series takes the author of the first of its books the search's narrowing keeps,
+	// whichever book found it. Empty for an artist, an author and a narrator.
+	Subtitle string
 	Score    float64 // bm25; lower is a better match
-	// Exact marks an artist or album whose own name is the query: the same match key,
-	// the same key once spaces are dropped ("jayz" is Jay-Z), or for a query of
-	// symbols alone the same sort key.
+	// Exact marks an entity hit whose own name is the query: the same match key, the
+	// same key once spaces are dropped ("jayz" is Jay-Z), or for a query of symbols
+	// alone the same sort key.
 	Exact bool
 	// ArtHash is the content hash of the front cover the hit resolves to, read under
 	// ArtRef as EntityInfo.ArtHash is read for a card: the cover's version, for its URL.
@@ -86,19 +96,24 @@ type SearchHit struct {
 	ArtHash string
 }
 
-// ArtRef is the reference the hit's cover is asked for under, by its Kind: an artist or
-// an album as itself, an episode in the episode slot, a track or a book in the track
-// slot. ResolveArt takes it.
-func (h SearchHit) ArtRef() model.EntityRef {
+// ArtRef is the reference the hit's cover is asked for under, by its Kind: an artist, an
+// author or a narrator as the artist it is, an album and a podcast as themselves, an
+// episode in the episode slot, a track or a book in the track slot. ResolveArt takes it.
+// A series holds no art and reports false.
+func (h SearchHit) ArtRef() (model.EntityRef, bool) {
 	switch h.Kind {
-	case "artist":
-		return model.EntityRef{Type: model.ArtArtist, PID: h.PID}
+	case "artist", "author", "narrator":
+		return model.EntityRef{Type: model.ArtArtist, PID: h.PID}, true
 	case "album":
-		return model.EntityRef{Type: model.ArtAlbum, PID: h.PID}
+		return model.EntityRef{Type: model.ArtAlbum, PID: h.PID}, true
+	case "podcast":
+		return model.EntityRef{Type: model.ArtPodcast, PID: h.PID}, true
 	case "episode":
-		return model.EntityRef{Type: model.ArtEpisode, PID: h.PID}
+		return model.EntityRef{Type: model.ArtEpisode, PID: h.PID}, true
+	case "series":
+		return model.EntityRef{}, false
 	}
-	return model.EntityRef{Type: model.ArtTrack, PID: h.PID}
+	return model.EntityRef{Type: model.ArtTrack, PID: h.PID}, true
 }
 
 // SearchResult is the grouped answer for one query string, and each group's order is
@@ -106,18 +121,38 @@ func (h SearchHit) ArtRef() model.EntityRef {
 // whose field weighting makes a title hit outrank an artist or album hit; episodes
 // whose transcript matches follow the episodes whose metadata does. A query of symbols
 // alone ("$", "!!!") has no words to rank, so its items, found by title or artist, come
-// newest first. Artists and albums are ranked on their own names first (exact, then
-// the query beginning a word of the name, then every query word inside it, then the
-// rest), and within that by the best item row that brought them in, so a track titled
-// after an artist cannot put its own performer ahead of that artist. Scores are
-// therefore not comparable across an entity group's tiers.
+// newest first.
+//
+// The other six groups are the entities the matched items belong to. A matched track
+// brings its album and the artists its artist credit names. Its album artist and the
+// artists it credits in any other role, a performer or a producer say, come with it only
+// when the query names them, each of its words beginning a word of the name, so a title
+// match does not list its producers. A matched book brings its series and every author
+// and narrator it credits, and a matched episode its show (an episode found by transcript
+// alone brings none). Each group also holds the entities whose own name is the query,
+// typed with or without the name's inner punctuation, whichever items the ranking read,
+// as long as the search's narrowing keeps one of their items. A show needs no episode
+// for that while nothing narrows by library or state, so it is found before its first
+// one arrives. An Authors or Narrators hit is a person the author or narrator facet
+// buckets, under the pid author_pid or narrator_pid matches, and an Artists hit is
+// anyone a track credits.
+//
+// An entity group is ranked on its own names first (exact, then the query beginning a
+// word of the name, then every query word inside it, then the rest), and within that by
+// the best item row that brought each entity in, so a track titled after an artist
+// cannot put its own performer ahead of that artist. Scores are therefore not comparable
+// across an entity group's tiers.
 type SearchResult struct {
-	Query    string
-	Artists  []SearchHit
-	Albums   []SearchHit
-	Tracks   []SearchHit
-	Books    []SearchHit
-	Episodes []SearchHit
+	Query     string
+	Artists   []SearchHit
+	Albums    []SearchHit
+	Tracks    []SearchHit
+	Authors   []SearchHit
+	Narrators []SearchHit
+	Series    []SearchHit
+	Books     []SearchHit
+	Podcasts  []SearchHit
+	Episodes  []SearchHit
 	// Truncated is set when the metadata search did not rank every match: it hit
 	// its internal ranked-row scan cap, or it exhausted a
 	// SearchOptions.MaxCandidates candidate pool. Either way the groups may omit
@@ -134,6 +169,15 @@ type SearchResult struct {
 
 // Empty reports whether the search produced no hits in any group.
 func (r *SearchResult) Empty() bool {
-	return len(r.Artists) == 0 && len(r.Albums) == 0 && len(r.Tracks) == 0 &&
-		len(r.Books) == 0 && len(r.Episodes) == 0
+	for _, hits := range r.Groups() {
+		if len(hits) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Groups returns every group of the result, in the order the fields are declared.
+func (r *SearchResult) Groups() [][]SearchHit {
+	return [][]SearchHit{r.Artists, r.Albums, r.Tracks, r.Authors, r.Narrators, r.Series, r.Books, r.Podcasts, r.Episodes}
 }

@@ -21,9 +21,11 @@ func newSearchCmd(g *globals) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
-		Short: "Grouped, BM25-ranked search across artists, albums, tracks, books, and episodes",
+		Short: "Grouped, BM25-ranked search across tracks, books, episodes and the entities they belong to",
 		Long: "Searches catalog metadata (and podcast transcripts) and returns grouped, " +
-			"relevance-ranked results (artists, albums, tracks, books, episodes). Field " +
+			"relevance-ranked results: tracks, books and episodes, and the entities the matches " +
+			"belong to (artists and albums, authors, narrators and series, podcasts), each also " +
+			"listed when its own name is the query. Field " +
 			"weighting makes a title match outrank an artist/album match, which outranks a " +
 			"transcript-body match. Multiple words narrow the result (each is prefix-matched and all must match). " +
 			"A word matches with or without its inner punctuation (\"krit\" finds Big K.R.I.T., " +
@@ -72,7 +74,11 @@ func newSearchCmd(g *globals) *cobra.Command {
 			printHits(cmd, "ARTISTS", res.Artists)
 			printHits(cmd, "ALBUMS", res.Albums)
 			printHits(cmd, "TRACKS", res.Tracks)
+			printHits(cmd, "AUTHORS", res.Authors)
+			printHits(cmd, "NARRATORS", res.Narrators)
+			printHits(cmd, "SERIES", res.Series)
 			printHits(cmd, "BOOKS", res.Books)
+			printHits(cmd, "PODCASTS", res.Podcasts)
 			printHits(cmd, "EPISODES", res.Episodes)
 			if res.Truncated {
 				fmt.Fprintln(out(cmd), "(truncated)")

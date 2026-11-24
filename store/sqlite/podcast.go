@@ -469,11 +469,11 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 			// The fetch time never steps back, so two syncs landing out of order keep the
 			// later one.
 			if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
-				identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, language=?,
+				identity_key=?, feed_url=?, title=?, sort_key=?, title_joined_key=?, author=?, description=?, link=?, language=?,
 				category=?, explicit=?, funding_url=?, funding_message=?, medium=?, image_url=?, guid=?,
 				etag=?, last_modified=?, source_type=?,
 				last_fetched_at=MAX(COALESCE(last_fetched_at, 0), ?), updated_at=? WHERE id=?`,
-				key, feedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
+				key, feedURL, f.Title, model.SortKey(f.Title), joinedKey(f.Title), f.Author, f.Description, f.Link, f.Language,
 				f.Category, boolInt(f.Explicit), f.FundingURL, f.FundingMessage, f.Medium, f.ImageURL, f.GUID,
 				in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, id); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -492,9 +492,9 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 				metaChanged = metaChanged || old.sourceType != string(in.SourceType)
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
-				identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, image_url=?,
+				identity_key=?, feed_url=?, title=?, sort_key=?, title_joined_key=?, author=?, description=?, link=?, image_url=?,
 				source_type=COALESCE(?, source_type), updated_at=? WHERE id=?`,
-				key, feedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link,
+				key, feedURL, f.Title, model.SortKey(f.Title), joinedKey(f.Title), f.Author, f.Description, f.Link,
 				f.ImageURL, sourceType, now, id); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -508,11 +508,11 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 	}
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx, `INSERT INTO podcast
-		(pid, feed_url, identity_key, title, sort_key, author, description, link, language,
+		(pid, feed_url, identity_key, title, sort_key, title_joined_key, author, description, link, language,
 		 category, explicit, funding_url, funding_message, medium, image_url, guid,
 		 etag, last_modified, source_type, last_fetched_at, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(newPID), in.FeedURL, in.IdentityKey, f.Title, model.SortKey(f.Title), f.Author,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(newPID), in.FeedURL, in.IdentityKey, f.Title, model.SortKey(f.Title), joinedKey(f.Title), f.Author,
 		f.Description, f.Link, f.Language, f.Category, boolInt(f.Explicit),
 		f.FundingURL, f.FundingMessage, f.Medium, f.ImageURL, f.GUID,
 		in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, now)
