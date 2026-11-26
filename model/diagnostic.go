@@ -114,9 +114,10 @@ const (
 )
 
 // The DiagTagWriteOwed keys other than an item field or a credit: the item's front cover,
-// its acquisition, an album's front cover, and the two MusicBrainz release ids a detach or
-// an mbid clear takes off the files. An entity value written to member files is keyed
-// "<entity>.<field>" ("album.label", "artist.sort").
+// its acquisition, an album's front cover, and the two MusicBrainz release ids, which a
+// detach or an mbid clear takes off the files and a user's set puts on them, owed as well
+// to a file that joins the album later without them. An entity value written to member
+// files is keyed "<entity>.<field>" ("album.label", "artist.sort").
 const (
 	OwedArt              = "art"
 	OwedAcquisition      = "acquisition"

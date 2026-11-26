@@ -267,7 +267,7 @@ func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *
 			}
 			out.Result.TagsWritten, out.Result.TagsFailed = c.written, c.failed
 			out.Result.TagsUnrepresented, out.Result.TagsSkipped = c.unrepresented, c.skipped
-			out.Result.TagsReadOnly = c.readOnly
+			out.Result.TagsReadOnly, out.Result.IDsHeld = c.readOnly, c.idsHeld
 		}
 		return nil
 	}

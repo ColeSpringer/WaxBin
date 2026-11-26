@@ -13,7 +13,7 @@ func newImportCmd(g *globals) *cobra.Command {
 	var (
 		as, sourceType, sourceURL, sourceID, provider string
 		profile, dup, showPID, showTitle, epTitle     string
-		apply, asCopy, noPin                          bool
+		apply, asCopy, noPin, placeholder             bool
 	)
 	cmd := &cobra.Command{
 		Use:   "import <file>",
@@ -45,7 +45,7 @@ func newImportCmd(g *globals) *cobra.Command {
 				no := false
 				meta.Pinned = &no
 			}
-			res, err := lib.ImportAcquired(ctx(cmd), waxbin.AcquiredFile{Path: args[0]}, kind, meta)
+			res, err := lib.ImportAcquired(ctx(cmd), waxbin.AcquiredFile{Path: args[0], PlaceholderCover: placeholder}, kind, meta)
 			if err != nil {
 				return err
 			}
@@ -92,6 +92,8 @@ func newImportCmd(g *globals) *cobra.Command {
 	f.StringVar(&showTitle, "show-title", "", "manual show title for a new-show episode")
 	f.StringVar(&epTitle, "title", "", "episode title (default the file base name)")
 	f.BoolVar(&noPin, "no-pin", false, "do not pin an acquired episode (retention may reclaim it)")
+	f.BoolVar(&placeholder, "placeholder-cover", false,
+		"the picture in the file's tags stands in for a cover, as a video thumbnail does (track/book; see `art placeholder`)")
 	_ = cmd.MarkFlagRequired("as")
 	return cmd
 }

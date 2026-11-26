@@ -420,10 +420,10 @@ func boundArrival(img *model.ArtImage) examinedArt {
 }
 
 // attachEntityArtTxChanged dedups a front-cover image into the content-addressed art
-// store and maps it to one entity (entity_type, entity_id). It backs every cover
-// ingest: a track/book item ('track'), a podcast feed ('podcast'), an episode
-// ('episode'), and, from enrichment, a release group and a matched album's own
-// pressing.
+// store and maps it to one entity (entity_type, entity_id). Its writers are the ones
+// whose picture comes from away: a podcast feed ('podcast'), an episode ('episode'),
+// and, from enrichment, an artist, a release group and a matched album's own pressing.
+// A track's or a book's cover is the one its files state (settleFrontTx).
 //
 // The album slot needs care: album art is otherwise derived on read from the current
 // track maps, which keeps a re-cover or delete from leaving a stale cover behind, and a
@@ -431,7 +431,10 @@ func boundArrival(img *model.ArtImage) examinedArt {
 // writer that knows WHICH edition the album is should use it, today the release match.
 //
 // The write is idempotent: an entity already mapping this cover does nothing (reporting
-// false), so it can run on every scan/sync without churn. A nil or empty image is a
+// false), so it can run on every scan/sync without churn. A front holding the same bytes
+// from the arriving picture's origin takes the new attribution in place (a feed that
+// rotated its image URL), and one from another origin keeps its own, so a user's cover
+// that happens to match what a provider serves stays theirs. A nil or empty image is a
 // no-op, which is the "no cover found" signal every automatic producer uses; an image
 // carrying bytes is always stored, with anything it left undescribed filled from those
 // bytes. It touches the front role alone, so a re-sync cannot clobber a user's
@@ -446,18 +449,16 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 	if err := checkArtImage(pic.img, entityType, string(model.ArtRoleFront)); err != nil {
 		return false, err
 	}
-	var curHash sql.NullString
+	var curHash, curSource sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		"SELECT source_hash FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front'",
-		entityType, entityID).Scan(&curHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		"SELECT source_hash, source FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front'",
+		entityType, entityID).Scan(&curHash, &curSource); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	if curHash.Valid && curHash.String == pic.img.Hash {
-		// The same picture, possibly from a new origin: a feed that rotated its image
-		// URL, or a cover that was a sidecar and is now embedded in the tags. Refresh
-		// the attribution in place rather than leaving a dead URL on the row, and still
-		// report no change, since the image the entity shows did not move. The UPDATE
-		// is conditional, so a genuine no-op rescan writes nothing at all.
+		if curSource.String != string(pic.img.Source) {
+			return false, nil
+		}
 		return false, refreshArtProvenanceTx(ctx, tx, entityType, entityID, string(model.ArtRoleFront), pic.img)
 	}
 	// Re-point this entity's front cover through the shared slot writer; an entity
@@ -605,8 +606,8 @@ func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, pic examined
 }
 
 // albumFrontOpenTx reports whether an enrichment front may land on the album: it
-// resolves no front at all, neither a row of its own nor a member track's cover through
-// the derived rung, and its art lock does not stand.
+// resolves no real front, neither a row of its own nor a member track's cover that is not
+// a placeholder (albumResolvesFrontArt), and its art lock does not stand.
 func albumFrontOpenTx(ctx context.Context, tx *sql.Tx, albumID int64) (bool, error) {
 	var resolves int
 	if err := tx.QueryRowContext(ctx,
@@ -711,9 +712,10 @@ func clearEnrichmentArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtE
 // rather than rounded, since a request that large is bespoke rather than a layout size.
 // The blob names the rung in Box, and a caller scales what it gets to its own layout.
 // Generated images are cached and never upscaled. A source that cannot be decoded at all
-// is returned as stored, whatever its format. The blob carries the answering Level and,
-// for an album answered from a member track's cover, Derived. CodeNotFound means no
-// consulted level has art in that role.
+// is returned as stored, whatever its format. The blob carries the answering Level, for
+// an album answered from a member track's cover Derived and the member's pid, and whether
+// the picture stands in for a cover. CodeNotFound means no consulted level has art in
+// that role.
 func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
 	// The blob is built from the metadata-only read's own answer rather than from a
@@ -733,8 +735,8 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 		}
 		return &model.ArtBlob{
 			Bytes: data, Format: prov.Format, Width: prov.Width, Height: prov.Height,
-			SourceHash: prov.SourceHash, Box: box, Level: prov.Level, Derived: prov.Derived,
-			Attribution: prov.Attribution, UpdatedAt: prov.UpdatedAt,
+			SourceHash: prov.SourceHash, Box: box, Level: prov.Level, Derived: prov.Derived, MemberPID: prov.MemberPID,
+			Placeholder: prov.Placeholder, Attribution: prov.Attribution, UpdatedAt: prov.UpdatedAt,
 		}, nil
 	}
 
@@ -783,7 +785,7 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 	// separates a thumbnail from the stored source ArtProvenance describes. Box is stamped
 	// here as well, since the cached blob is keyed by the rung rather than carrying it.
 	thumb.Box = box
-	thumb.Level, thumb.Derived = prov.Level, prov.Derived
+	thumb.Level, thumb.Derived, thumb.MemberPID, thumb.Placeholder = prov.Level, prov.Derived, prov.MemberPID, prov.Placeholder
 	thumb.Attribution, thumb.UpdatedAt = prov.Attribution, prov.UpdatedAt
 	return thumb, nil
 }
@@ -815,8 +817,17 @@ func (s *Store) artProvenance(ctx context.Context, ref model.EntityRef, role mod
 	if err != nil {
 		return nil, err
 	}
+	// The member is named here rather than in the walk, which a batch read runs for
+	// hashes alone. One folded away since the walk leaves the answer unnamed.
+	var member model.PID
+	if hit.derived {
+		err := s.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", hit.member).Scan(&member)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
 	return &model.ArtProvenance{
-		Role: role, Level: hit.level, Derived: hit.derived, SourceHash: hit.hash,
+		Role: role, Level: hit.level, Derived: hit.derived, MemberPID: member, Placeholder: hit.placeholder, SourceHash: hit.hash,
 		Format: format, Width: w, Height: h, Size: size,
 		Attribution: model.Attribution{Source: hit.source, Provider: hit.provider, SourceURL: hit.sourceURL},
 		UpdatedAt:   hit.updatedAt,
@@ -890,6 +901,7 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	}
 	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT m.role, s.format, s.width, s.height, s.hash,
+		        m.entity_type = 'track' AND m.role = 'front' AND COALESCE(s.placeholder, 0) = 1,
 		        m.source, m.provider, m.source_url, m.updated_at
 		 FROM art_map m JOIN art_source s ON s.hash = m.source_hash
 		 WHERE m.entity_type = ? AND m.entity_id = ? ORDER BY m.role`,
@@ -902,7 +914,7 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	for rows.Next() {
 		var info model.ArtRoleInfo
 		var role, source string
-		if err := rows.Scan(&role, &info.Format, &info.Width, &info.Height, &info.SourceHash,
+		if err := rows.Scan(&role, &info.Format, &info.Width, &info.Height, &info.SourceHash, &info.Placeholder,
 			&source, &info.Provider, &info.SourceURL, &info.UpdatedAt); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -1171,7 +1183,8 @@ func deleteEntityArtLockTx(ctx context.Context, tx *sql.Tx, entityType string, e
 
 // GCArt reclaims orphaned art: map rows whose entity is gone, source images no map
 // references and no file states as its cover (file.front_hash, which settleFrontTx maps
-// from), and the thumbnails of every source the catalog no longer holds.
+// from) or passed over as a placeholder (file.front_stand_in), and the thumbnails of
+// every source the catalog no longer holds.
 // It returns the number of source images and thumbnails removed. It is the repair for
 // the orphan counts VerifyDerived reports.
 func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) {

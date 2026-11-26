@@ -370,9 +370,16 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		if err := album.announceFrontsTx(ctx, tx); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if !pic.present() && lockField == "art" {
-			if err := memberFrontClearedTx(ctx, tx, itemID); err != nil {
+		if lockField == "art" {
+			// A placeholder set by hand leaves the album the vacancy a clear does.
+			standIn, err := placeholderPicTx(ctx, tx, pic)
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if !pic.present() || standIn {
+				if err := memberFrontClearedTx(ctx, tx, itemID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		if lock != model.LockUnchanged {
@@ -392,7 +399,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 }
 
 // memberFrontClearedTx re-opens an album's front half after one of its tracks loses its
-// front. A member track's own cover is usually what answers the album's front through the
+// front, or takes a placeholder for it. A member track's own cover is usually what answers the album's front through the
 // derived rung, so clearing one opens a vacancy the album's front marker says was already
 // asked about; the album predicate reads the resolver's answer, so it sees the gap the
 // moment the track's row goes. A book item matches no track row and gets a no-op.
@@ -551,9 +558,15 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if entityType == model.ArtTrack && !pic.present() && artRoleLockField(role) == "art" {
-			if err := memberFrontClearedTx(ctx, tx, entityID); err != nil {
+		if entityType == model.ArtTrack && artRoleLockField(role) == "art" {
+			standIn, err := placeholderPicTx(ctx, tx, pic)
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if !pic.present() || standIn {
+				if err := memberFrontClearedTx(ctx, tx, entityID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		// A track/episode entity is a playable_item; emit an item delta for it, else an
@@ -744,9 +757,9 @@ func setFrontOwingTx(ctx context.Context, tx *sql.Tx, entityType string, entityI
 // first, and it is where an unstorable image is refused rather than stored. It replaces
 // the row unconditionally, so a deliberate set always re-attributes; the automatic
 // ingests come through attachEntityArtTxChanged, which re-points only on a differing hash
-// and re-attributes in place otherwise. Those two are the only writers of an art_map
-// row's attribution, and both run it through checkArtImage first. It reports the hash it
-// mapped, empty for a clear.
+// and re-attributes in place only a row of the arriving picture's own origin. Both run
+// the attribution through checkArtImage first. It reports the hash it mapped, empty for a
+// clear.
 func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, pic examinedArt) (string, error) {
 	if err := checkArtImage(pic.img, entityType, role); err != nil {
 		return "", err
@@ -815,9 +828,10 @@ func mapStoredArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID
 }
 
 // frontHeirs selects, by type and pid, the cards that draw their cover from one release
-// group's row or one artist's and so move with it: a group's albums that resolve no cover
-// at their own rung, and an artist's groups holding no row of their own with those
-// groups' albums likewise. It is the art walk's fallback read from the other end.
+// group's row or one artist's and so move with it: a group's albums that resolve no real
+// cover at their own rung, and an artist's groups holding no row of their own with those
+// groups' albums that resolve no cover at all, since a member's placeholder answers ahead
+// of the artist. It is the art walk's fallback read from the other end.
 var frontHeirs = map[string]string{
 	string(model.ArtReleaseGroup): `SELECT 'album', al.pid FROM album al
 		WHERE al.release_group_id = ?1 AND NOT ` + albumResolvesFrontArt,
@@ -825,7 +839,7 @@ var frontHeirs = map[string]string{
 		WHERE rg.primary_artist_id = ?1 AND NOT ` + groupHoldsFront + `
 		UNION ALL
 		SELECT 'album', al.pid FROM album al JOIN release_group rg ON rg.id = al.release_group_id
-		WHERE rg.primary_artist_id = ?1 AND NOT ` + groupHoldsFront + ` AND NOT ` + albumResolvesFrontArt,
+		WHERE rg.primary_artist_id = ?1 AND NOT ` + groupHoldsFront + ` AND NOT ` + albumResolvesAnyFrontArt,
 }
 
 // groupHoldsFront is true when a release group, read as rg, holds a front of its own.

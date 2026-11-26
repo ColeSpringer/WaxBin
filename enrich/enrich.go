@@ -617,6 +617,12 @@ type Result struct {
 	// their library is read-only, flagged before the pass or during it. Their values
 	// stay owed and are written by the first pass after the flag clears.
 	TagsReadOnly int
+	// IDsHeld counts files within the write-back's reach that an album's or a release
+	// group's id waits on: an id goes on every member file in one pass or none, so it
+	// waits while one cannot take it (in a read-only library, off disk, shared, in a form
+	// the tag writer does not write, such as a WMA, or in a folder it cannot write) or
+	// lies outside a limited run's reach.
+	IDsHeld int
 
 	// Reach is every target the run looked up, by phase, in the scope shape. A
 	// limited run's tag write-back bounds itself to it, so --limit caps that work

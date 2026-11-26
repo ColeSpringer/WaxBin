@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"slices"
+	"strings"
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
@@ -268,16 +270,185 @@ func libraryRootTx(ctx context.Context, tx *sql.Tx, libraryID int64) (string, er
 
 // resolvedItem is an item key resolution made earlier in the same transaction, so the
 // steps after it neither repeat the lookup nor log a book's ambiguous identifier again:
-// the item's id, 0 when the key named no item.
-type resolvedItem struct{ id int64 }
+// the item's id, 0 when the key named no item, and whether a track was found through
+// its recording id column rather than its key.
+type resolvedItem struct {
+	id        int64
+	viaColumn bool
+}
 
-// resolveItemTx resolves an item key once for a put (existingItemIDByIdentityTx).
+// resolveItemTx resolves an item key once for a put (existingItemIDByIdentityTx). A
+// track's mbid: key that names no item resolves to the whole-file track holding the id
+// in its column (adoptTrackByMBIDTx).
 func resolveItemTx(ctx context.Context, tx *sql.Tx, log logger, kind model.Kind, key string, adopt bookAdoptKey) (*resolvedItem, error) {
 	id, _, err := existingItemIDByIdentityTx(ctx, tx, log, kind, key, adopt)
+	if err != nil || id != 0 || kind != model.KindTrack {
+		return &resolvedItem{id: id}, err
+	}
+	if id, err = adoptTrackByMBIDTx(ctx, tx, log, key); err != nil {
+		return nil, err
+	}
+	return &resolvedItem{id: id, viaColumn: id != 0}, nil
+}
+
+// adoptTrackByMBIDTx finds the whole-file track holding a recording id in its column, for
+// an mbid: key that named no item: the album rung's adoption one rung down, which also
+// gathers files under an id kept in the catalog alone. A track of a cue rip is a window
+// of another file and is never adopted. The lowest id wins and a second holder is logged.
+func adoptTrackByMBIDTx(ctx context.Context, tx *sql.Tx, log logger, key string) (int64, error) {
+	mbid, ok := strings.CutPrefix(key, mbidKeyPrefix)
+	if !ok || mbid == "" {
+		return 0, nil
+	}
+	ids, err := queryInt64sTx(ctx, tx, `SELECT t.item_id FROM track t JOIN playable_item pi ON pi.id = t.item_id
+		WHERE t.mbid = ? COLLATE NOCASE AND t.mbid IS NOT NULL AND pi.kind = 'track'
+		  AND pi.identity_key NOT LIKE 'vtrack:%'
+		ORDER BY t.item_id LIMIT 2`, mbid)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	if len(ids) > 1 {
+		log.Warn("scan: recording id held by more than one track; adopting the lowest", "mbid", mbid, "adopted", ids[0], "other", ids[1])
+	}
+	return ids[0], nil
+}
+
+// keepItemForFileTx keeps a retagged file on the item it backs when its new key names no
+// item, or names that item only through the recording id column: the file stood in the
+// catalog with the same audio. As the item's primary it re-keys the item in place, so no
+// stale key is left to catch a file tagged with the old id, and returns the item's other
+// encodings for the scan to read again, since one read before the re-key resolved against
+// the old key. A copy of the primary's audio stays and re-keys nothing. Another encoding
+// whose id no longer matches leaves, as a new recording would, unless the primary has
+// changed on disk since it was read: the same retag may be waiting there, so the file
+// stays and is returned to be read again after the primary. A file returned to be read
+// again loses its fast-path stamp, so a scan cut short still owes it a full read. It
+// returns the item kept, 0 when the rule does not apply.
+func keepItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind model.Kind, key, essence, priorEssence string,
+	fileCreated bool, resolved *resolvedItem, probe *primaryProbe) (int64, []model.PromotedFile, error) {
+	if fileCreated || key == "" || essence == "" || priorEssence != essence || (resolved.id != 0 && !resolved.viaColumn) {
+		return 0, nil, nil
+	}
+	var itemID int64
+	var role string
+	err := tx.QueryRowContext(ctx, `SELECT itf.item_id, itf.role FROM item_file itf
+		JOIN playable_item pi ON pi.id = itf.item_id
+		WHERE itf.file_id = ? AND itf.start_frames IS NULL AND pi.kind = ?`, fileID, string(kind)).Scan(&itemID, &role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil, nil
+	}
+	if err != nil || (resolved.id != 0 && resolved.id != itemID) {
+		return 0, nil, err
+	}
+	if role == "alternate" {
+		primary, err := primaryFileTx(ctx, tx, itemID)
+		if err != nil || primary == nil {
+			return 0, nil, err
+		}
+		if primary.essence == essence {
+			return itemID, nil, nil
+		}
+		if changed, err := probe.changedTx(ctx, tx, primary.fileID); err != nil || !changed {
+			return 0, nil, err
+		}
+		again, err := rereadFilesTx(ctx, tx, "f.id = ?", fileID)
+		return itemID, again, err
+	}
+	// A book of several parts is left alone: one part retagged is as likely a part
+	// leaving as the book renamed.
+	var parts int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_file WHERE item_id = ? AND role <> 'alternate'", itemID).Scan(&parts); err != nil || parts > 1 {
+		return 0, nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE playable_item SET identity_key = ? WHERE id = ? AND identity_key IS NOT ?", key, itemID, key); err != nil {
+		return 0, nil, err
+	}
+	others, err := rereadFilesTx(ctx, tx, `f.id IN (SELECT e.file_id FROM item_file e WHERE e.item_id = ?
+		AND e.role = 'alternate' AND e.start_frames IS NULL) AND COALESCE(f.essence_hash, '') <> ?`, itemID, essence)
+	return itemID, others, err
+}
+
+// rereadFilesTx lists the files cond selects, aliased f, for the scan to read again, and
+// clears each one's fast-path stamp.
+func rereadFilesTx(ctx context.Context, tx *sql.Tx, cond string, args ...any) ([]model.PromotedFile, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT f.id, f.pid, f.library_id, f.path FROM file f WHERE "+cond+" ORDER BY f.id", args...)
 	if err != nil {
 		return nil, err
 	}
-	return &resolvedItem{id: id}, nil
+	var ids []int64
+	var files []model.PromotedFile
+	for rows.Next() {
+		var id int64
+		var p model.PromotedFile
+		if err := rows.Scan(&id, &p.FilePID, &p.LibraryID, &p.Path); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids, files = append(ids, id), append(files, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if err := unstampTx(ctx, tx, id); err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+// primaryProbe is whether the primary of the item a file is an alternate of changed on
+// disk since the catalog read it, asked before a put's transaction so no filesystem call
+// runs under the write lock. fileID, size and mtime are the primary's row as the probe
+// read it.
+type primaryProbe struct {
+	fileID, size, mtime int64
+	changed             bool
+}
+
+// probePrimary asks, ahead of a put of the file at path, after the primary of an item the
+// file is an alternate of. It answers nil when the file is no alternate. A primary the
+// stat cannot reach has not changed, as far as anything here can tell.
+func (s *Store) probePrimary(ctx context.Context, path []byte) *primaryProbe {
+	var p primaryProbe
+	var primary, root []byte
+	err := s.rdb().QueryRowContext(ctx, `SELECT pf.id, pf.path, pf.size, pf.mtime_ns, l.root FROM file f
+		JOIN item_file e ON e.file_id = f.id AND e.role = 'alternate' AND e.start_frames IS NULL
+		JOIN item_file pe ON pe.item_id = e.item_id AND pe.role = 'primary'
+		JOIN file pf ON pf.id = pe.file_id JOIN library l ON l.id = pf.library_id
+		WHERE f.path = ? LIMIT 1`, path).Scan(&p.fileID, &primary, &p.size, &p.mtime, &root)
+	if err != nil {
+		return nil
+	}
+	if info, err := s.stat(ctx, string(root), string(primary)); err == nil {
+		p.changed = info.Size() != p.size || info.ModTime().UnixNano() != p.mtime
+	}
+	return &p
+}
+
+// changedTx answers whether the primary fileID changed on disk since its read: the
+// probe's answer while the row still says what the probe read, and yes otherwise, so a
+// copy the probe did not see waits as one behind a changed primary does, and is read
+// again as the scan ends.
+func (p *primaryProbe) changedTx(ctx context.Context, tx *sql.Tx, fileID int64) (bool, error) {
+	if p == nil || p.fileID != fileID {
+		return true, nil
+	}
+	var size, mtime int64
+	if err := tx.QueryRowContext(ctx, "SELECT size, mtime_ns FROM file WHERE id = ?", fileID).Scan(&size, &mtime); err != nil {
+		return false, err
+	}
+	return p.changed || size != p.size || mtime != p.mtime, nil
+}
+
+// stat stats a cataloged file through its library's root (Store.statFile).
+func (s *Store) stat(ctx context.Context, root, path string) (fs.FileInfo, error) {
+	if s.statFile != nil {
+		return s.statFile(ctx, root, path)
+	}
+	var gate fsx.RootGate
+	return gate.Stat(ctx, root, path)
 }
 
 // accept is the accept set for a relink (fileByEssenceGoneTx): the resolved item, if any.
@@ -494,6 +665,9 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	cur, curTitle, _, err := loadTrackForEditTx(ctx, tx, itemID)
 	if err != nil {
 		return err
+	}
+	if err := idsFollowTrackTx(ctx, tx, itemID, fileID, &fileTrack, bothIDs); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 		fileTitle: fileTitle, title: curTitle, fileTrack: fileTrack, track: cur,

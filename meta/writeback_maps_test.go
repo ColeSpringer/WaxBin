@@ -99,10 +99,11 @@ func TestEntityFieldTagKey(t *testing.T) {
 		{model.MergeAlbum, "country", "RELEASECOUNTRY", true},
 		{model.MergeAlbum, "media", "", false},
 		{model.MergeArtist, "sort", "ARTISTSORT", true},
-		// An entity MBID (album OR artist) stays DB-only: fanning it to member files would
-		// re-key the entity on rescan (its match_key column is not updated by the edit). A
-		// release-group field and a release-group type also stay DB-only.
-		{model.MergeAlbum, "mbid", "", false},
+		// An album's and a group's id fan, since a scan joins the row holding the id in its
+		// column. An artist's stays DB-only: the file's artist ids are one list over the
+		// whole credit. A release group's sort and type stay DB-only too.
+		{model.MergeAlbum, "mbid", "MUSICBRAINZ_ALBUMID", true},
+		{model.MergeReleaseGroup, "mbid", "MUSICBRAINZ_RELEASEGROUPID", true},
 		{model.MergeArtist, "mbid", "", false},
 		{model.MergeReleaseGroup, "sort", "", false},
 		{model.MergeReleaseGroup, "type", "", false},

@@ -68,13 +68,13 @@ func TestEnrichmentWriteBackSkipsALibraryFlaggedAfterTheQuery(t *testing.T) {
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("owed rows = %d (err %v), want 2", len(rows), err)
 	}
-	labels, err := lib.store.EnrichedAlbumLabelFiles(ctx, nil)
+	labels, err := lib.store.EnrichedAlbumFiles(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	flagOnlyLibrary(t, lib, true)
 
-	c, err := lib.writeEnrichmentRows(ctx, rows, labels)
+	c, err := lib.writeEnrichmentRows(ctx, rows, labels, nil)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}

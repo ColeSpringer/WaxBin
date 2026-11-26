@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -89,6 +90,9 @@ type Store struct {
 	rstmts stmtCache // prepared hot reads on the read pool
 
 	examined examinedMem // the oversized pictures examined lately, see art.go
+	// statFile stats a cataloged file through its library's root, fsx.RootGate.Stat when
+	// nil; tests watch where it runs.
+	statFile func(ctx context.Context, root, path string) (fs.FileInfo, error)
 
 	thumbMem *thumbCache // in-process cache of generated thumbnails (see art.go)
 	// thumbsStored says the write connection holds the thumbnail file, so a generated

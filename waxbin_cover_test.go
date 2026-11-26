@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/scan"
+	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
 )
 
@@ -473,5 +474,115 @@ func TestAClearThatLeavesABackCoverStatesIt(t *testing.T) {
 	if rep.Total.SidecarsUpdated != 0 || rep.Total.ItemsUpdated != 0 || frontOf(t, ctx, lib, ref) != front {
 		t.Errorf("the forced scan = %+v and the cover moved from %q to %q, want nothing left for it to change",
 			rep.Total, front, frontOf(t, ctx, lib, ref))
+	}
+}
+
+// TestAnAcquiredThumbnailStandsInForTheCover imports a download whose tags carry its
+// video's thumbnail, marked as a stand-in, then a second track of the same album whose
+// tags carry the real cover. The thumbnail shows until then, and the first track draws
+// the album's real cover after. An episode refuses the mark.
+func TestAnAcquiredThumbnailStandsInForTheCover(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	acq := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib := openMediaTyped(t, ctx, db, t.TempDir(), t.TempDir(), t.TempDir())
+	stage := func(name, title string, n int, picture []byte) string {
+		t.Helper()
+		path := filepath.Join(acq, name)
+		writeFile(t, path, testaudio.BuildMP3WithAudio(title, "Band", "Record", n, testaudio.AudioWithSeed(byte(60+n))))
+		doc, err := waxlabel.ParseFile(ctx, path)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		plan, err := doc.Edit().AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: picture}).Prepare(waxlabel.WithVerifyEssence())
+		if err != nil {
+			t.Fatalf("prepare the picture: %v", err)
+		}
+		if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+			t.Fatalf("embed the picture: %v", err)
+		}
+		return path
+	}
+	importOne := func(path string, mark bool) {
+		t.Helper()
+		res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: path, PlaceholderCover: mark}, model.KindTrack,
+			waxbin.AcquiredMeta{SourceType: model.SourceYouTube})
+		if err != nil {
+			t.Fatalf("ImportAcquired: %v", err)
+		}
+		if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 1 {
+			t.Fatalf("apply = %+v (err %v)", rep, err)
+		}
+	}
+	thumb, cover := folderCover(t, 4), folderCover(t, 9)
+	importOne(stage("one.mp3", "One", 1, thumb), true)
+	ref := model.EntityRef{Type: model.ArtTrack, PID: itemPIDByTitle(t, ctx, lib, "One")}
+	prov, err := lib.ArtProvenance(ctx, ref, model.ArtRoleFront)
+	if err != nil || prov.SourceHash != art.Hash(thumb) || !prov.Placeholder {
+		t.Fatalf("imported thumbnail = %+v (err %v), want it standing in", prov, err)
+	}
+	importOne(stage("two.mp3", "Two", 2, cover), false)
+	prov, err = lib.ArtProvenance(ctx, ref, model.ArtRoleFront)
+	if err != nil || prov.SourceHash != art.Hash(cover) || prov.Level != model.ArtAlbum || prov.Placeholder {
+		t.Errorf("after the real cover = %+v (err %v), want the album's cover from the second track", prov, err)
+	}
+	if _, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: stage("ep.mp3", "Ep", 3, thumb), PlaceholderCover: true},
+		model.KindEpisode, waxbin.AcquiredMeta{}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("an episode's mark = %v, want CodeInvalid", err)
+	}
+}
+
+// TestAMarkedThumbnailYieldsToTheCoverBesideIt: a track's tags carry a video thumbnail
+// and a cover sits beside it. Once the thumbnail is marked a stand-in, the next scan
+// takes the folder's cover as the track's, as it would over a corrupt embedded picture,
+// and an unmark gives the thumbnail back at once.
+func TestAMarkedThumbnailYieldsToTheCoverBesideIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	song := filepath.Join(root, "Album", "song.mp3")
+	writeFile(t, song, testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	thumb, cover := folderCover(t, 4), folderCover(t, 9)
+	doc, err := waxlabel.ParseFile(ctx, song)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := doc.Edit().AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: thumb}).Prepare(waxlabel.WithVerifyEssence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "Album", "cover.png"), cover)
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	ref := model.EntityRef{Type: model.ArtTrack, PID: itemPIDByTitle(t, ctx, lib, "Song")}
+	if got := frontOf(t, ctx, lib, ref); got != art.Hash(thumb) {
+		t.Fatalf("front = %q before the mark, want the embedded thumbnail", got)
+	}
+	if _, err := lib.SetArtPlaceholder(ctx, art.Hash(thumb), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := frontOf(t, ctx, lib, ref); got != art.Hash(cover) {
+		t.Fatalf("front = %q after the mark and a scan, want the cover beside the file", got)
+	}
+	if _, err := lib.SetArtPlaceholder(ctx, art.Hash(thumb), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := frontOf(t, ctx, lib, ref); got != art.Hash(thumb) {
+		t.Errorf("front = %q after the unmark, want the thumbnail in the tags again", got)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := frontOf(t, ctx, lib, ref); got != art.Hash(thumb) {
+		t.Errorf("front = %q after a forced scan, want the thumbnail the read finds", got)
 	}
 }

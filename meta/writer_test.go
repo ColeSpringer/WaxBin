@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -339,5 +340,93 @@ func TestApplyCustomTagsIsolatesAValueTheWriterRefuses(t *testing.T) {
 		if res, err := w.ApplyCustomTags(ctx, mp3, edits); err == nil {
 			t.Errorf("%d bad keys = %+v, want the file to fail whole", len(edits), res)
 		}
+	}
+}
+
+// TestCheckJudgesAWriteWithoutMakingIt: Check answers what Apply would do with the same
+// edits and leaves every file as it was: a writable file takes them, and a WMA and a
+// fragmented MP4, which the writer reads and never writes, are refused.
+func TestCheckJudgesAWriteWithoutMakingIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	edits := []TagEdit{{Key: string(tag.MBReleaseID), Values: []string{"e4000000-0000-4000-8000-000000000001"}}}
+	mp3 := writeTemp(t, "a.mp3", testaudio.BuildMP3("A", "Artist", "Album", 1))
+	before, err := os.ReadFile(mp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lost, err := NewWriter().Check(ctx, mp3, edits); err != nil || len(lost) != 0 {
+		t.Errorf("Check on an mp3 = %v lost (err %v), want the edits taken", lost, err)
+	}
+	if after, err := os.ReadFile(mp3); err != nil || !bytes.Equal(before, after) {
+		t.Errorf("Check changed the file (err %v)", err)
+	}
+	rate := 44100
+	for name, data := range map[string][]byte{
+		"a.wma":    testaudio.Fixture(t, "lossless-s16.wma"),
+		"frag.m4a": testaudio.EncodeAs(t, "aac", "fragmented", rate, testaudio.ReferenceSignal(rate, time.Second/2)),
+	} {
+		if _, err := NewWriter().Check(ctx, writeTemp(t, name, data), edits); !waxerr.Is(err, waxerr.CodeUnsupported) || !FormRefused(err) {
+			t.Errorf("Check on %s = %v, want the file's form refused", name, err)
+		}
+	}
+	if _, err := NewWriter().Check(ctx, filepath.Join(t.TempDir(), "gone.mp3"), edits); err == nil || FormRefused(err) {
+		t.Errorf("Check on a missing file = %v, want an error that is not the file's form", err)
+	}
+}
+
+// TestCheckRefusesAFileItCannotReplace: a write replaces the file through its folder, so
+// Check refuses one it could not replace now, a folder that takes no new file or, on
+// Windows, a read-only file, and still writes nothing.
+func TestCheckRefusesAFileItCannotReplace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := writeTemp(t, "a.mp3", testaudio.BuildMP3("A", "Artist", "Album", 1))
+	if runtime.GOOS == "windows" {
+		if err := os.Chmod(path, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	} else {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes past a folder's mode")
+		}
+		dir := filepath.Dir(path)
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	}
+	edits := []TagEdit{{Key: string(tag.MBReleaseID), Values: []string{"e4000000-0000-4000-8000-000000000001"}}}
+	if _, err := NewWriter().Check(ctx, path, edits); err == nil {
+		t.Fatal("Check on a file it cannot replace passed")
+	}
+}
+
+// TestCheckProbesBeforeItParses: the question of whether the file can be replaced is
+// asked before the file is read, so one held by its folder costs no parse and answers
+// as a file that cannot be written now.
+func TestCheckProbesBeforeItParses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := writeTemp(t, "junk.mp3", []byte("not audio at all"))
+	if runtime.GOOS == "windows" {
+		if err := os.Chmod(path, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	} else {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes past a folder's mode")
+		}
+		dir := filepath.Dir(path)
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	}
+	_, err := NewWriter().Check(ctx, path, []TagEdit{{Key: "TITLE", Values: []string{"x"}}})
+	if !waxerr.Is(err, waxerr.CodeIO) {
+		t.Errorf("Check on an unreadable file it cannot replace = %v (code %s), want the replace refused first", err, waxerr.CodeOf(err))
 	}
 }

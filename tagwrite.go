@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -235,8 +237,10 @@ func r128Gain(rgDB float64) int {
 
 // writeEnrichmentTags mirrors what enrichment filled into the backing files: every item
 // field with an on-disk tag key (a track's genre, bpm, isrc, composer and year, a book's
-// asin, isbn, publisher, genre, year and narrator) plus an album's label fanned across
-// its members. Off by default, and it runs at the end of an enrich pass. It shares
+// asin, isbn, publisher, genre, year and narrator) plus an album's label and the album and
+// release-group ids it matched, fanned across the members. An id the edition tier decided
+// is not written, and an id goes on every member file or none (enrichedIDJoins in the
+// store). Off by default, and it runs at the end of an enrich pass. It shares
 // writeReplayGainTags' shape (disk I/O outside any transaction, an optimistic file-state
 // update that a concurrent scan or move makes a no-op, per-file counts and diagnostics),
 // so read that first.
@@ -276,9 +280,9 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 	if err != nil {
 		return enrichWriteCounts{}, err
 	}
-	// The members still owed a label, fetched first so the item walk can strike the
-	// ones it opens anyway; what is left is written on its own.
-	labels, err := l.store.EnrichedAlbumLabelFiles(ctx, scope)
+	// The members still owed an album's label or ids, fetched first so the item walk can
+	// strike the ones it opens anyway; what is left is written on its own.
+	albums, err := l.store.EnrichedAlbumFiles(ctx, scope)
 	if err != nil {
 		return enrichWriteCounts{}, err
 	}
@@ -288,23 +292,45 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 	if err != nil {
 		return enrichWriteCounts{}, err
 	}
-	c, err := l.writeEnrichmentRows(ctx, rows, labels)
+	idsHeld, err := l.store.EnrichmentIDsHeld(ctx, scope)
+	if err != nil {
+		return enrichWriteCounts{}, err
+	}
+	// An id waits while a file owed it lies outside a scoped pass's reach.
+	var owed []model.EnrichedAlbumFile
+	if scope != nil {
+		if owed, err = l.store.EnrichedAlbumFiles(ctx, nil); err != nil {
+			return enrichWriteCounts{}, err
+		}
+	}
+	c, err := l.writeEnrichmentRows(ctx, rows, albums, owed)
 	c.readOnly += held
+	for _, pid := range idsHeld {
+		c.heldIDs[pid] = true
+	}
+	c.idsHeld = len(c.heldIDs)
 	return c, err
 }
 
-// writeEnrichmentRows writes the rows and the label leftovers writeEnrichmentTags read.
-func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.EnrichedTagRow, labels []model.EntityFieldFile) (enrichWriteCounts, error) {
-	var c enrichWriteCounts
-	leftover := make(map[model.PID]model.EntityFieldFile, len(labels))
-	for _, f := range labels {
+// writeEnrichmentRows writes the rows and the album leftovers writeEnrichmentTags read.
+// owed is every file owed an album's or a group's id, for a pass whose reach may miss
+// some, and nil for one that reaches them all (holdEnrichmentIDs).
+func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.EnrichedTagRow, albums []model.EnrichedAlbumFile, owed []model.EnrichedAlbumFile) (enrichWriteCounts, error) {
+	c := enrichWriteCounts{heldIDs: map[model.PID]bool{}}
+	w := meta.NewWriter()
+	held, err := l.holdEnrichmentIDs(ctx, w, rows, albums, owed)
+	if err != nil {
+		return c, err
+	}
+	c.heldIDs = held.files
+	leftover := make(map[model.PID]model.EnrichedAlbumFile, len(albums))
+	for _, f := range albums {
 		// First album wins for a file two of them somehow claim, which cannot happen
 		// through a track's single album_id but costs nothing to be explicit about.
 		if _, seen := leftover[f.FilePID]; !seen {
 			leftover[f.FilePID] = f
 		}
 	}
-	w := meta.NewWriter()
 	// Books re-anchor once per item, from the primary part, after every part is written.
 	// primaryOf is captured for every book seen rather than only for one that wrote,
 	// because the anchor must run even when the primary's own write failed.
@@ -343,7 +369,7 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 			if mark, ok := abandoned[r.ItemPID]; ok {
 				c.skipped++
 				if mark.Code == model.DiagTagWriteLost {
-					l.noteEnrichmentLoss(ctx, r.FilePID, string(r.Path), mark, r.Newest)
+					l.noteEnrichmentLoss(ctx, r.FilePID, string(r.Path), mark, r.Newest, idStamps{})
 				} else {
 					l.noteEnrichmentDrift(ctx, r.FilePID, string(r.Path), mark.Detail)
 				}
@@ -358,18 +384,21 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 				}
 			}
 		}
-		// The album label rides the row, so the one rewrite carries it and the file is
-		// struck from the leftovers. Only a track is ever an album member, so a book row
-		// carries none.
-		var extra []meta.TagEdit
-		var extraOwed []string
+		// The album's label and ids ride the row, so the one rewrite carries them and the
+		// file is struck from the leftovers. Only a track is ever an album member, so a
+		// book row carries none.
 		settleAt := r.Newest
 		if r.Label != "" {
-			extra = []meta.TagEdit{{Key: albumLabelTagKey, Values: []string{r.Label}}}
-			extraOwed = []string{albumLabelOwedKey}
 			settleAt = max(settleAt, r.LabelUpdatedAt)
 		}
+		r = owedRow(r)
+		albumID, groupID, stamps := held.keep(r.FilePID, r.AlbumMBID, r.ReleaseGroupMBID, r.AlbumMBIDAt, r.ReleaseGroupMBIDAt)
 		delete(leftover, r.FilePID)
+		if r.Newest <= r.SettledAt && r.Label == "" && albumID == "" && groupID == "" {
+			// Only an id the pass holds brought the file, so nothing is written or settled.
+			continue
+		}
+		owe := albumOwed(r.Label, albumID, groupID)
 		if r.Shared {
 			// Its tags belong to every item that shares it, so no per-item rewrite is
 			// safe. Refuse it the way the label pass and the edit write-back do, and
@@ -381,7 +410,7 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 				c.unrepresented++
 				l.noteEnrichmentDrift(ctx, r.FilePID, string(r.Path), sharedFileRefusal)
 			}
-			l.settleEnrichmentWrite(ctx, r.FilePID, string(r.Path), settleAt)
+			l.settleEnrichmentWrite(ctx, r.FilePID, string(r.Path), settleAt, idStamps{})
 			if r.Kind == model.KindBook && r.IsPrimary {
 				abandoned[r.ItemPID] = model.FileDiagnostic{
 					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
@@ -390,7 +419,7 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 			}
 			continue
 		}
-		failure, err := l.writeEnrichmentFile(ctx, w, r, extra, extraOwed, settleAt, &c)
+		failure, err := l.writeEnrichmentFile(ctx, w, r, owe, settleAt, stamps, held.refused[r.FilePID], &c)
 		if err != nil {
 			return c, err
 		}
@@ -407,7 +436,209 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 	for _, itemPID := range books {
 		l.reanchorBookIdentity(ctx, itemPID, primaryOf[itemPID])
 	}
-	return c, l.writeEnrichmentAlbumLabels(ctx, w, leftover, &c)
+	err = l.writeEnrichmentAlbumFiles(ctx, w, leftover, held, &c)
+	c.idsHeld = len(c.heldIDs)
+	return c, err
+}
+
+// enrichedIDKey names one id a pass writes: a release group's when group is set, else an
+// album's.
+type enrichedIDKey struct {
+	group bool
+	value string
+}
+
+// idHold is the ids a pass writes to no file (holdEnrichmentIDs), the files in the pass
+// one of them waited on, and the refusals of a file's form the check met, which its
+// write takes as its own.
+type idHold struct {
+	ids     map[enrichedIDKey]bool
+	files   map[model.PID]bool
+	refused map[model.PID]error
+}
+
+// owedRow is the row with only what the file still owes of its own: every field when
+// one is newer than the file's stamp, none when none is, and the label when it is newer.
+func owedRow(r model.EnrichedTagRow) model.EnrichedTagRow {
+	if r.Newest <= r.SettledAt {
+		r.Fields = nil
+	}
+	r.Label = owedLabel(r.Label, r.LabelUpdatedAt, r.SettledAt)
+	return r
+}
+
+// owedLabel is the label when it was written after the file's stamp, else empty.
+func owedLabel(label string, at, settledAt int64) string {
+	if at <= settledAt {
+		return ""
+	}
+	return label
+}
+
+// keep takes the held ids off a file's write: it returns the album's and the group's ids
+// the write carries, each empty when held or not owed, and the stamps it settles them at.
+func (h idHold) keep(pid model.PID, album, group string, albumAt, groupAt int64) (string, string, idStamps) {
+	stamps := idStamps{albumAt, groupAt}
+	if album != "" && h.ids[enrichedIDKey{value: album}] {
+		album, stamps.album = "", 0
+		h.files[pid] = true
+	}
+	if group != "" && h.ids[enrichedIDKey{group: true, value: group}] {
+		group, stamps.group = "", 0
+		h.files[pid] = true
+	}
+	return album, group, stamps
+}
+
+// holdEnrichmentIDs works out, before anything is written, the ids a pass writes to no
+// file. An id goes on every file owed it in one pass or waits, since a catalog rebuilt
+// from members that disagree keys them apart. It waits while a file owed it lies outside
+// the pass's reach (owed lists every file owed one, nil when the pass reaches them all),
+// sits in a library flagged read-only since the select, or would not take the write the
+// id rides, as the tag writer judges a write prepared and not made: a file it never
+// writes, such as a WMA or a fragmented MP4, one it cannot reach or replace now, or one
+// whose format would not store the id. A refusal of the file's form is recorded, so
+// later passes hold the id in the store and open none of the members until the file
+// changes.
+func (l *Library) holdEnrichmentIDs(ctx context.Context, w *meta.Writer, rows []model.EnrichedTagRow, albums []model.EnrichedAlbumFile, owed []model.EnrichedAlbumFile) (idHold, error) {
+	h := idHold{ids: map[enrichedIDKey]bool{}, files: map[model.PID]bool{}, refused: map[model.PID]error{}}
+	type write struct {
+		libraryID int64
+		path      string
+		edits     []meta.TagEdit
+		ids       []enrichedIDKey
+	}
+	idKeys := func(album, group string) []enrichedIDKey {
+		var out []enrichedIDKey
+		if album != "" {
+			out = append(out, enrichedIDKey{value: album})
+		}
+		if group != "" {
+			out = append(out, enrichedIDKey{group: true, value: group})
+		}
+		return out
+	}
+	writes := map[model.PID]*write{}
+	note := func(pid model.PID, libraryID int64, path []byte, edits []meta.TagEdit, album, group string) {
+		if ids := idKeys(album, group); len(ids) > 0 && writes[pid] == nil {
+			writes[pid] = &write{libraryID: libraryID, path: string(path), edits: edits, ids: ids}
+		}
+	}
+	for _, r := range rows {
+		if !r.Shared {
+			r = owedRow(r)
+			note(r.FilePID, r.LibraryID, r.Path, append(enrichmentEdits(r), albumOwed(r.Label, r.AlbumMBID, r.ReleaseGroupMBID).edits...),
+				r.AlbumMBID, r.ReleaseGroupMBID)
+		}
+	}
+	for _, f := range albums {
+		if !f.Shared {
+			label := owedLabel(f.Label, f.LabelUpdatedAt, f.SettledAt)
+			note(f.FilePID, f.LibraryID, f.Path, albumOwed(label, f.AlbumMBID, f.ReleaseGroupMBID).edits, f.AlbumMBID, f.ReleaseGroupMBID)
+		}
+	}
+	for _, f := range owed {
+		for _, k := range idKeys(f.AlbumMBID, f.ReleaseGroupMBID) {
+			if wr := writes[f.FilePID]; wr == nil || !slices.Contains(wr.ids, k) {
+				h.ids[k] = true
+			}
+		}
+	}
+	open := func(wr *write) bool {
+		return slices.ContainsFunc(wr.ids, func(k enrichedIDKey) bool { return !h.ids[k] })
+	}
+	holdAll := func(wr *write) {
+		for _, k := range wr.ids {
+			h.ids[k] = true
+		}
+	}
+	// First what costs no read of a file: a library flagged read-only since the select,
+	// and a file that could not be replaced now. A member held that way leaves its album's
+	// other members unread.
+	order := slices.Sorted(maps.Keys(writes))
+	readOnly := map[int64]bool{}
+	for _, pid := range order {
+		wr := writes[pid]
+		if !open(wr) {
+			continue
+		}
+		ro, seen := readOnly[wr.libraryID]
+		if !seen {
+			var err error
+			if ro, err = l.store.LibraryReadOnly(ctx, wr.libraryID); err != nil {
+				return h, err
+			}
+			readOnly[wr.libraryID] = ro
+		}
+		if ro || meta.Replaceable(wr.path) != nil {
+			holdAll(wr)
+		}
+	}
+	for _, pid := range order {
+		wr := writes[pid]
+		if !open(wr) {
+			continue
+		}
+		lost, err := w.Check(ctx, wr.path, wr.edits)
+		if ctx.Err() != nil {
+			return h, ctx.Err()
+		}
+		if meta.FormRefused(err) {
+			h.refused[pid] = err
+		}
+		if heldForGood(err, lost) {
+			l.noteTagWriteRefused(ctx, pid, wr.path)
+		}
+		for _, k := range wr.ids {
+			key := albumIDTagKey
+			if k.group {
+				key = groupIDTagKey
+			}
+			if err != nil || slices.ContainsFunc(lost, func(lk string) bool { return strings.EqualFold(lk, key) }) {
+				h.ids[k] = true
+			}
+		}
+	}
+	return h, nil
+}
+
+// heldForGood reports whether a check's answer holds a file's ids until its bytes change:
+// the writer refuses the file's form, or would not store an id's key in it. Anything else
+// holds them for the pass alone, since it may pass or the file still takes the ids.
+func heldForGood(err error, lost []string) bool {
+	return meta.FormRefused(err) || slices.ContainsFunc(lost, func(k string) bool {
+		return strings.EqualFold(k, albumIDTagKey) || strings.EqualFold(k, groupIDTagKey)
+	})
+}
+
+// idStamps are the stamps a write carrying an album's and a group's ids settles them at,
+// each 0 for an id the write does not carry.
+type idStamps struct{ album, group int64 }
+
+// albumEdits are the album values a member file's write carries beside its own: the tag
+// edits and the owed keys they pay.
+type albumEdits struct {
+	edits []meta.TagEdit
+	owed  []string
+}
+
+// albumOwed builds the edits for an album's label and its and its group's ids, each
+// skipped when empty.
+func albumOwed(label, albumID, groupID string) albumEdits {
+	var out albumEdits
+	for _, v := range []struct {
+		value, key, owed string
+	}{
+		{label, albumLabelTagKey, albumLabelOwedKey},
+		{albumID, albumIDTagKey, model.OwedAlbumMBID},
+		{groupID, groupIDTagKey, model.OwedReleaseGroupMBID},
+	} {
+		if v.value != "" {
+			out.edits = append(out.edits, meta.TagEdit{Key: v.key, Values: []string{v.value}})
+			out.owed = append(out.owed, v.owed)
+		}
+	}
+	return out
 }
 
 // readOnlyLibraryRefusal is why a file in a read-only library is not written.
@@ -465,15 +696,21 @@ func lostBookIdentity(kind model.Kind, warnings []model.TagWriteWarning) bool {
 	return false
 }
 
-// albumLabelTagKey is the on-disk key an album label is written under, from the same
-// map the entity edit write-back reads.
-var albumLabelTagKey = func() string {
-	key, ok := meta.EntityFieldTagKey(model.MergeAlbum, "label")
+// The on-disk keys an album's label and its and its group's ids are written under, from
+// the same map the entity edit write-back reads.
+var (
+	albumLabelTagKey = entityTagKey(model.MergeAlbum, "label")
+	albumIDTagKey    = entityTagKey(model.MergeAlbum, "mbid")
+	groupIDTagKey    = entityTagKey(model.MergeReleaseGroup, "mbid")
+)
+
+func entityTagKey(et model.MergeEntity, field string) string {
+	key, ok := meta.EntityFieldTagKey(et, field)
 	if !ok {
-		panic("no tag key for an album label")
+		panic("no tag key for " + string(et) + " " + field)
 	}
 	return key
-}()
+}
 
 // albumLabelOwedKey is the key an album label's owed row is recorded under.
 const albumLabelOwedKey = string(model.MergeAlbum) + ".label"
@@ -488,25 +725,31 @@ const albumLabelOwedKey = string(model.MergeAlbum) + ".label"
 // returned rather than recorded, since it says nothing about the file.
 //
 // settleAt is the newest enrichment value the edits carry, which is what the file is
-// settled at once they land or are found unable to. extra is how an album's label
-// reaches a member file without a second full rewrite of that file, and extraOwed the
-// owed keys those edits pay.
-func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r model.EnrichedTagRow, extra []meta.TagEdit, extraOwed []string, settleAt int64, c *enrichWriteCounts) (*model.FileDiagnostic, error) {
+// settled at once they land or are found unable to, and ids the same for the album and
+// group ids. album is how an album's values reach a member file without a second full
+// rewrite of that file.
+func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r model.EnrichedTagRow, album albumEdits, settleAt int64, ids idStamps, refused error, c *enrichWriteCounts) (*model.FileDiagnostic, error) {
 	path := string(r.Path)
-	edits := append(enrichmentEdits(r), extra...)
+	edits := append(enrichmentEdits(r), album.edits...)
 	if len(edits) == 0 {
 		// Nothing left to write, so nothing is owed: the values the rows named are
 		// gone from the catalog, and a drift row about them would be stale.
 		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, nil); err != nil {
 			l.log.Warn("enrichment diagnostics", "path", path, "err", err)
 		}
-		l.settleEnrichmentWrite(ctx, r.FilePID, path, settleAt)
+		l.settleEnrichmentWrite(ctx, r.FilePID, path, settleAt, ids)
 		return nil, nil
 	}
-	res, err := w.Apply(ctx, path, edits)
+	res, err := (*meta.WriteResult)(nil), refused
+	if refused == nil {
+		res, err = w.Apply(ctx, path, edits)
+	}
 	if err != nil {
 		if waxerr.Is(err, waxerr.CodeCanceled) || ctx.Err() != nil {
 			return nil, err
+		}
+		if refused == nil && meta.FormRefused(err) {
+			l.noteTagWriteRefused(ctx, r.FilePID, path)
 		}
 		var d model.FileDiagnostic
 		if waxerr.Is(err, waxerr.CodeUnsupported) {
@@ -524,8 +767,10 @@ func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r mod
 			c.failed++
 			d = model.FileDiagnostic{Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: err.Error()}
 		}
+		// The file's other values settle as lost, but never its ids, which go on every
+		// member or none: one that stays owed holds them from the rest at the next pass.
 		if d.Code == model.DiagTagWriteLost {
-			l.noteEnrichmentLoss(ctx, r.FilePID, path, d, settleAt)
+			l.noteEnrichmentLoss(ctx, r.FilePID, path, d, settleAt, idStamps{})
 		} else {
 			l.noteEnrichmentDrift(ctx, r.FilePID, path, d.Detail)
 		}
@@ -533,7 +778,7 @@ func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r mod
 	}
 	// The write landed, so what it carried is no longer owed to this file. A value the
 	// format could not store is reported below as lost instead, as the edit write-back does.
-	if err := l.store.SettleTagWriteOwed(ctx, r.FilePID, append(enrichmentOwedKeys(r), extraOwed...)); err != nil {
+	if err := l.store.SettleTagWriteOwed(ctx, r.FilePID, append(enrichmentOwedKeys(r), album.owed...)); err != nil {
 		l.log.Warn("enrichment owed settle", "path", path, "err", err)
 	}
 	var diags []model.FileDiagnostic
@@ -559,7 +804,7 @@ func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r mod
 	if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, meta.MergeKeylessDiagnostics(diags)); err != nil {
 		l.log.Warn("enrichment diagnostics", "path", path, "err", err)
 	}
-	l.settleEnrichmentWrite(ctx, r.FilePID, path, settleAt)
+	l.settleEnrichmentWrite(ctx, r.FilePID, path, settleAt, ids)
 	// The bytes landed, so the settle and the state update below are earned, but a book
 	// identifier the container could not represent is still a failure to the caller: asin,
 	// isbn and edition feed identity.BookKey, so parts written with one the primary lacks
@@ -600,36 +845,51 @@ func (l *Library) noteEnrichmentDrift(ctx context.Context, filePID model.PID, pa
 	}
 }
 
+// noteTagWriteRefused records that the tag writer refused the file in its current form,
+// which holds its album's ids from every member until the file changes. A failure only
+// costs the check again on the next pass, so it is logged.
+func (l *Library) noteTagWriteRefused(ctx context.Context, filePID model.PID, path string) {
+	info, err := os.Stat(pathx.Long(path))
+	if err == nil {
+		err = l.store.NoteTagWriteRefused(ctx, filePID, info.Size(), info.ModTime().UnixNano())
+	}
+	if err != nil {
+		l.log.Warn("tag write refusal", "path", path, "err", err)
+	}
+}
+
 // noteEnrichmentLoss records a value that can never land, replacing the writer's set,
 // and settles the file: nothing about it is worth retrying, and a file left owed would
 // have the next pass write a book's parts without their primary.
-func (l *Library) noteEnrichmentLoss(ctx context.Context, filePID model.PID, path string, d model.FileDiagnostic, settleAt int64) {
+func (l *Library) noteEnrichmentLoss(ctx context.Context, filePID model.PID, path string, d model.FileDiagnostic, settleAt int64, ids idStamps) {
 	if err := l.store.PutFileDiagnostics(ctx, filePID, model.OriginEnrichment, []model.FileDiagnostic{d}); err != nil {
 		l.log.Warn("enrichment diagnostics", "path", path, "err", err)
 	}
-	l.settleEnrichmentWrite(ctx, filePID, path, settleAt)
+	l.settleEnrichmentWrite(ctx, filePID, path, settleAt, ids)
 }
 
-// settleEnrichmentWrite stamps the file as settled up to settleAt. A failure to stamp
-// only costs a reopen on the next pass, so it is logged rather than surfaced.
-func (l *Library) settleEnrichmentWrite(ctx context.Context, filePID model.PID, path string, settleAt int64) {
-	if err := l.store.SettleEnrichmentWrite(ctx, filePID, settleAt); err != nil {
+// settleEnrichmentWrite stamps the file as settled up to settleAt, and its ids up to
+// ids. A failure to stamp only costs a reopen on the next pass, so it is logged rather
+// than surfaced.
+func (l *Library) settleEnrichmentWrite(ctx context.Context, filePID model.PID, path string, settleAt int64, ids idStamps) {
+	if err := l.store.SettleEnrichmentWrite(ctx, filePID, settleAt, ids.album, ids.group); err != nil {
 		l.log.Warn("enrichment settle", "path", path, "err", err)
 	}
 }
 
-// writeEnrichmentAlbumLabels writes the album labels still owed to files the item walk
-// did not open: a member with no enriched field of its own, or a virtual track's file,
-// which the item select drops.
+// writeEnrichmentAlbumFiles writes an album's label and ids still owed to files the item
+// walk did not open: a member with no enriched field of its own, or a virtual track's
+// file, which the item select drops.
 //
 // A shared or virtual file is refused rather than opened: its tags belong to every item
 // that shares it, so the label is recorded as unsynced drift, counted as unrepresented,
-// and settled so the refusal is not repeated every pass. The rest go through
+// and settled so the refusal is not repeated every pass. Such a file holds its album's
+// ids from every member, so it is never owed one. The rest go through
 // writeEnrichmentFile as a row with no fields of its own.
 //
 // An album's year needs nothing here: it lands as each member's own year provenance and
 // rides the item path as DATE.
-func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, w *meta.Writer, leftover map[model.PID]model.EntityFieldFile, c *enrichWriteCounts) error {
+func (l *Library) writeEnrichmentAlbumFiles(ctx context.Context, w *meta.Writer, leftover map[model.PID]model.EnrichedAlbumFile, held idHold, c *enrichWriteCounts) error {
 	// Sorted, so one pass writes the leftovers in a stable order.
 	for _, pid := range slices.Sorted(maps.Keys(leftover)) {
 		if ctx.Err() != nil {
@@ -646,20 +906,20 @@ func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, w *meta.Writer
 		if f.Shared {
 			c.unrepresented++
 			l.noteEnrichmentDrift(ctx, pid, path, sharedFileRefusal)
-			l.settleEnrichmentWrite(ctx, pid, path, f.UpdatedAt)
-			continue
-		}
-		key, ok := meta.EntityFieldTagKey(f.EntityType, f.Field)
-		if !ok {
+			l.settleEnrichmentWrite(ctx, pid, path, f.LabelUpdatedAt, idStamps{})
 			continue
 		}
 		row := model.EnrichedTagRow{
 			FilePID: pid, Kind: model.KindTrack, Path: f.Path,
-			Size: f.Size, MTimeNS: f.MTimeNS, Newest: f.UpdatedAt,
+			Size: f.Size, MTimeNS: f.MTimeNS, Newest: f.LabelUpdatedAt,
 		}
-		edits := []meta.TagEdit{{Key: key, Values: []string{f.Value}}}
-		owed := []string{string(f.EntityType) + "." + f.Field}
-		if _, err := l.writeEnrichmentFile(ctx, w, row, edits, owed, f.UpdatedAt, c); err != nil {
+		label := owedLabel(f.Label, f.LabelUpdatedAt, f.SettledAt)
+		albumID, groupID, stamps := held.keep(pid, f.AlbumMBID, f.ReleaseGroupMBID, f.AlbumMBIDAt, f.ReleaseGroupMBIDAt)
+		if label == "" && albumID == "" && groupID == "" {
+			continue
+		}
+		owe := albumOwed(label, albumID, groupID)
+		if _, err := l.writeEnrichmentFile(ctx, w, row, owe, f.LabelUpdatedAt, stamps, held.refused[pid], c); err != nil {
 			return err
 		}
 	}
@@ -677,6 +937,10 @@ type enrichWriteCounts struct {
 	unrepresented int
 	skipped       int
 	readOnly      int // files a read-only library holds back, flagged before the select or since
+	idsHeld       int // files an album's or a group's id waits on, len(heldIDs)
+	// heldIDs is the files within the pass's reach an id waits on, the store's holds
+	// (EnrichmentIDsHeld) and the pass's own (holdEnrichmentIDs).
+	heldIDs map[model.PID]bool
 }
 
 // enrichmentTagFields is the fixed per-kind order enrichmentEdits walks, so one file's

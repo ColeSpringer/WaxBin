@@ -114,15 +114,24 @@ CREATE TABLE lyrics (
 -- remembers which arriving bytes they stand for. The bytes come last, here as in the
 -- thumbnail file, so a read of the columns before them stops short of the row's overflow
 -- pages.
+--
+-- placeholder marks a picture that stands in for a cover, a download's video thumbnail:
+-- it shows while nothing better does and never counts as the cover for a fill. It is read
+-- in the track slot alone (a track's or a book's own front), so the same bytes held as an
+-- album's or a group's own cover are a cover there. 1 is marked, 0 unmarked by hand, which
+-- an import marking the picture again leaves alone, and NULL nobody decided. The partial
+-- index answers the walk's probe of a member's picture without reading the row.
 CREATE TABLE art_source (
-  hash       TEXT    PRIMARY KEY,         -- content hash of the stored bytes
-  format     TEXT    NOT NULL,            -- jpeg|png|webp|gif|...
-  width      INTEGER NOT NULL DEFAULT 0,
-  height     INTEGER NOT NULL DEFAULT 0,
-  size       INTEGER NOT NULL,            -- byte length of data
-  created_at INTEGER NOT NULL,
-  data       BLOB    NOT NULL
+  hash        TEXT    PRIMARY KEY,         -- content hash of the stored bytes
+  format      TEXT    NOT NULL,            -- jpeg|png|webp|gif|...
+  width       INTEGER NOT NULL DEFAULT 0,
+  height      INTEGER NOT NULL DEFAULT 0,
+  size        INTEGER NOT NULL,            -- byte length of data
+  created_at  INTEGER NOT NULL,
+  placeholder INTEGER,
+  data        BLOB    NOT NULL
 );
+CREATE INDEX art_source_placeholder ON art_source(hash) WHERE placeholder = 1;
 
 -- The pictures the bound examined: the hash of the bytes as they arrived, against the
 -- source they are stored as. An ingest looks an oversized picture up here before it

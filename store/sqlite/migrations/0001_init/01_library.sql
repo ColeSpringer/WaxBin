@@ -57,13 +57,27 @@ CREATE TABLE file (
   -- the enrichment tag write-back has settled for this file, by landing it or by
   -- recording why it cannot land. A newer value is owed a write.
   enrich_settled_at INTEGER NOT NULL DEFAULT 0,
+  -- The same for the album id and the release-group id enrichment matched, one stamp
+  -- each, because each is held from every member file while one of them cannot take it:
+  -- a write of the file's fields or of the other id would otherwise settle past it.
+  enrich_album_id_settled_at INTEGER NOT NULL DEFAULT 0,
+  enrich_group_id_settled_at INTEGER NOT NULL DEFAULT 0,
+  -- The content_hash the file had when the tag writer refused it in its current form (a
+  -- format it reads and never writes, such as WMA, or a fragmented MP4) or could not store
+  -- an id in it, NULL for none. While the bytes are the same it holds its album's and
+  -- release group's ids from every member, which a member that cannot carry them may not
+  -- have alone; other bytes lift it, whatever their file times.
+  tag_write_refused_hash TEXT,
   -- The front cover the file states, as its last read or a write of its picture found
   -- it: the hash the catalog stores that picture under (an art_source row, kept while a
   -- file states it), '' for none, NULL while unknown. front_source says where a stated
   -- picture is, 'tag' or 'sidecar'. An item's cover from disk is the one its files
-  -- state, the primary first.
-  front_hash   TEXT,
-  front_source TEXT,
+  -- state, the primary first. front_stand_in is a placeholder in the file's tags it
+  -- passed over for the cover beside it ('' none), kept so the mark outlives the pass
+  -- and an unmark can state the picture again.
+  front_hash     TEXT,
+  front_source   TEXT,
+  front_stand_in TEXT NOT NULL DEFAULT '',
   container    TEXT,
   codec        TEXT,
   duration_ms  INTEGER,
@@ -87,6 +101,10 @@ CREATE INDEX file_display_nocase ON file(display_path COLLATE NOCASE);
 -- and filesorting the whole file table on every analyze run. The index
 -- implicitly carries the rowid (id), supporting the (rel_path, id) tiebreak.
 CREATE INDEX file_audio_relpath ON file(rel_path) WHERE kind = 'audio';
+-- The files stating one picture, or passing it over, for a placeholder mark that
+-- settles their items again.
+CREATE INDEX file_front_hash ON file(front_hash) WHERE front_hash <> '';
+CREATE INDEX file_front_stand_in ON file(front_stand_in) WHERE front_stand_in <> '';
 
 -- Incremental-scan fast path: the on-disk state of each sidecar (a .lrc/.cue/
 -- chapter file or a directory cover) beside an audio file, so a rescan can

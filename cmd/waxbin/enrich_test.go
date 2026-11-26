@@ -204,3 +204,25 @@ func TestEnrichSummaryReportsReadOnlySkips(t *testing.T) {
 		t.Errorf("payload = %s, want tagsReadOnly 2", payload)
 	}
 }
+
+// TestEnrichSummaryReportsHeldIDs: files an album's or a group's id waits on are counted
+// in both outputs.
+func TestEnrichSummaryReportsHeldIDs(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := renderEnrichResult(cmd, &globals{}, &waxbin.EnrichResult{Result: enrich.Result{IDsHeld: 3}}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(buf.String(), "3 waiting on an album or group id") {
+		t.Errorf("summary lacks the held count:\n%s", buf.String())
+	}
+	payload, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{Result: enrich.Result{IDsHeld: 3}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"idsHeld":3`) {
+		t.Errorf("payload = %s, want idsHeld 3", payload)
+	}
+}

@@ -40,7 +40,7 @@ import (
 // carries reResolve, which an older server would drop and scan without, and run_unfold
 // and set_tags are added methods, set_tags replacing set_tag (a client asking for set_tag
 // meets an unknown method); a write-back failure naming the key it is about, or a value
-// lost, is an added field.
+// lost, is an added field. Later on 26, set_art_placeholder is an added method.
 const ProtocolVersion = 26
 
 // ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
@@ -56,56 +56,57 @@ const ReasonUnknownMethod waxerr.Reason = "unknown_method"
 // hatch, for the few operations that have no server method such as rebuild and
 // restore.
 const (
-	MethodPing             = "ping"
-	MethodEditFields       = "edit_fields"
-	MethodEditManyFields   = "edit_many_fields"
-	MethodEditBatch        = "edit_batch"
-	MethodSetCredits       = "set_credits"
-	MethodSetCreditsBatch  = "set_credits_batch"
-	MethodSetLyrics        = "set_lyrics"
-	MethodSetChapters      = "set_chapters"
-	MethodSetItemArt       = "set_item_art"
-	MethodSetEntityArt     = "set_entity_art"
-	MethodSetArtLock       = "set_art_lock"
-	MethodEditEntity       = "edit_entity"
-	MethodDetach           = "detach"
-	MethodRenameEntity     = "rename_entity"
-	MethodSetAcquisition   = "set_acquisition"
-	MethodClearAcquisition = "clear_acquisition"
-	MethodSetTags          = "set_tags"
-	MethodLock             = "lock"
-	MethodUnlock           = "unlock"
-	MethodCreateUser       = "create_user"
-	MethodUsers            = "users"
-	MethodMerge            = "merge"
-	MethodUnfoldEntity     = "unfold_entity"
-	MethodMarkMissing      = "mark_missing"
-	MethodSetRating        = "set_rating"
-	MethodSetStar          = "set_star"
-	MethodSetEntityStar    = "set_entity_star"
-	MethodSetEntityRating  = "set_entity_rating"
-	MethodMarkPlayed       = "mark_played"
-	MethodSetPlayed        = "set_played"
-	MethodSetProgress      = "set_progress"
-	MethodRecordSession    = "record_session"
-	MethodPlayState        = "play_state"
-	MethodProvenance       = "provenance"
-	MethodPlaylistCreate   = "playlist_create"
-	MethodPlaylistDelete   = "playlist_delete"
-	MethodPlaylistRename   = "playlist_rename"
-	MethodPlaylistImport   = "playlist_import_m3u8"
-	MethodPlaylistAdd      = "playlist_add"
-	MethodPlaylistRemove   = "playlist_remove"
-	MethodPlaylistRemoveAt = "playlist_remove_at"
-	MethodPlaylistSetRule  = "playlist_set_rule"
-	MethodPutTranscript    = "put_transcript"
-	MethodFetchTranscript  = "fetch_transcript"
-	MethodFetchChapters    = "fetch_chapters"
-	MethodUnfetch          = "unfetch"
-	MethodPodcastRemove    = "podcast_remove"
-	MethodAddRoot          = "add_root"
-	MethodMaintenanceBegin = "maintenance_begin"
-	MethodMaintenanceEnd   = "maintenance_end"
+	MethodPing              = "ping"
+	MethodEditFields        = "edit_fields"
+	MethodEditManyFields    = "edit_many_fields"
+	MethodEditBatch         = "edit_batch"
+	MethodSetCredits        = "set_credits"
+	MethodSetCreditsBatch   = "set_credits_batch"
+	MethodSetLyrics         = "set_lyrics"
+	MethodSetChapters       = "set_chapters"
+	MethodSetItemArt        = "set_item_art"
+	MethodSetEntityArt      = "set_entity_art"
+	MethodSetArtLock        = "set_art_lock"
+	MethodSetArtPlaceholder = "set_art_placeholder"
+	MethodEditEntity        = "edit_entity"
+	MethodDetach            = "detach"
+	MethodRenameEntity      = "rename_entity"
+	MethodSetAcquisition    = "set_acquisition"
+	MethodClearAcquisition  = "clear_acquisition"
+	MethodSetTags           = "set_tags"
+	MethodLock              = "lock"
+	MethodUnlock            = "unlock"
+	MethodCreateUser        = "create_user"
+	MethodUsers             = "users"
+	MethodMerge             = "merge"
+	MethodUnfoldEntity      = "unfold_entity"
+	MethodMarkMissing       = "mark_missing"
+	MethodSetRating         = "set_rating"
+	MethodSetStar           = "set_star"
+	MethodSetEntityStar     = "set_entity_star"
+	MethodSetEntityRating   = "set_entity_rating"
+	MethodMarkPlayed        = "mark_played"
+	MethodSetPlayed         = "set_played"
+	MethodSetProgress       = "set_progress"
+	MethodRecordSession     = "record_session"
+	MethodPlayState         = "play_state"
+	MethodProvenance        = "provenance"
+	MethodPlaylistCreate    = "playlist_create"
+	MethodPlaylistDelete    = "playlist_delete"
+	MethodPlaylistRename    = "playlist_rename"
+	MethodPlaylistImport    = "playlist_import_m3u8"
+	MethodPlaylistAdd       = "playlist_add"
+	MethodPlaylistRemove    = "playlist_remove"
+	MethodPlaylistRemoveAt  = "playlist_remove_at"
+	MethodPlaylistSetRule   = "playlist_set_rule"
+	MethodPutTranscript     = "put_transcript"
+	MethodFetchTranscript   = "fetch_transcript"
+	MethodFetchChapters     = "fetch_chapters"
+	MethodUnfetch           = "unfetch"
+	MethodPodcastRemove     = "podcast_remove"
+	MethodAddRoot           = "add_root"
+	MethodMaintenanceBegin  = "maintenance_begin"
+	MethodMaintenanceEnd    = "maintenance_end"
 
 	MethodSetLibraryReadOnly       = "set_library_read_only"
 	MethodSetLibraryFolderFallback = "set_library_folder_fallback"
@@ -431,6 +432,20 @@ type SetArtLockParams struct {
 type SetArtLockResult struct {
 	Changed     bool `json:"changed"`
 	StillLocked bool `json:"stillLocked"`
+}
+
+// SetArtPlaceholderParams is the set_art_placeholder request payload: the picture to
+// mark as standing in for a cover, or unmark, by its sourceHash (or the hash it arrived
+// under where it was stored scaled down).
+type SetArtPlaceholderParams struct {
+	Hash        string `json:"hash"`
+	Placeholder bool   `json:"placeholder"`
+}
+
+// SetArtPlaceholderResult is the set_art_placeholder response payload: whether the mark
+// moved.
+type SetArtPlaceholderResult struct {
+	Changed bool `json:"changed"`
 }
 
 // SetTagsParams is the set_tags request payload: several custom tags' ordered values on

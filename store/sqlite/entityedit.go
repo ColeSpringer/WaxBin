@@ -66,9 +66,11 @@ func entityColumnForField(field string) string {
 // Clearing an album's or a release group's mbid also re-keys the entity chain to the
 // heuristic form a scan of its members computes. That is what makes the clear a real
 // undo: members resolve on the match key, not on the column, so leaving the key would
-// keep every member pinned to the identity just disowned. Setting an mbid deliberately
-// stays column-only, since re-keying onto mbid: would fork any member whose own file does
-// not carry the id on its next scan; enrichment fills the column the same way.
+// keep every member pinned to the identity just disowned. Setting an mbid moves the
+// column alone, since re-keying onto mbid: would fork any member whose own file does not
+// carry the id on its next scan; a member whose file names the id joins the row through
+// its column, which is what lets the facade write the id to the member files. Enrichment
+// fills the column the same way.
 //
 // Any mbid edit, a set as much as a clear, drops the art enrichment fetched for the
 // entity in every role no lock holds, and its art backfill marker, so the next pass asks

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -18,20 +19,51 @@ import (
 // locks, rather than re-keying to the new on-disk title and author. It is deliberately
 // conservative. It is a no-op when newKey is empty, when it already matches the item's
 // key, or when another book already holds it (the next scan resolves that collision the
-// normal way). It only ever touches a book, never a track, whose identity is
-// essence-anchored and must not be rewritten. It reports whether the key changed.
+// normal way), and for any item other than a book. It reports whether the key changed.
 func (s *Store) RekeyBook(ctx context.Context, itemPID model.PID, newKey string) (bool, error) {
-	const op = "store.RekeyBook"
-	if newKey == "" {
-		return false, nil
-	}
+	return s.rekeyItem(ctx, "store.RekeyBook", itemPID, model.KindBook, func(context.Context, *sql.Tx, int64) (string, error) {
+		return newKey, nil
+	})
+}
+
+// RekeyTrack keys a track on the recording id a write-back just landed in its primary
+// file, mbid, or on the file's stored essence when the write cleared it, which is what a
+// scan of the file computes. No file is read. Without it the item keeps a key nothing on
+// disk names, and a file tagged with the id it gave up would land on it. A track of a cue
+// rip keeps its key, and so does one whose new key another track holds, left for the
+// scan to merge. It reports whether the key changed.
+func (s *Store) RekeyTrack(ctx context.Context, itemPID model.PID, mbid string) (bool, error) {
+	return s.rekeyItem(ctx, "store.RekeyTrack", itemPID, model.KindTrack, func(ctx context.Context, tx *sql.Tx, itemID int64) (string, error) {
+		var essence sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT f.essence_hash FROM item_file e JOIN file f ON f.id = e.file_id
+			WHERE e.item_id = ? AND e.role = 'primary' AND e.start_frames IS NULL`, itemID).Scan(&essence)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		if err != nil || !essence.Valid || essence.String == "" {
+			return "", err
+		}
+		return identity.TrackKey(mbid, essence.String), nil
+	})
+}
+
+// rekeyItem moves an item of kind onto the key keyFor works out, unless the key is
+// empty, already the item's, or held by another item of its kind.
+func (s *Store) rekeyItem(ctx context.Context, op string, itemPID model.PID, want model.Kind, keyFor func(context.Context, *sql.Tx, int64) (string, error)) (bool, error) {
 	changed := false
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
 		}
-		if kind != string(model.KindBook) {
+		if kind != string(want) {
+			return nil
+		}
+		newKey, err := keyFor(ctx, tx, itemID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if newKey == "" {
 			return nil
 		}
 		var cur sql.NullString
@@ -42,7 +74,7 @@ func (s *Store) RekeyBook(ctx context.Context, itemPID model.PID, newKey string)
 		if cur.Valid && cur.String == newKey {
 			return nil
 		}
-		// A key already owned by another book of the same kind would violate the
+		// A key already owned by another item of the same kind would violate the
 		// (kind, identity_key) unique index. Leave it to the next scan, which merges the two
 		// onto the shared key the normal way, rather than forcing the collision here.
 		var other int64

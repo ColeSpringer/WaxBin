@@ -428,6 +428,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return proxy.SetArtLockResult{Changed: change.Changed, StillLocked: change.StillLocked}, nil
 		},
+		proxy.MethodSetArtPlaceholder: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetArtPlaceholderParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			changed, err := l.SetArtPlaceholder(ctx, p.Hash, p.Placeholder)
+			if err != nil {
+				return nil, err
+			}
+			return proxy.SetArtPlaceholderResult{Changed: changed}, nil
+		},
 		proxy.MethodEditEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EditEntityParams](raw)
 			if err != nil {

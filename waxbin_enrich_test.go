@@ -469,12 +469,11 @@ func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
 	}
 }
 
-// TestMatchedReleaseStaysOffDisk is the guard on the one thing the album release
-// match deliberately does not do. identity.AlbumKey returns "mbid:"+lower(mbid) when
-// a file carries one, so writing a matched release id to disk would re-key the album
-// on the next scan and abandon the row's pid, curation, and stars. The value lives in
-// the catalog only; enrichedTagSelect does not carry it.
-func TestMatchedReleaseStaysOffDisk(t *testing.T) {
+// TestEnrichmentWritesTheReleaseItMatched: the album release match lands its id in the
+// catalog, and --write-tags puts it in the file beside the group id the file was tagged
+// with. A scan resolving the file again joins the album holding the id in its column, so
+// the album keeps its pid, and a second pass has nothing left to write.
+func TestEnrichmentWritesTheReleaseItMatched(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -521,30 +520,42 @@ func TestMatchedReleaseStaysOffDisk(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 	pid := itemPIDByTitle(t, ctx, lib, "Shine On")
-	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
-
-	// The catalog took the release id.
+	if res.Result.TagsWritten != 1 {
+		t.Fatalf("enrich wrote %d files (failed %d), want the one", res.Result.TagsWritten, res.Result.TagsFailed)
+	}
 	item, err := lib.Get(ctx, pid)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	if err != nil || item.AlbumMBID != relMBID {
+		t.Fatalf("item = %+v (err %v), want the matched release %s", item, err, relMBID)
 	}
-	if item.AlbumMBID != relMBID {
-		t.Fatalf("item AlbumMBID = %q, want the matched release %s", item.AlbumMBID, relMBID)
-	}
-
-	// The file did not: it still carries only the release-group id it was tagged with.
+	album := item.AlbumPID
 	fm, err := meta.NewReader().Read(ctx, path)
 	if err != nil {
 		t.Fatalf("re-read file: %v", err)
 	}
-	if fm.Tags.MBReleaseID != "" {
-		t.Errorf("file gained a release id %q; writing one re-keys the album on the next scan",
-			fm.Tags.MBReleaseID)
+	if fm.Tags.MBReleaseID != relMBID || fm.Tags.MBReleaseGroupID != rgMBID {
+		t.Errorf("file ids = %q and %q, want the matched release beside the tagged group", fm.Tags.MBReleaseID, fm.Tags.MBReleaseGroupID)
 	}
-	if fm.Tags.MBReleaseGroupID != rgMBID {
-		t.Errorf("file release-group id = %q, want the tagged %s", fm.Tags.MBReleaseGroupID, rgMBID)
+
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{Force: true})
+	if err != nil {
+		t.Fatalf("second enrich: %v", err)
+	}
+	if res.Result.TagsWritten+res.Result.TagsFailed+res.Result.TagsUnrepresented != 0 {
+		t.Errorf("second pass wrote %d, failed %d, unrepresented %d, want nothing left",
+			res.Result.TagsWritten, res.Result.TagsFailed, res.Result.TagsUnrepresented)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true, ReResolve: true}); err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	if item, err := lib.Get(ctx, pid); err != nil || item.AlbumPID != album {
+		t.Errorf("after a scan resolving the file again the item sits on %s (err %v), want %s", item.AlbumPID, err, album)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Errorf("albums after a forced scan = %d, want 1", n)
 	}
 }
 

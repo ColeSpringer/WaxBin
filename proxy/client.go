@@ -404,6 +404,16 @@ func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, ent
 	return model.ArtLockChange{Changed: res.Changed, StillLocked: res.StillLocked}, nil
 }
 
+// SetArtPlaceholder proxies marking a stored picture as standing in for a cover, or
+// unmarking it, and reports whether the mark moved.
+func (c *Client) SetArtPlaceholder(ctx context.Context, hash string, on bool) (bool, error) {
+	var res SetArtPlaceholderResult
+	if err := c.call(ctx, MethodSetArtPlaceholder, SetArtPlaceholderParams{Hash: hash, Placeholder: on}, &res); err != nil {
+		return false, err
+	}
+	return res.Changed, nil
+}
+
 // SetTags proxies an edit of several custom tags, returning each key as stored and the
 // file rewrites made. A committed edit whose file write-back partially failed returns the
 // failed files in the result; the transport error stays nil, matching edit_fields.

@@ -2,10 +2,14 @@ package waxbin
 
 import (
 	"context"
+	"os"
+	"slices"
 	"strings"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // This file exposes the entity-curation edit API (identifiers and sort-name overrides
@@ -18,11 +22,12 @@ import (
 // EntityEditOptions controls an entity field edit, mirroring EditOptions.
 type EntityEditOptions struct {
 	// WriteBack also fans the edited identifiers and sort across the entity's member
-	// files' on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, RELEASECOUNTRY, and
-	// ALBUMSORT, and an artist's ARTISTSORT. A release-group field, a release-group type,
-	// and a set entity MBID have no fanned tag and stay DB-only. Clearing an album's or a
-	// release group's mbid is the exception: it strips that one id from the member files,
-	// which is what makes the clear survive the next scan that re-resolves them.
+	// files' on-disk tags: an album's MUSICBRAINZ_ALBUMID, BARCODE, LABEL, CATALOGNUMBER,
+	// RELEASECOUNTRY and ALBUMSORT, a release group's MUSICBRAINZ_RELEASEGROUPID, and an
+	// artist's ARTISTSORT. An id goes on every member file or none (meta.EntityFieldTagKey).
+	// A release group's type and an artist's id stay DB-only. Clearing an album's or a
+	// release group's mbid strips that one id from the member files, which is what makes
+	// the clear survive the next scan that re-resolves them.
 	WriteBack bool
 	// Lock is the instruction for each edited field's lock, which guards it against an
 	// enrichment overwrite. The zero value leaves the stored lock alone; the CLI states
@@ -62,9 +67,10 @@ func (o EntityEditOptions) Attribution() model.Attribution {
 // mbid clear strips that id from them. The strip is what makes the clear durable: without
 // it the member files still name the id, so the linkage returns on the next scan that
 // re-resolves them, which is their next retag, move, or content change rather than every
-// scan. Write-back runs after the catalog edit committed, so a file that cannot be written
-// is reported through a *WriteBackError naming the failed files while the entity edit
-// stands, and a member left holding the id re-forks the identity on that next scan.
+// scan. A set id is written only when every member file can take it, and is otherwise
+// held from all of them and left owed. Write-back runs after the catalog edit committed,
+// so a file that cannot be written, or an id held, is reported through a *WriteBackError
+// while the entity edit stands.
 func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts EntityEditOptions) (*model.EntityEditReport, error) {
 	rep, err := l.store.EditEntityFields(ctx, entityType, entityPID, edits,
 		opts.Attribution(), opts.Lock, opts.Force)
@@ -82,7 +88,10 @@ func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 // and the id an album's or a release group's mbid clear strips.
 func entityOwedKeys(entityType model.MergeEntity, edits map[string]string, cleared []string) []string {
 	var out []string
-	for field := range edits {
+	for field, v := range edits {
+		if field == "mbid" && strings.TrimSpace(v) == "" {
+			continue
+		}
 		if model.EntityFieldWritable(entityType, field) {
 			out = append(out, string(entityType)+"."+field)
 		}
@@ -104,18 +113,22 @@ func (l *Library) EntityCuration(ctx context.Context, entityType model.MergeEnti
 // or a release group's mbid clear leaves behind. Both go into one pass over the files, so
 // a clear carrying sibling edits writes each file once. It runs after the catalog edit
 // committed, so a refusal or failure is reported as a *WriteBackError rather than a hard
-// error. An edit that touched no round-trippable field and cleared no mbid (a
-// release-group edit, a type edit, a set MBID) writes nothing to disk and returns nil,
-// since those values are DB-only by design.
+// error. An edit that touched no round-trippable field and cleared no mbid (a type edit,
+// an artist's id) writes nothing to disk and returns nil, since those values are DB-only
+// by design.
+//
+// A set id is held from every file when one of them cannot take it (entityIDHeld): the
+// other fields still fan, the id stays owed on every file, and each file is reported with
+// the reason under the id's key.
 //
 // The files are those of the members the edit found under the entity (rep.MemberPIDs), so
 // the fan follows them wherever a clear took them, merged into a twin or settled under a
 // group of their own, and never reaches the twin's or that group's other members, which
 // were no part of the edit.
 func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, rep *model.EntityEditReport) error {
-	tagEdits := append(entityTagEditsForFields(entityType, edits),
-		entityMBIDStripEdits(entityType, edits, rep.ClearedIDs)...)
-	if len(tagEdits) == 0 {
+	tagEdits := entityTagEditsForFields(entityType, edits)
+	strips := entityMBIDStripEdits(entityType, edits, rep.ClearedIDs)
+	if len(tagEdits)+len(strips) == 0 {
 		return nil
 	}
 	files, err := l.store.MemberFiles(ctx, rep.MemberPIDs)
@@ -129,7 +142,22 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: entityPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil, entityOwedKeys(entityType, edits, rep.ClearedIDs),
+	owed := entityOwedKeys(entityType, edits, rep.ClearedIDs)
+	if idKey, ok := meta.EntityFieldTagKey(entityType, "mbid"); ok && strings.TrimSpace(edits["mbid"]) != "" {
+		if reason := l.entityIDHeld(ctx, files, append(slices.Clone(tagEdits), strips...), idKey); reason != "" {
+			reason = "the " + strings.ReplaceAll(string(entityType), "_", " ") + "'s id goes on every member file or none, and " + reason
+			tagEdits = slices.DeleteFunc(tagEdits, func(e meta.TagEdit) bool { return e.Key == idKey })
+			owed = slices.DeleteFunc(owed, func(k string) bool { return k == string(entityType)+".mbid" })
+			for _, ref := range files {
+				wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Key: idKey, Reason: reason})
+			}
+		}
+	}
+	tagEdits = append(tagEdits, strips...)
+	if len(tagEdits) == 0 {
+		return wbErr.result()
+	}
+	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil, owed,
 		wholeFile(func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		})); err != nil {
@@ -187,9 +215,9 @@ func entityMBIDStripEdits(entityType model.MergeEntity, edits map[string]string,
 }
 
 // entityTagEditsForFields maps a committed entity edit to the on-disk tags that fan out
-// across the member files. A field with no fanned tag (a release-group field, a type, any
-// entity MBID) is skipped: those values stay DB-only, and the one id an mbid clear does
-// take off the files is entityMBIDStripEdits' business, not a value fan. Values are
+// across the member files. A field with no fanned tag (a type, an artist's id) is
+// skipped: those values stay DB-only. A cleared id is skipped too, since what a clear
+// takes off the files is entityMBIDStripEdits' business, not a value fan. Values are
 // trimmed and identifier-normalized the way the store normalized them before commit
 // (barcode and country both dispatch through NormalizeIdentifierField), so the fanned tag
 // always carries the stored form. A value empty after trimming clears its tag.
@@ -197,7 +225,7 @@ func entityTagEditsForFields(entityType model.MergeEntity, edits map[string]stri
 	out := make([]meta.TagEdit, 0, len(edits))
 	for field, value := range edits {
 		key, ok := meta.EntityFieldTagKey(entityType, field)
-		if !ok {
+		if !ok || field == "mbid" && strings.TrimSpace(value) == "" {
 			continue
 		}
 		e := meta.TagEdit{Key: key}
@@ -207,4 +235,52 @@ func entityTagEditsForFields(entityType model.MergeEntity, edits map[string]stri
 		out = append(out, e)
 	}
 	return out
+}
+
+// entityIDHeld is why an album's or a release group's id cannot go on its member files,
+// or "" when every one of them can take it: on disk, in a writable library, backing its
+// item alone as a whole file, and taking the write's edits with the id's key (idKey)
+// stored as given, as the tag writer judges a write prepared and not made (meta.Writer
+// Check, which also asks whether the file can be replaced now). The id goes on all of
+// them or none, since a catalog rebuilt from a half-written album would key the tagged
+// members apart from the rest.
+func (l *Library) entityIDHeld(ctx context.Context, files []model.ItemFileRef, edits []meta.TagEdit, idKey string) string {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return "the libraries could not be read: " + err.Error()
+	}
+	readOnly := readOnlyIDs(libs)
+	w := meta.NewWriter()
+	for _, ref := range files {
+		file, err := l.store.FileByPID(ctx, ref.FilePID)
+		if err != nil {
+			return ref.DisplayPath + " could not be read: " + err.Error()
+		}
+		if readOnly[file.LibraryID] {
+			return ref.DisplayPath + " is in a read-only library"
+		}
+		shared, err := l.store.FileSharedOrVirtual(ctx, ref.FilePID)
+		if err != nil {
+			return ref.DisplayPath + " could not be read: " + err.Error()
+		}
+		if shared {
+			return ref.DisplayPath + " backs several items or a window of a cue rip"
+		}
+		if _, err := os.Stat(pathx.Long(string(file.Path))); err != nil {
+			return ref.DisplayPath + " is not on disk"
+		}
+		lost, err := w.Check(ctx, string(file.Path), edits)
+		if heldForGood(err, lost) {
+			l.noteTagWriteRefused(ctx, ref.FilePID, string(file.Path))
+		}
+		switch {
+		case waxerr.Is(err, waxerr.CodeUnsupported):
+			return ref.DisplayPath + " cannot take tag writes in its current form"
+		case err != nil:
+			return ref.DisplayPath + " cannot be written now: " + err.Error()
+		case slices.ContainsFunc(lost, func(k string) bool { return strings.EqualFold(k, idKey) }):
+			return ref.DisplayPath + " cannot store it"
+		}
+	}
+	return ""
 }

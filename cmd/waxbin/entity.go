@@ -118,9 +118,12 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 		Short: "Edit fields on a shared entity",
 		Long: "Edit identifiers and sort-name overrides on a shared entity. --write-back also " +
 			"fans the values that round-trip through a scan across the entity's member files' " +
-			"on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, RELEASECOUNTRY, and " +
-			"ALBUMSORT, and an artist's ARTISTSORT. A release-group field, a type, a set entity " +
-			"MBID, and an album's media stay catalog-only.\n\n" +
+			"on-disk tags: an album's MUSICBRAINZ_ALBUMID, BARCODE, LABEL, CATALOGNUMBER, " +
+			"RELEASECOUNTRY, and ALBUMSORT, a release group's MUSICBRAINZ_RELEASEGROUPID, and an " +
+			"artist's ARTISTSORT. An id goes on every member file or none: when one of them is " +
+			"in a read-only library, off disk, or shared, it is held from all of them and stays " +
+			"owed, and the same edit writes it once they can take it. A release group's sort and " +
+			"type, an artist's mbid, and an album's media stay catalog-only.\n\n" +
 			"Clearing an album's or release group's mbid with `--set mbid=` re-keys the chain, " +
 			"but the member files still name the id, so a catalog-only clear lasts until a scan " +
 			"re-resolves them: their next retag, move, or content change, and not every scan. " +

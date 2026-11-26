@@ -199,6 +199,13 @@ func (m *mutator) SetArtLock(ctx context.Context, entityType model.ArtEntity, en
 	return m.lib.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
+func (m *mutator) SetArtPlaceholder(ctx context.Context, hash string, on bool) (bool, error) {
+	if m.px != nil {
+		return m.px.SetArtPlaceholder(ctx, hash, on)
+	}
+	return m.lib.SetArtPlaceholder(ctx, hash, on)
+}
+
 func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) (*model.EntityEditReport, error) {
 	if m.px != nil {
 		res, err := m.px.EditEntity(ctx, entityType, entityPID, edits, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force)

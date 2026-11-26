@@ -242,10 +242,16 @@ func coverFiles(t *testing.T) (st *Store, put func(name, codec string, bitrate i
 		if err := os.WriteFile(path, []byte("audio"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// A read records what it found on disk, which a copy's wait on its primary compares.
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
 		return model.PutScannedTrackInput{
 			LibraryID: lib.ID, PreserveLocks: true,
 			File: model.File{
 				Path: []byte(path), DisplayPath: path, RelPath: []byte(name), Kind: model.FileAudio,
+				Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
 				ContentHash: "c" + name, EssenceHash: "e" + name, Codec: codec, Bitrate: bitrate, SampleRate: 44100,
 				ScanState: model.ScanIndexed,
 			},
@@ -1109,9 +1115,21 @@ func TestADiskCoverIsTheFirstStatedOne(t *testing.T) {
 // written into the first of the item's two files. That file states the picture then,
 // and the front holds it already, so the front keeps the user's name and the file the
 // write has not reached goes on owing the cover, through the write and through a read of
-// either file.
+// either file. A provider's cover keeps its name the same way.
 func TestAUsersCoverWrittenBackStaysTheirs(t *testing.T) {
 	t.Parallel()
+	for _, attr := range []model.Attribution{
+		{Source: model.SourceUser},
+		{Source: model.SourceEnrichment, Provider: "coverartarchive"},
+	} {
+		t.Run(string(attr.Source), func(t *testing.T) {
+			t.Parallel()
+			coverWrittenBackKeepsItsName(t, attr)
+		})
+	}
+}
+
+func coverWrittenBackKeepsItsName(t *testing.T, attr model.Attribution) {
 	st, put := coverFiles(t)
 	ctx := context.Background()
 	old, chosen := testPNG(t, 40, 40), testPNG(t, 41, 41)
@@ -1119,7 +1137,7 @@ func TestAUsersCoverWrittenBackStaysTheirs(t *testing.T) {
 	flac := mustScan(t, st, flacIn)
 	mp3 := mustScan(t, st, put("song.mp3", "mp3", 320000, old))
 	if _, err := st.SetItemArt(ctx, flac.ItemPID, model.ArtRoleFront, chosen.Data, "",
-		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		attr, model.LockOff, false); err != nil {
 		t.Fatalf("SetItemArt: %v", err)
 	}
 	owed := func(file model.PID) int {
@@ -1132,8 +1150,8 @@ func TestAUsersCoverWrittenBackStaysTheirs(t *testing.T) {
 	}
 	check := func(when string) {
 		t.Helper()
-		if got := scalarStr(t, st, "SELECT source FROM art_map WHERE entity_type = 'track' AND role = 'front'"); got != string(model.SourceUser) {
-			t.Errorf("%s: the cover's source = %q, want it the user's still", when, got)
+		if got := scalarStr(t, st, "SELECT source FROM art_map WHERE entity_type = 'track' AND role = 'front'"); got != string(attr.Source) {
+			t.Errorf("%s: the cover's source = %q, want %q still", when, got, attr.Source)
 		}
 		if got := frontHash(t, st, model.ArtTrack, flac.ItemPID); got != chosen.Hash {
 			t.Errorf("%s: front = %q, want the chosen cover", when, got)

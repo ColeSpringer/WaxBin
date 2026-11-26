@@ -145,7 +145,9 @@ func newEnrichCmd(g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&writeTags, "write-tags", false,
-		"write what enrichment filled back into the files on disk (an unlimited run catches up on earlier passes)")
+		"write what enrichment filled back into the files on disk, the album and release-group ids it matched "+
+			"included: an id goes on every member file of the album or none, and one the edition tier guessed stays "+
+			"in the catalog (an unlimited run catches up on earlier passes)")
 	cmd.Flags().BoolVar(&force, "force", false, "re-enrich entities already looked up")
 	cmd.Flags().IntVar(&limit, "limit", 0, "cap the number of entities processed (0 = all)")
 	cmd.Flags().StringVar(&item, "item", "", "scope the pass to one item's targets (item pid; implies --force)")
@@ -238,11 +240,14 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	}
 	// Only when the run wrote tags, and always with the failures beside the writes: a
 	// run where every write failed must not read like one with nothing to write.
-	if r.TagsWritten+r.TagsFailed+r.TagsUnrepresented+r.TagsSkipped+r.TagsReadOnly > 0 {
+	if r.TagsWritten+r.TagsFailed+r.TagsUnrepresented+r.TagsSkipped+r.TagsReadOnly+r.IDsHeld > 0 {
 		fmt.Fprintf(w, "tags written:   %d (%d failed, %d unrepresented, %d skipped", r.TagsWritten, r.TagsFailed,
 			r.TagsUnrepresented, r.TagsSkipped)
 		if r.TagsReadOnly > 0 {
 			fmt.Fprintf(w, ", %d in read-only libraries", r.TagsReadOnly)
+		}
+		if r.IDsHeld > 0 {
+			fmt.Fprintf(w, ", %d waiting on an album or group id that goes on every member at once", r.IDsHeld)
 		}
 		fmt.Fprintln(w, ")")
 	}

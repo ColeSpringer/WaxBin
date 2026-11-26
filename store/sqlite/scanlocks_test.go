@@ -1352,7 +1352,7 @@ func TestLostFillReopensTheWriteBack(t *testing.T) {
 			t.Errorf("%s: owed files = %d, want %d", step, len(rows), want)
 		}
 	}
-	if err := st.SettleEnrichmentWrite(ctx, res.FilePID, at); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, res.FilePID, at, 0, 0); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	owed("settled", 0)
@@ -1361,7 +1361,7 @@ func TestLostFillReopensTheWriteBack(t *testing.T) {
 	putTrack(t, st, lib.ID, spec)
 	owed("after the file lost the bpm", 1)
 
-	if err := st.SettleEnrichmentWrite(ctx, res.FilePID, at); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, res.FilePID, at, 0, 0); err != nil {
 		t.Fatalf("settle again: %v", err)
 	}
 	if err := st.AddFileDiagnostic(ctx, res.FilePID, model.OriginEnrichment, model.FileDiagnostic{

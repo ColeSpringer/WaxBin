@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -95,6 +96,14 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID 
 	if err := dropLeftEntityOwedTx(ctx, tx, itemID, "artist", priorArtistID, artistID); err != nil {
 		return err
 	}
+	// A read says which ids the file carries; a move without one owes them outright.
+	if fileID != 0 {
+		if err := idsFollowTrackTx(ctx, tx, itemID, fileID, &tr, bothIDs); err != nil {
+			return err
+		}
+	} else if err := idsFollowMoveTx(ctx, tx, itemID, priorAlbumID); err != nil {
+		return err
+	}
 
 	if err := syncItemGenres(ctx, tx, itemID, tr.Genres, tr.Genre); err != nil {
 		return err
@@ -125,6 +134,137 @@ func dropLeftEntityOwedTx(ctx context.Context, tx *sql.Tx, itemID int64, entity 
 		itemID, string(model.OriginEdit), string(model.DiagTagWriteOwed), len(entity)+1, entity+".",
 		model.OwedAlbumMBID, model.OwedReleaseGroupMBID)
 	return err
+}
+
+// idsFollowTrackTx keeps an item's files owing the ids of the album and release group
+// its track sits under, which a catalog rebuilt from the files keys them by: a user's
+// (model.OwedAlbumMBID, model.OwedReleaseGroupMBID), owed as the edit owed the members
+// it found, and one enrichment matched, whose stamp drops back so the write-back writes
+// it again (enrichedIDsOwed). fileID and tr are a file a scan read and what its tags say,
+// and only an id they lack is owed. fileID 0 is a move made without a read, an edit or a
+// merge, which owes each id in which to every file of the item: the caller names the ids
+// that moved, since the files still carry the ones that did not.
+func idsFollowTrackTx(ctx context.Context, tx *sql.Tx, itemID, fileID int64, tr *model.Track, which idSet) error {
+	var userAlbum, userGroup, album, group string
+	var albumAt, groupAt int64
+	err := tx.QueryRowContext(ctx, `SELECT
+		CASE WHEN `+userIDSetOn("album", "al")+` THEN COALESCE(al.mbid, '') ELSE '' END,
+		CASE WHEN `+userIDSetOn("release_group", "rg")+` THEN COALESCE(rg.mbid, '') ELSE '' END,
+		CASE WHEN aid.entity_id IS NULL THEN '' ELSE al.mbid END, COALESCE(aid.updated_at, 0),
+		CASE WHEN gid.entity_id IS NULL THEN '' ELSE rg.mbid END, COALESCE(gid.updated_at, 0)
+		FROM track t JOIN album al ON al.id = t.album_id `+enrichedIDJoins+`
+		WHERE t.item_id = ?`, itemID).Scan(&userAlbum, &userGroup, &album, &albumAt, &group, &groupAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lacks := func(id string, tagged func(model.Track) string) bool {
+		return id != "" && (tr == nil || !strings.EqualFold(id, strings.TrimSpace(tagged(*tr))))
+	}
+	release := func(t model.Track) string { return t.MBReleaseID }
+	releaseGroup := func(t model.Track) string { return t.MBReleaseGroupID }
+	if !which.album {
+		userAlbum, album = "", ""
+	}
+	if !which.group {
+		userGroup, group = "", ""
+	}
+	var keys []string
+	if lacks(userAlbum, release) {
+		keys = append(keys, model.OwedAlbumMBID)
+	}
+	if lacks(userGroup, releaseGroup) {
+		keys = append(keys, model.OwedReleaseGroupMBID)
+	}
+	reopenAlbum, reopenGroup := lacks(album, release), lacks(group, releaseGroup)
+	if len(keys) == 0 && !reopenAlbum && !reopenGroup {
+		return nil
+	}
+	q, arg := "SELECT f.id FROM file f WHERE f.id = ? AND NOT "+fileSharedOrVirtualExpr, fileID
+	if fileID == 0 {
+		q = "SELECT f.id FROM item_file itf JOIN file f ON f.id = itf.file_id WHERE itf.item_id = ? AND NOT " + fileSharedOrVirtualExpr
+		arg = itemID
+	}
+	ids, err := queryInt64sTx(ctx, tx, q, arg)
+	if err != nil || len(ids) == 0 {
+		return err
+	}
+	if err := noteOwedTx(ctx, tx, ids, keys, model.Attribution{Source: model.SourceUser}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if reopenAlbum {
+			if _, err := tx.ExecContext(ctx, `UPDATE file SET enrich_album_id_settled_at = 0
+				WHERE id = ? AND enrich_album_id_settled_at >= ?`, id, albumAt); err != nil {
+				return err
+			}
+		}
+		if reopenGroup {
+			if _, err := tx.ExecContext(ctx, `UPDATE file SET enrich_group_id_settled_at = 0
+				WHERE id = ? AND enrich_group_id_settled_at >= ?`, id, groupAt); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// idSet names the ids a follow reaches, the album's and the release group's.
+type idSet struct{ album, group bool }
+
+// bothIDs is a read's follow, which compares both with the file's tags.
+var bothIDs = idSet{album: true, group: true}
+
+// idsFollowMoveTx is idsFollowTrackTx for an item an edit moved off the album prior: the
+// album's id and the group's follow where the new one differs from the old.
+func idsFollowMoveTx(ctx context.Context, tx *sql.Tx, itemID int64, prior sql.NullInt64) error {
+	var now sql.NullInt64
+	err := tx.QueryRowContext(ctx, "SELECT album_id FROM track WHERE item_id = ?", itemID).Scan(&now)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && now == prior {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	was, err := albumIDsTx(ctx, tx, prior.Int64)
+	if err != nil {
+		return err
+	}
+	is, err := albumIDsTx(ctx, tx, now.Int64)
+	if err != nil {
+		return err
+	}
+	return idsFollowTrackTx(ctx, tx, itemID, 0, nil, was.moved(is))
+}
+
+// albumIDs are an album's id and its release group's, empty for none, or for an album
+// that is gone.
+type albumIDs struct{ album, group string }
+
+// albumIDsTx reads the ids of the album id names.
+func albumIDsTx(ctx context.Context, tx *sql.Tx, id int64) (albumIDs, error) {
+	var ids albumIDs
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(al.mbid, ''), COALESCE(rg.mbid, '') FROM album al
+		LEFT JOIN release_group rg ON rg.id = al.release_group_id WHERE al.id = ?`, id).Scan(&ids.album, &ids.group)
+	if errors.Is(err, sql.ErrNoRows) {
+		return albumIDs{}, nil
+	}
+	return ids, err
+}
+
+// moved names the ids that differ between was and is.
+func (was albumIDs) moved(is albumIDs) idSet {
+	return idSet{album: !strings.EqualFold(was.album, is.album), group: !strings.EqualFold(was.group, is.group)}
+}
+
+// userIDSetOn is true when a user set the id the entity of type typ, whose row is aliased
+// alias, holds. A merge can leave a loser's row naming another id on a survivor whose
+// id came from its files, and that row says nothing of the survivor's id.
+func userIDSetOn(typ, alias string) string {
+	return `EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = '` + typ + `' AND ec.entity_id = ` + alias +
+		`.id AND ec.field = 'mbid' AND ec.source = 'user' AND ec.value = ` + alias + `.mbid COLLATE NOCASE)`
 }
 
 // creditNames turns one credit into its artists paired positionally with the ids the
@@ -247,8 +387,43 @@ func albumChainKeys(ctx context.Context, tx *sql.Tx, tr model.Track, filePath []
 	if err != nil {
 		return "", "", "", err
 	}
-	albumKey = identity.AlbumKey(tr.MBReleaseID, rgKey, 0, folder)
+	// A group key that is a MusicBrainz id names the row holding that id, which may be
+	// keyed by its title when the id came from enrichment or an edit. The album keys on
+	// that row's key, so a file naming the group's id and no release id lands on the album
+	// its untagged siblings sit on rather than on one of its own.
+	base := rgKey
+	if strings.TrimSpace(tr.MBReleaseID) == "" && strings.HasPrefix(rgKey, mbidKeyPrefix) {
+		id, _, err := findReleaseGroupTx(ctx, tx, quietLog, rgKey)
+		if err != nil {
+			return "", "", "", err
+		}
+		if id != 0 {
+			if err := tx.QueryRowContext(ctx, "SELECT match_key FROM release_group WHERE id = ?", id).Scan(&base); err != nil {
+				return "", "", "", err
+			}
+		}
+	}
+	albumKey = identity.AlbumKey(tr.MBReleaseID, base, 0, folder)
 	return anchor, rgKey, albumKey, nil
+}
+
+// quietLog drops what a lookup would log, for a read whose caller logs the same finding
+// where it acts on it.
+var quietLog logger = slog.New(slog.DiscardHandler)
+
+// findReleaseGroupTx finds the release group an identity key names: the row holding the
+// key, else the group a merge folded the key into (folded), else, for an mbid: key, the
+// row holding that id in its mbid column. It returns 0 when none does.
+func findReleaseGroupTx(ctx context.Context, tx *sql.Tx, log logger, key string) (id int64, folded bool, err error) {
+	err = tx.QueryRowContext(ctx, "SELECT id FROM release_group WHERE match_key = ?", key).Scan(&id)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return id, false, err
+	}
+	if id, err = foldedEntityTx(ctx, tx, model.MergeReleaseGroup, key); err != nil || id != 0 {
+		return id, id != 0, err
+	}
+	id, err = adoptEntityByMBIDTx(ctx, tx, log, "release_group", key)
+	return id, false, err
 }
 
 // albumFolderTx is identity.AlbumFolder for the file at path, which needs the root of the
@@ -433,26 +608,18 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string, affected 
 // forking a second one, and writes nothing, so there is no delta to reconcile. See
 // adoptEntityByMBIDTx for why forward re-keying is not the answer.
 func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title string, primaryArtistID int64, mbid string, affected *affectedRollups) (int64, error) {
-	var id int64
+	id, folded, err := findReleaseGroupTx(ctx, tx, log, key)
+	// A key a merge retired resolves to the group it folded into, which keeps its own
+	// primary artist: the folded key's anchor is the one the merge did away with, and
+	// adopting it would flip the group between the two on every scan.
+	if err != nil || folded {
+		return id, err
+	}
 	var curPrimary sql.NullInt64
-	err := tx.QueryRowContext(ctx,
-		"SELECT id, primary_artist_id FROM release_group WHERE match_key = ?", key).Scan(&id, &curPrimary)
-	if errors.Is(err, sql.ErrNoRows) {
-		// A key a merge retired resolves to the group it folded into, which keeps its own
-		// primary artist: the folded key's anchor is the one the merge did away with, and
-		// adopting it would flip the group between the two on every scan.
-		folded, ferr := foldedEntityTx(ctx, tx, model.MergeReleaseGroup, key)
-		if ferr != nil || folded != 0 {
-			return folded, ferr
-		}
-		adopted, aerr := adoptEntityByMBIDTx(ctx, tx, log, "release_group", key)
-		if aerr != nil {
-			return 0, aerr
-		}
-		if adopted != 0 {
-			err = tx.QueryRowContext(ctx,
-				"SELECT id, primary_artist_id FROM release_group WHERE id = ?", adopted).Scan(&id, &curPrimary)
-		}
+	if id == 0 {
+		err = sql.ErrNoRows
+	} else {
+		err = tx.QueryRowContext(ctx, "SELECT primary_artist_id FROM release_group WHERE id = ?", id).Scan(&curPrimary)
 	}
 	if err == nil {
 		if primaryArtistID != 0 && curPrimary.Int64 != primaryArtistID {
@@ -509,11 +676,10 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 // takes its first member's year, and from then on the year is its members'
 // (refreshAlbumYearsTx, run for every album a resolve touches).
 //
-// Two shapes still fork, and both are narrower than what adoption closes. A file
-// carrying a release-group id but no release id computes al:mbid:<group>\x1f…, which is
-// not an mbid: key, so it lands on an album row of its own under the right group. And a
-// partial retag splits as it always has, since the untagged members keep computing the
-// heuristic key. The common Picard case carries both ids and adopts at both rungs.
+// A file carrying a release-group id but no release id keys its album on the key of the
+// group row holding that id (albumChainKeys), so it lands beside its untagged siblings. A
+// partial retag of release ids still splits, since the untagged members keep computing
+// the heuristic key. The common Picard case carries both ids and adopts at both rungs.
 //
 // Adopting here can also leave a childless release group behind: if the file's anchor
 // resolves a different group, resolveReleaseGroup mints one, then the album adopted here

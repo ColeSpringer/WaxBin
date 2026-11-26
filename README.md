@@ -62,7 +62,7 @@ exit codes (`waxbin exit-codes`).
 | --- | --- |
 | **Lifecycle** | `init`, `library add`/`library list`/`library set`/`library remove`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
 | **Read / browse** | `query`/`ls` (incl. `--library`/`--primary-library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `primaryLibrary`, `podcast`, `creditArtist`, `playlist`, `series`, `author`, `narrator`), `search` (incl. `--max-candidates`, `--library`/`--primary-library`, `--state`, `--podcast`), `show`, `art` (incl. `--role`), `art roles`, `art hashes`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list`/`entity folds` |
-| **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]`, `kind --to book\|track [--write-back]` |
+| **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `art placeholder`, `detach [--write-back]`, `kind --to book\|track [--write-back]` |
 | **Ingest / organize** | `inbox`, `import` (a plan names why each file waits and what holds it; a missing file's own audio restores its item), `organize` (incl. `--skip-disk-check` for a plan from the catalog alone, a paged `organize history`, `organize undo`), `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent] [--file] [--reason]` (a file's sidecars go with it, a folder it empties is removed and the dry run names it, a trash move a crash cuts off is finished at the next open, and an archived item records what archived it), `mark-missing [--force]`, `merge`, `entity unfold [--re-resolve]` (reads again the files a fold kept), `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup` (incl. `--redact-secrets`; written owner-only and published whole by a rename), `restore`, `export`, `manifest`, `rebuild` |
@@ -185,7 +185,8 @@ never alters the encoded audio):
 - `waxbin enrich --write-tags` (or `write_enrichment_tags` in config) writes what the
   pass filled into files: every field with a tag key the scanner reads back (a track's
   `GENRE`/`BPM`/`ISRC`/`COMPOSER`/`DATE`, a book's `ASIN`/`ISBN`/`PUBLISHER`/`GENRE`/
-  `DATE`/narrator) plus an album's `LABEL` across its members. Without it those values
+  `DATE`/narrator) plus an album's `LABEL` across its members, and the album and
+  release-group ids it matched, each on every member file or none. Without it those values
   live only in the catalog, where a rescan keeps them until the file states its own,
   and other players never see them. An unlimited pass writes every value not yet on its file, so the
   first pass with it on catches up on earlier passes, and a write that fails is retried

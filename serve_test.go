@@ -2556,3 +2556,36 @@ func TestServeProxiedRemoveRoot(t *testing.T) {
 		t.Errorf("remove the server's configured root = %v, want CodeInvalid before any job starts", err)
 	}
 }
+
+// TestServeSetsAPlaceholderMark marks a track's cover a placeholder over the socket and
+// unmarks it again; a picture the catalog does not hold is not found.
+func TestServeSetsAPlaceholderMark(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "Album", "Song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	lib := openServedRW(t, ctx, db, root, sock)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t), waxbin.ArtEditOptions{Lock: model.LockOff}); err != nil {
+		t.Fatal(err)
+	}
+	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+	hash := frontOf(t, ctx, lib, ref)
+	c := dialWhenReady(t, sock)
+	for _, on := range []bool{true, false} {
+		if changed, err := c.SetArtPlaceholder(ctx, hash, on); err != nil || !changed {
+			t.Fatalf("proxied mark %v = %v (err %v), want it moved", on, changed, err)
+		}
+		if prov, err := lib.ArtProvenance(ctx, ref, model.ArtRoleFront); err != nil || prov.Placeholder != on {
+			t.Errorf("after the proxied mark %v the cover reads %+v (err %v)", on, prov, err)
+		}
+	}
+	if _, err := c.SetArtPlaceholder(ctx, "no-such-picture", true); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("an unknown picture = %v, want CodeNotFound", err)
+	}
+}

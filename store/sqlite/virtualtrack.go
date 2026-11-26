@@ -33,7 +33,12 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	seen := scanned(cover, in.NoCover, in.TagsUnread)
+	sidecar, skipped, err := s.examineSidecar(ctx, cover, in.SidecarCover, false)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	seen := scanned(cover, sidecar, in.NoCover, in.TagsUnread)
+	seen.sidecarSkipped = skipped
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -51,13 +56,13 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				accept[r.id] = true
 			}
 		}
-		fileID, filePID, _, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, accept, now, res)
+		fileID, filePID, _, _, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, accept, now, res)
 		if err != nil {
 			return err
 		}
 		res.FilePID = filePID
 
-		if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
+		if err := recordFileFrontTx(ctx, tx, fileID, &seen); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {

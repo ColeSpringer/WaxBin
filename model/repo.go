@@ -37,6 +37,13 @@ type PutScannedTrackInput struct {
 	// read then stands: the file may hold it still. With neither set the put says
 	// nothing about the cover.
 	TagsUnread bool
+	// PlaceholderCover marks the picture CoverArt carries from the file's tags as a
+	// placeholder before the cover settles, as an import does for a download's video
+	// thumbnail. A picture found beside the file is not marked.
+	PlaceholderCover bool
+	// SidecarCover is the cover beside the file when CoverArt is a picture from its tags.
+	// The file states it instead while the catalog holds that picture a placeholder.
+	SidecarCover *ArtImage
 	// AuxObservations records the on-disk state of this file's sidecars (a sibling
 	// .lrc, the directory cover) so a later rescan can stat-compare them and re-parse
 	// only a changed one instead of re-reading every sidecar every scan.
@@ -120,12 +127,15 @@ type PutScannedBookInput struct {
 	// Empty defaults to "embedded".
 	ChapterSource string
 	// CoverArt is the book's cover image (embedded or directory), or nil, NoCover says
-	// the scan looked and found none, and TagsUnread that it could not read the tags, as
-	// on PutScannedTrackInput. The book takes the cover of its primary part, or of the
-	// first part after it that states one.
-	CoverArt   *ArtImage
-	NoCover    bool
-	TagsUnread bool
+	// the scan looked and found none, TagsUnread that it could not read the tags,
+	// PlaceholderCover that the tags' picture stands in for a cover, and SidecarCover is
+	// the cover beside the part, as on PutScannedTrackInput. The book takes the cover of
+	// its primary part, or of the first part after it that states one.
+	CoverArt         *ArtImage
+	NoCover          bool
+	TagsUnread       bool
+	PlaceholderCover bool
+	SidecarCover     *ArtImage
 	// AuxObservations records the on-disk state of this file's sidecars for the scan
 	// fast-path (see PutScannedTrackInput.AuxObservations).
 	AuxObservations []AuxObservation
@@ -192,10 +202,12 @@ type PutScannedVirtualTracksInput struct {
 	Tracks []VirtualTrack
 	// CoverArt is the rip's cover image (embedded or directory), mapped onto each
 	// virtual track on every put, or nil, NoCover says the scan looked and found none,
-	// and TagsUnread that it could not read the tags, as on PutScannedTrackInput.
-	CoverArt   *ArtImage
-	NoCover    bool
-	TagsUnread bool
+	// TagsUnread that it could not read the tags, and SidecarCover is the cover beside
+	// the rip, as on PutScannedTrackInput.
+	CoverArt     *ArtImage
+	NoCover      bool
+	TagsUnread   bool
+	SidecarCover *ArtImage
 	// AuxObservations records this file's sidecar state (the .cue, a directory cover)
 	// for the scan fast-path, exactly as the track/book inputs do.
 	AuxObservations []AuxObservation
@@ -266,8 +278,9 @@ type ScanItemResult struct {
 	// Revived reports that the write brought the item back to present from missing (or
 	// from the trash, for a trashed item's file put back by hand), the file found again.
 	Revived bool
-	// Promoted lists alternates the write promoted on another item that lost this file
-	// (a re-encoded primary re-keyed away), for the caller to re-read.
+	// Promoted lists files for the caller to read again: alternates the write promoted on
+	// another item that lost this file (a re-encoded primary re-keyed away), and the
+	// files a re-key or a wait on a retagged primary left resolved against a stale key.
 	Promoted []PromotedFile
 	// Rekinded reports that the write turned ItemPID's item into another kind in place, a
 	// track read as a book or a book as a track, keeping its pid.
@@ -480,6 +493,18 @@ type EnrichedTagRow struct {
 	// with no enrichment label.
 	Label          string
 	LabelUpdatedAt int64
+	// SettledAt is the file's own stamp: a value of the item's or the label newer than it
+	// is owed, and one not newer is on the file already or was settled as lost.
+	SettledAt int64
+	// AlbumMBID and ReleaseGroupMBID are the ids enrichment matched for the track's
+	// album and its group, each empty unless owed: written by a provider other than the
+	// edition tier, still the entity's id, newer than the file's stamp for it, and one
+	// every member file can take. AlbumMBIDAt and ReleaseGroupMBIDAt are what a write
+	// carrying each settles its stamp at, 0 for an id not owed.
+	AlbumMBID          string
+	AlbumMBIDAt        int64
+	ReleaseGroupMBID   string
+	ReleaseGroupMBIDAt int64
 
 	Fields map[string]string
 }
@@ -592,10 +617,12 @@ type FileStateUpdate struct {
 }
 
 // FileCover is the cover a file states, in its tags or beside it: a picture, or none.
-// With neither set it says nothing.
+// With neither set it says nothing. Sidecar is the cover beside the file when Art is a
+// picture from its tags, as on PutScannedTrackInput.SidecarCover.
 type FileCover struct {
-	Art  *ArtImage
-	None bool
+	Art     *ArtImage
+	None    bool
+	Sidecar *ArtImage
 }
 
 // FolderCoverInput is what stands beside a file as its cover, found without reading its
@@ -766,22 +793,27 @@ type JobStore interface {
 	ReclaimOrphans(ctx context.Context, ts int64) (int, error)
 }
 
-// EntityFieldFile is one member file still owed an entity-level enrichment value: which
-// entity and field, the value the catalog holds, when enrichment wrote it, and the file
-// as a write needs it. It exists because an entity field lives on the entity row rather
-// than on any item, so it has no field_provenance row of its own to ride the per-item
-// write-back select on.
-type EntityFieldFile struct {
-	EntityType MergeEntity
-	Field      string
-	Value      string
-	UpdatedAt  int64 // unix ns the curation row was written
-	FilePID    PID
-	LibraryID  int64 // the file's library, which the write loop re-checks for read-only
-	Path       []byte
-	Size       int64
-	MTimeNS    int64
+// EnrichedAlbumFile is one member file still owed what enrichment wrote on its album or
+// release group: the album's label, with when enrichment wrote it, and the album's and
+// the group's MusicBrainz ids, each empty when not owed, with the stamps a write carrying
+// them settles (as on EnrichedTagRow). These live on the entity rows rather than on any
+// item, so they have no field_provenance row of their own to ride the per-item write-back
+// select on.
+type EnrichedAlbumFile struct {
+	FilePID   PID
+	LibraryID int64 // the file's library, which the write loop re-checks for read-only
+	Path      []byte
+	Size      int64
+	MTimeNS   int64
 	// Shared says the file backs several items or carries an offset window, which the
 	// write-back refuses rather than rewrites for one of them.
 	Shared bool
+
+	Label              string
+	LabelUpdatedAt     int64 // unix ns the label's curation row was written
+	SettledAt          int64 // the file's stamp, which a newer label is owed past
+	AlbumMBID          string
+	AlbumMBIDAt        int64
+	ReleaseGroupMBID   string
+	ReleaseGroupMBIDAt int64
 }

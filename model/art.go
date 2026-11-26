@@ -127,12 +127,16 @@ func ParseArtRole(s string) (ArtRole, bool) {
 // A Locked entry with an empty SourceHash is a lock with no artifact behind it, which
 // is what a cleared and locked slot looks like in any role. Check SourceHash before
 // trying to fetch bytes for an entry.
+//
+// Placeholder marks a track's or a book's own front whose picture stands in for a cover
+// (SetArtPlaceholder).
 type ArtRoleInfo struct {
-	Role       ArtRole
-	Format     string
-	Width      int
-	Height     int
-	SourceHash string
+	Role        ArtRole
+	Format      string
+	Width       int
+	Height      int
+	SourceHash  string
+	Placeholder bool
 	Attribution
 	UpdatedAt  int64 // unix nanoseconds
 	Locked     bool
@@ -178,14 +182,20 @@ type ArtImage struct {
 // what separates it from ArtBlob, and it carries no Locked because a lock belongs to the
 // entity that was asked about rather than to whichever chain level answered.
 type ArtProvenance struct {
-	Role       ArtRole
-	Level      ArtEntity
-	Derived    bool
-	SourceHash string
-	Format     string
-	Width      int
-	Height     int
-	Size       int
+	Role    ArtRole
+	Level   ArtEntity
+	Derived bool
+	// MemberPID names the track a Derived answer came from, empty otherwise.
+	MemberPID PID
+	// Placeholder marks an answer that stands in for a cover: a picture marked as one
+	// (SetArtPlaceholder), which a track or an album answers with only when no real
+	// cover is found up to the release group's.
+	Placeholder bool
+	SourceHash  string
+	Format      string
+	Width       int
+	Height      int
+	Size        int
 	Attribution
 	UpdatedAt int64 // unix nanoseconds
 }
@@ -200,7 +210,8 @@ type ArtProvenance struct {
 // clients cannot paint, or both. Level names the chain level that answered (the
 // requested entity itself, or the ancestor a front-cover resolve fell back to), and
 // Derived marks an album answered from a member track's cover rather than a durable
-// album row of its own: the cover of its earliest-cataloged member that has one.
+// album row of its own: the cover of its earliest-cataloged member that has a real one,
+// else of its earliest member with a placeholder. MemberPID names that member.
 type ArtBlob struct {
 	Bytes      []byte
 	Format     string
@@ -216,10 +227,12 @@ type ArtBlob struct {
 	// every rung at or above the source's own size, and can be larger than the box in
 	// both pixels and bytes. A client holding several such rungs is holding one picture
 	// and should fold them on SourceHash rather than keeping a copy per rung.
-	Box       int
-	Thumbnail bool
-	Level     ArtEntity
-	Derived   bool
+	Box         int
+	Thumbnail   bool
+	Level       ArtEntity
+	Derived     bool
+	MemberPID   PID
+	Placeholder bool // as on ArtProvenance
 	// Where the answering level's attachment came from. A derived album cover reports
 	// the member track's provenance, since that is the picture being served.
 	Attribution

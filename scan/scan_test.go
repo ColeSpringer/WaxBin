@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -64,6 +65,33 @@ func TestResolveCoverKeepsUndecodableAsLastResort(t *testing.T) {
 	}
 	if got.Hash == "" {
 		t.Error("last-resort embedded art must still carry a content hash for storage")
+	}
+}
+
+// TestStatedOffersTheCoverBesideAPictureInTheTags: a file whose tags hold a picture
+// states it, and the cover beside the file comes along for the catalog, which states
+// that one instead while it holds the picture a placeholder. A file stating the cover
+// beside it has nothing to pass over.
+func TestStatedOffersTheCoverBesideAPictureInTheTags(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 16, 9))); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "Album")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJPEG(t, filepath.Join(dir, "cover.jpg"), 80, 80)
+	covers := NewCovers()
+	got := covers.Stated(root, filepath.Join(dir, "song.mp3"),
+		&model.ArtImage{Data: buf.Bytes(), Attribution: model.Attribution{Source: model.SourceTag}})
+	if got.Art == nil || got.Art.Width != 16 || got.Sidecar == nil || got.Sidecar.Width != 80 {
+		t.Fatalf("stated = %+v, want the tags' picture with the cover beside it", got)
+	}
+	if bare := covers.Stated(root, filepath.Join(dir, "other.mp3"), nil); bare.Art == nil || bare.Sidecar != nil {
+		t.Errorf("stated with nothing in the tags = %+v, want the cover beside it and nothing passed over", bare)
 	}
 }
 

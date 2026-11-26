@@ -531,6 +531,53 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 	}
 }
 
+// TestAUsersShowCoverKeepsItsNameThroughTheFeed: a show cover the user chose and left
+// unlocked is the picture the feed serves. A sync bringing the same bytes leaves the
+// cover in the user's name, while a feed cover whose image URL rotated to the same bytes
+// takes the new URL.
+func TestAUsersShowCoverKeepsItsNameThroughTheFeed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, dbPath, _ := openStoreAt(t)
+	sync := func(feedURL, imageURL string, seed int) model.PID {
+		t.Helper()
+		res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{
+			FeedURL:     feedURL,
+			IdentityKey: identity.PodcastKey("", feedURL),
+			Feed:        model.Feed{Title: "Cast " + feedURL, ImageURL: imageURL},
+			FetchedAtNS: 1,
+			Image:       stamped(t, coverPNG(t, seed), model.SourceFeed, "", imageURL),
+		})
+		if err != nil {
+			t.Fatalf("UpsertFeed: %v", err)
+		}
+		return res.PodcastPID
+	}
+	db := roConn(t, dbPath)
+	showID := func(pid model.PID) int64 {
+		t.Helper()
+		return scalarInt64(t, db, "SELECT id FROM podcast WHERE pid = ?", string(pid))
+	}
+
+	const chosenFeed = "http://feed.example/chosen"
+	pid := sync(chosenFeed, "http://feed.example/one.png", 20)
+	if _, err := st.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, coverPNG(t, 21), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		t.Fatalf("SetEntityArt: %v", err)
+	}
+	sync(chosenFeed, "http://feed.example/two.png", 21)
+	if src, _, url := artRow(t, db, "podcast", showID(pid)); src != string(model.SourceUser) || url != "" {
+		t.Errorf("the chosen cover after a same-bytes sync = %q/%q, want the user's", src, url)
+	}
+
+	const rotatingFeed = "http://feed.example/rotating"
+	rot := sync(rotatingFeed, "http://feed.example/a.png", 22)
+	sync(rotatingFeed, "http://feed.example/b.png", 22)
+	if src, _, url := artRow(t, db, "podcast", showID(rot)); src != string(model.SourceFeed) || url != "http://feed.example/b.png" {
+		t.Errorf("a rotated feed cover = %q/%q, want the feed's new URL", src, url)
+	}
+}
+
 // TestArtLockPerRole: an auxiliary role carries a lock of its own under the
 // namespaced art.<role> field, so a locked back cover refuses the next back set the
 // way a locked front refuses the next front one. The front role is unchanged: its

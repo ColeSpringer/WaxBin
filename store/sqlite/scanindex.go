@@ -498,7 +498,12 @@ func (s *Store) UpdateFileStateIfUnchanged(ctx context.Context, in model.FileSta
 		if err != nil {
 			return false, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		seen = scanned(pic, in.Cover.None, false)
+		sidecar, skipped, err := s.examineSidecar(ctx, pic, in.Cover.Sidecar, false)
+		if err != nil {
+			return false, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		seen = scanned(pic, sidecar, in.Cover.None, false)
+		seen.sidecarSkipped = skipped
 	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
@@ -529,7 +534,7 @@ func (s *Store) UpdateFileStateIfUnchanged(ctx context.Context, in model.FileSta
 			if err := tx.QueryRowContext(ctx, "SELECT id FROM file WHERE pid = ?", string(in.FilePID)).Scan(&fileID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
+			if err := recordFileFrontTx(ctx, tx, fileID, &seen); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			_, err := settleFileFrontsTx(ctx, tx, fileID, seen.pic, false, true)

@@ -50,15 +50,17 @@ func IsEntityEditField(et MergeEntity, field string) bool {
 }
 
 // EntityFieldWritable reports whether an entity field's value is written into its member
-// files' tags by a write-back: an album's sort, barcode, label, catalog number and
-// country, and an artist's sort. The rest stay in the catalog.
+// files' tags by a write-back: an album's sort, barcode, label, catalog number, country
+// and mbid, a release group's mbid, and an artist's sort. The rest stay in the catalog.
 func EntityFieldWritable(et MergeEntity, field string) bool {
 	switch et {
 	case MergeAlbum:
 		switch field {
-		case "sort", "barcode", "label", "catalog_number", "country":
+		case "sort", "barcode", "label", "catalog_number", "country", "mbid":
 			return true
 		}
+	case MergeReleaseGroup:
+		return field == "mbid"
 	case MergeArtist:
 		return field == "sort"
 	}

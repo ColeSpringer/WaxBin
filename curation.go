@@ -189,6 +189,19 @@ func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, en
 	return l.store.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
+// SetArtPlaceholder marks a stored picture as standing in for a cover, or unmarks it.
+// hash is the picture's SourceHash, or the hash it arrived under where it was stored
+// scaled down. A track or a book shows a marked picture while no real cover is found up
+// to its release group, and the album it is on stays open to a fetched cover. The mark
+// is the picture's, so it holds wherever the same bytes are a track's or a book's cover,
+// and it is read in that slot alone. A file whose tags hold a marked picture states a
+// cover file beside it instead, from the next scan, since only a read sees that file; an
+// unmark gives the file its picture back at once. An unmark is remembered: an import
+// that would mark the picture again leaves it. It reports whether the mark moved.
+func (l *Library) SetArtPlaceholder(ctx context.Context, hash string, on bool) (bool, error) {
+	return l.store.SetArtPlaceholder(ctx, hash, on)
+}
+
 // writeBackItemArt embeds (or clears) the cover the catalog now holds for an item, the
 // bytes its set handed back, into its backing file. It runs after the catalog edit
 // committed, so a refusal or failure is reported as a *WriteBackError rather than a hard

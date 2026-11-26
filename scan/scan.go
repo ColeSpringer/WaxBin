@@ -207,9 +207,10 @@ type Result struct {
 	// changed.
 	Reread  int
 	Missing int // items reconciled to 'missing' (backing files gone from disk)
-	// Promoted is alternate files given the place of a primary or part their item lost
-	// (a vanished file, or a primary re-keyed to another item), each re-read as the scan
-	// ends.
+	// Promoted is files re-read as the scan ends: alternates given the place of a primary
+	// or part their item lost (a vanished file, or a primary re-keyed to another item),
+	// and other encodings an item's re-key, or a wait on its retagged primary, left read
+	// against a stale key.
 	Promoted int
 	// Dropped is the rows of gone files reconciliation removed: a gone alternate, or a
 	// row no item held.
@@ -483,12 +484,13 @@ type scanCtx struct {
 	open               []string
 	adoptOnly, unadopt bool
 	albums             map[string]string
-	// album, position, pin, coverPending and job are FileOptions', for a single-file scan;
-	// job reaches the re-reads of the files its puts promote too.
+	// album, position, pin, coverPending, placeholder and job are FileOptions', for a
+	// single-file scan; job reaches the re-reads of the files its puts promote too.
 	album        string
 	position     *int
 	pin          bool
 	coverPending bool
+	placeholder  bool
 	job          model.PID
 	// rollups is the walk's settle cadence, nil outside a walk, where a put recomputes the
 	// rollups it touches itself.
@@ -672,6 +674,9 @@ type FileOptions struct {
 	// import says what stands beside the file once its covers are placed
 	// (SettleFolderCovers).
 	CoverPending bool
+	// PlaceholderCover says the picture in the file's tags stands in for a cover, as a
+	// download's video thumbnail does (model.PutScannedTrackInput.PlaceholderCover).
+	PlaceholderCover bool
 }
 
 // ScanFileWith is ScanFileAs with the options an import passes. A file whose folder is
@@ -693,7 +698,8 @@ func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path str
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
 	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position,
-		pin: opts.Pin, job: opts.Job, reResolve: opts.ReResolve, coverPending: opts.CoverPending, ids: &identities{}}
+		pin: opts.Pin, job: opts.Job, reResolve: opts.ReResolve, coverPending: opts.CoverPending,
+		placeholder: opts.PlaceholderCover, ids: &identities{}}
 	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, opts.Kind); err != nil {
 		res.Errored++
 		return res, nil, err
@@ -883,6 +889,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 
 	cover, looked := resolveCover(path, fm.CoverArt, sc.cache)
+	sidecar := sidecarFor(path, cover, sc.cache)
 	noCover := cover == nil && looked && !sc.coverPending
 	// A container the reader has no parser for had no tags read, so what the read found
 	// is what stands beside the file and no more.
@@ -1007,7 +1014,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		// file cataloged as one track.
 		out, err = s.cat.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
 			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, NoCover: noCover, TagsUnread: tagsUnread, AuxObservations: aux,
-			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
+			SidecarCover: sidecar,
+			Acquisition:  tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
 			DeferRollups: sc.rollups != nil, Job: sc.job,
 		})
 	case isBook:
@@ -1023,7 +1031,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		if len(cueChapters) > 0 {
 			bin.Chapters, bin.ChapterSource = cueChapters, "cue"
 		}
-		bin.AuxObservations, bin.NoCover, bin.TagsUnread = aux, noCover, tagsUnread
+		bin.AuxObservations, bin.NoCover, bin.TagsUnread, bin.PlaceholderCover = aux, noCover, tagsUnread, sc.placeholder
+		bin.SidecarCover = sidecar
 		bin.PreferredItemPID = adoptedPID(sc, fm)
 		bin.Diagnostics = diags
 		bin.PreserveLocks = sc.preserveLocks
@@ -1034,6 +1043,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	default:
 		in := trackInput(lib.ID, file, tags, essenceHash)
 		in.Lyrics, in.CoverArt, in.NoCover, in.TagsUnread, in.AuxObservations = lyrics, cover, noCover, tagsUnread, aux
+		in.PlaceholderCover, in.SidecarCover = sc.placeholder, sidecar
 		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
 		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
 		in.DeferRollups, in.ReResolve, in.Job = sc.rollups != nil, sc.reResolve, sc.job
@@ -1957,8 +1967,9 @@ func (c *artCache) dirCoverObs(dir string) *model.AuxObservation { return c.reso
 // resolveCover chooses a track's cover, preferring a decodable embedded image,
 // then the directory cover image, and only then a non-decodable embedded image as
 // a last resort. That keeps an embedded format without a registered decoder
-// available to serve, while a corrupt or placeholder embedded picture does not
-// shadow a valid cover.jpg next to the file.
+// available to serve, while a corrupt embedded picture does not shadow a valid
+// cover.jpg next to the file. An embedded picture the catalog holds a placeholder gives
+// way to the cover beside the file too, in the store, which sidecarFor hands it.
 //
 // looked reports that a nil answer is a finding as far as the folders go: every cover
 // folder was listed and holds no cover file. With a folder it could not list, or a cover
@@ -1988,6 +1999,21 @@ func resolveCover(path string, embedded *model.ArtImage, cache *artCache) (cover
 		return embedded, true
 	}
 	return nil, looked
+}
+
+// sidecarFor returns the cover beside the file at path when its cover is a picture from
+// its tags, for the catalog to state in that picture's place should it hold the picture
+// a placeholder; nil otherwise.
+func sidecarFor(path string, cover *model.ArtImage, cache *artCache) *model.ArtImage {
+	if cover == nil || cover.Source != model.SourceTag {
+		return nil
+	}
+	for _, d := range cache.coverDirs(path) {
+		if img := cache.resolve(d).img; img != nil {
+			return img
+		}
+	}
+	return nil
 }
 
 // settleUnknownCover tells the catalog what stands beside a file it fast-paths whose cover
@@ -2063,7 +2089,7 @@ func (c *Covers) Stated(root, path string, embedded *model.ArtImage) model.FileC
 		c.caches[root] = cache
 	}
 	cover, looked := resolveCover(path, embedded, cache)
-	return model.FileCover{Art: cover, None: cover == nil && looked}
+	return model.FileCover{Art: cover, None: cover == nil && looked, Sidecar: sidecarFor(path, cover, cache)}
 }
 
 // coverFilesByLower lists dir once and returns a lowercase-name -> actual-name map of

@@ -44,11 +44,17 @@ func newAffectedRollups() *affectedRollups {
 }
 
 // albumRungFront reads the cover an album draws at its own rung: its own row, else the
-// member's the art walk borrows (albumMemberFronts), else nothing. It is the part of an
-// album's cover that moves with its tracks, read inside the write that moves them.
+// member's real cover the art walk borrows (albumMemberFronts), else a member's
+// placeholder, else nothing. A placeholder's value carries the mark, so marking a picture
+// moves it. It is the part of an album's cover that moves with its tracks, read inside
+// the write that moves them.
 const albumRungFront = `SELECT al.pid, COALESCE(
 		(SELECT am.source_hash FROM art_map am WHERE am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front'),
-		(SELECT tm.source_hash` + albumMemberFronts + `al.id ORDER BY t.item_id LIMIT 1), '')
+		(SELECT CASE WHEN f.stand_in THEN COALESCE(
+				(SELECT tm.source_hash` + albumMemberFronts + `al.id AND NOT ` + placeholderOf + `tm.source_hash) ORDER BY t.item_id LIMIT 1),
+				'placeholder ' || f.hash) ELSE f.hash END
+			FROM (SELECT tm.source_hash AS hash, ` + placeholderOf + `tm.source_hash) AS stand_in` + albumMemberFronts + `al.id
+				ORDER BY t.item_id LIMIT 1) f), '')
 	FROM album al WHERE al.id = ?`
 
 // watchAlbum notes what an album draws before the write changes its members or their
@@ -113,6 +119,27 @@ func (a *affectedRollups) announceFrontsTx(ctx context.Context, tx *sql.Tx) erro
 		}
 	}
 	return nil
+}
+
+// movedFrontsTx lists the watched albums whose cover moved since it was noted, without
+// taking the new baseline, in id order.
+func (a *affectedRollups) movedFrontsTx(ctx context.Context, tx *sql.Tx) ([]int64, error) {
+	var moved []int64
+	for _, id := range slices.Sorted(maps.Keys(a.fronts)) {
+		var pid model.PID
+		var front string
+		err := tx.QueryRowContext(ctx, albumRungFront, id).Scan(&pid, &front)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if front != a.fronts[id] {
+			moved = append(moved, id)
+		}
+	}
+	return moved, nil
 }
 
 // created records an album, release group or artist the write inserted, which is as

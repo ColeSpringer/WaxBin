@@ -226,7 +226,7 @@ func settleRederivedTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 // dropMootEnrichmentDriftTx clears the enrichment write-back's diagnostics on a file once
 // a scan has re-derived away the values a failed write was about and the file owes
 // nothing more: no enrichment value newer than its settle stamp is left on the item, and
-// no album label is due (the two halves enrichedTagSelect owes a file by). A pass with
+// no album label or id is due (the halves enrichedTagSelect owes a file by). A pass with
 // nothing left to write clears them the same way.
 func dropMootEnrichmentDriftTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64) error {
 	var owed bool
@@ -234,8 +234,10 @@ func dropMootEnrichmentDriftTx(ctx context.Context, tx *sql.Tx, fileID, itemID i
 		EXISTS (SELECT 1 FROM field_provenance fp WHERE fp.item_id = ? AND fp.source = 'enrichment'
 		        AND fp.locked = 0 AND fp.updated_at > f.enrich_settled_at)
 		OR EXISTS (SELECT 1 FROM track t JOIN album al ON al.id = t.album_id
-		           JOIN entity_curation lab ON `+enrichmentLabelRowJoin+`
-		           WHERE t.item_id = ? AND COALESCE(al.label, '') <> '' AND lab.updated_at > f.enrich_settled_at)
+		           LEFT JOIN entity_curation lab ON `+enrichmentLabelRowJoin+`
+		           `+enrichedIDJoins+`
+		           WHERE t.item_id = ? AND ((COALESCE(al.label, '') <> '' AND lab.updated_at > f.enrich_settled_at)
+		                OR `+enrichedIDsOwedOne+`))
 		FROM file f WHERE f.id = ?`, itemID, itemID, fileID).Scan(&owed)
 	if err != nil || owed {
 		return err

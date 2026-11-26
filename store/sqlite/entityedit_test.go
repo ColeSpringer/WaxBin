@@ -806,6 +806,39 @@ func TestEntityEditClearRGMBIDTakesBackEnrichmentArt(t *testing.T) {
 	assertVerifyClean(t, unmatched)
 }
 
+// TestEnrichmentFetchingAUsersGroupCoverLeavesItTheirs: a group cover the user chose and
+// left unlocked has the same bytes the identity pass fetches. The pass leaves the cover
+// in the user's name, so the id clear after it, which takes back what enrichment
+// fetched, keeps it.
+func TestEnrichmentFetchingAUsersGroupCoverLeavesItTheirs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const rgMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	st, rgPID, rgID := rgArtFixture(t, rgMBID)
+	chosen := testPNG(t, 30, 30)
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen.Data, "",
+		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		t.Fatalf("set the user's cover: %v", err)
+	}
+	fetched := *chosen
+	fetched.Attribution = model.Attribution{Source: model.SourceEnrichment, Provider: "coverartarchive",
+		SourceURL: "http://caa.example/front"}
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: rgMBID, Type: "album", Art: &fetched,
+	}); err != nil {
+		t.Fatalf("enrich release group: %v", err)
+	}
+	const sourceQ = "SELECT source FROM art_map WHERE entity_type = 'release_group' AND entity_id = ? AND role = 'front'"
+	if got := scalarStr(t, st, sourceQ, rgID); got != string(model.SourceUser) {
+		t.Errorf("the cover's source after the pass = %q, want the user's", got)
+	}
+	clearEntityMBID(t, st, model.MergeReleaseGroup, rgPID)
+	if n := rgArtRoles(t, st, rgID, "front"); n != 1 {
+		t.Errorf("front rows after the id clear = %d, want the user's cover kept", n)
+	}
+	assertVerifyClean(t, st)
+}
+
 // TestEntityEditMBIDCorrectionTakesBackEnrichmentArt: a corrected id disowns everything
 // enrichment fetched under the old one, so on every art rung its front and auxiliary rows
 // go on any id edit, not only a clear, and the backfill asks again under the new id. A

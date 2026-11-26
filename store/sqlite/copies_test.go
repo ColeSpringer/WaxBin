@@ -11,7 +11,6 @@ import (
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/store/sqlite"
-	"github.com/colespringer/waxbin/waxerr"
 )
 
 // openCopyStore opens a store over one in-place library rooted in a temp directory. The
@@ -487,7 +486,7 @@ func TestCopyRelinkLeavesAnotherItemsGoneRow(t *testing.T) {
 // TestRelinkFollowsAKeyChange: a file retagged under a key no item holds yet (a recording
 // id added) and moved in the same pass relinks its own row, the only gone row of its
 // audio, so the outcome matches retagging it in place and then moving it: the file keeps
-// its pid under the new key and the old item, left with no file, goes.
+// its pid, and its item, re-keyed to the new key.
 func TestRelinkFollowsAKeyChange(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -505,8 +504,11 @@ func TestRelinkFollowsAKeyChange(t *testing.T) {
 	if !r2.Relinked || r2.FilePID != r1.FilePID {
 		t.Errorf("moved and retagged file = %+v, want its row %s relinked", r2, r1.FilePID)
 	}
-	if _, err := st.ItemByPID(ctx, r1.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
-		t.Errorf("old item err = %v, want it gone with its file", err)
+	if r2.ItemPID != r1.ItemPID {
+		t.Errorf("the moved file backs %s, want its item %s kept", r2.ItemPID, r1.ItemPID)
+	}
+	if it, err := st.ItemByPID(ctx, r1.ItemPID); err != nil || it.MBID != "rec-new" {
+		t.Errorf("item = %+v (err %v), want it holding the new recording id", it, err)
 	}
 }
 

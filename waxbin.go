@@ -1607,7 +1607,9 @@ type EnrichOptions struct {
 
 	// WriteTags writes what enrichment filled back into the backing files: everything
 	// not yet on disk for an unlimited full run, the scope's share of it for a scoped
-	// one, and what a limited run looked up. It is ORed with the library's
+	// one, and what a limited run looked up. That includes the album and release-group
+	// ids it matched, each written to all of the member files or held from all of them,
+	// and never an id the edition tier guessed. It is ORed with the library's
 	// WriteEnrichmentTags option so a run can opt in without config.
 	WriteTags bool
 }
@@ -2798,13 +2800,20 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 		return err
 	}
 
-	// A book's title and author are its identity anchor, unlike a track's essence, so
-	// writing them to disk would make the next scan --force re-key the book to a new pid
-	// and drop its locks. An author credit writes the same ALBUMARTIST. Re-anchor to the
-	// file's post-write value instead: it reads the file's actual state, so a partial
-	// write-back failure is safe and a part still holding the old value is a no-op.
+	// A book's title and author are its identity anchor, so writing them to disk would
+	// make the next scan --force re-key the book to a new pid and drop its locks. An author
+	// credit writes the same ALBUMARTIST. Re-anchor to the file's post-write value instead:
+	// it reads the file's actual state, so a partial write-back failure is safe and a part
+	// still holding the old value is a no-op.
 	if item.Kind == model.KindBook && (bookIdentityEdited(edits) || hasAuthorCredit(roles)) {
 		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
+	}
+	// A track's recording id is its key, so one that landed in its primary file moves the
+	// key with it.
+	if v, ok := edits["mbid"]; ok && item.Kind == model.KindTrack && wbErr.landed[item.FilePID] {
+		if _, err := l.store.RekeyTrack(ctx, itemPID, strings.TrimSpace(v)); err != nil {
+			l.log.Warn("track identity re-key", "item", itemPID, "err", err)
+		}
 	}
 	return wbErr.result()
 }
@@ -2873,7 +2882,7 @@ func (l *Library) reanchorBookIdentity(ctx context.Context, itemPID, filePID mod
 		l.log.Warn("book re-anchor file lookup", "item", itemPID, "err", err)
 		return
 	}
-	fm, err := meta.NewReader().Read(ctx, string(file.Path))
+	fm, err := meta.NewReader().Inspect(ctx, string(file.Path))
 	if err != nil {
 		l.log.Warn("book re-anchor read", "item", itemPID, "err", err)
 		return
@@ -4260,8 +4269,14 @@ func (l *Library) ImportBatches(ctx context.Context, limit int) ([]*model.Import
 // example one a source provider already fetched to disk). Path is required for a
 // track/book and optional for an episode (an episode may be ingested remote, to be
 // downloaded later from meta.SourceURL).
+//
+// PlaceholderCover says the picture in the file's tags stands in for a cover, as a
+// download's video thumbnail does. The import marks it (SetArtPlaceholder), so it shows
+// while nothing better does and leaves the album's cover open to a fill. A track or a
+// book only; a picture found beside the file is not marked.
 type AcquiredFile struct {
-	Path string
+	Path             string
+	PlaceholderCover bool
 }
 
 // AcquiredMeta carries the origin provenance recorded against an acquired item plus
@@ -4427,6 +4442,7 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 			src = abs
 		}
 		if a := bySrc[src]; a != nil {
+			a.PlaceholderCover = f.PlaceholderCover
 			r.Outcome, r.Code, r.Restores = a.Outcome, a.Code, a.Restores
 			// Already-present is reported whatever the policy, from the cataloged files the
 			// plan's duplicate gate read, so a DupAllow import of a genuine duplicate still
@@ -4476,6 +4492,9 @@ func presentHolder(occ []model.FileOccupant, kind model.Kind) *model.FileOccupan
 // later download). It records the origin provenance on the episode item.
 func (l *Library) importAcquiredEpisode(ctx context.Context, file AcquiredFile, meta AcquiredMeta) (*AcquiredResult, error) {
 	const op = "Library.ImportAcquired"
+	if file.PlaceholderCover {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "a placeholder cover is a track's or a book's; an episode's cover is its own")
+	}
 	if strings.TrimSpace(file.Path) != "" && !meta.Copy {
 		libs, err := l.store.Libraries(ctx)
 		if err != nil {

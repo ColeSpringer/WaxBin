@@ -619,10 +619,19 @@ func TestArtWalkStatementCounts(t *testing.T) {
 	}
 }
 
+// subqueryScan reports whether a plan line scans a subquery's own rows, the genre pick g
+// or the first member cover f, which reads no table. It matches the line whole, so a
+// table such as file or fts is still caught.
+func subqueryScan(line string) bool {
+	line = strings.TrimSpace(line)
+	return line == "SCAN g" || line == "SCAN f"
+}
+
 // TestArtWalkPlans keeps each rung an index seek. The derived rung is the one to watch:
 // left to the planner it starts from every track cover in the catalog rather than from
 // the album's members, which is what albumMemberFronts pins, for the enrichment queue's
-// vacancy check as much as for the walk.
+// vacancy check as much as for the walk. A picture's placeholder mark is read off the
+// partial index, never the picture's row.
 func TestArtWalkPlans(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)
@@ -630,6 +639,11 @@ func TestArtWalkPlans(t *testing.T) {
 		putWithCover(t, st, lib.ID, fmt.Sprintf("/lib/al/%d.flac", i), fmt.Sprintf("e%d", i), testPNG(t, 40+i, 40))
 	}
 	putFeed(t, st, "http://cast.example/f", "Ep1")
+	for _, line := range []string{"SCAN file", "SCAN fts", "SCAN field_provenance", "SCAN genre", "SCAN f USING INDEX x"} {
+		if subqueryScan(line) {
+			t.Fatalf("%q reads as a subquery's own rows", line)
+		}
+	}
 	members := "SEARCH t USING COVERING INDEX track_album_id (album_id=?)"
 	for name, tc := range map[string]struct {
 		stmt string
@@ -650,13 +664,16 @@ func TestArtWalkPlans(t *testing.T) {
 	} {
 		plan := explainPlan(t, st, tc.stmt, tc.args...)
 		for _, line := range strings.Split(plan, "\n") {
-			// A scan of the bound list, or of the genre subquery's own rows, reads no table.
-			if strings.Contains(line, "SCAN") && !strings.Contains(line, "VIRTUAL TABLE") && !strings.Contains(line, "SCAN g") {
+			if strings.Contains(line, "SCAN") && !strings.Contains(line, "VIRTUAL TABLE") && !subqueryScan(line) {
 				t.Errorf("%s scans a table:\n%s", name, plan)
 			}
 		}
 		if !strings.Contains(plan, tc.want) {
 			t.Errorf("%s does not start from the album's members:\n%s", name, plan)
+		}
+		if strings.Contains(tc.stmt, placeholderOf) &&
+			!strings.Contains(plan, "SEARCH phs USING COVERING INDEX art_source_placeholder (hash=?)") {
+			t.Errorf("%s reads the placeholder mark off the picture's row:\n%s", name, plan)
 		}
 		if strings.Contains(plan, "TEMP B-TREE") {
 			t.Errorf("%s sorts, so it cannot stop at the first cover:\n%s", name, plan)

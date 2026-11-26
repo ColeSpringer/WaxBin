@@ -353,7 +353,14 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	seen := scanned(cover, in.NoCover, in.TagsUnread)
+	sidecar, skipped, err := s.examineSidecar(ctx, cover, in.SidecarCover, in.PlaceholderCover)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	seen := scanned(cover, sidecar, in.NoCover, in.TagsUnread)
+	seen.sidecarSkipped = skipped
+	// Asked here, ahead of the write lock, for the keep rule (keepItemForFileTx).
+	probe := s.probePrimary(ctx, in.File.Path)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -380,6 +387,18 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				key, rekinded, res.Rekinded = &resolvedItem{id: id}, true, true
 			}
 		}
+		// A file retagged with another recording id, or none, keeps the item it backs.
+		if !rekinded {
+			kept, others, err := keepItemForFileTx(ctx, tx, fileID, model.KindTrack, in.Item.IdentityKey,
+				in.File.EssenceHash, priorEssence, res.FileCreated, key, probe)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if kept != 0 {
+				key = &resolvedItem{id: kept}
+				res.Promoted = append(res.Promoted, others...)
+			}
+		}
 
 		// Record this file's sidecar observations (replacing the prior set) so the next
 		// scan can stat-compare them and re-parse only a changed sidecar, and so a
@@ -388,7 +407,10 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
+		if err := markStatedPlaceholderTx(ctx, tx, seen, in.PlaceholderCover); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := recordFileFrontTx(ctx, tx, fileID, &seen); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -594,7 +616,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		res.Promoted = o.promoted
+		res.Promoted = append(res.Promoted, o.promoted...)
 		handed := carryHandedPID(res, &itemPID, o.handed)
 		res.Absorbed = absorbedInto(o.folded, itemPID)
 		if res.ItemCreated && o.kept != "" {

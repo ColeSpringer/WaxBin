@@ -108,6 +108,10 @@ func artBenchStore(tb testing.TB, shape string) (*Store, []model.PID) {
 // The chain walk this replaced ran one entity at a time, 105 to 187µs each, so a page's
 // fifty cost 3.3 to 7ms.
 //
+// Placeholders (2026-11-25, interleaved against the walk before them, 4 threads) left
+// every shape within noise but the sibling one's 50 hashes, about 10% slower (0.47 to
+// 0.52ms): its member pick reads the cover's hash and probes art_source_placeholder.
+//
 // cards and facet are the reads that carry ArtHash themselves, fifty album cards and a
 // 200-bucket album facet. Timed in one run beside the walk they make, the walk is about
 // a tenth of each: 0.4ms of a 4ms page of cards, 1.6ms of a 16ms facet. A search's hits

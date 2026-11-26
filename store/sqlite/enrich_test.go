@@ -1571,7 +1571,7 @@ func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
 	}
 
 	// Settled at the fill's time, the file is no longer owed.
-	if err := st.SettleEnrichmentWrite(ctx, filePID, first); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, filePID, first, 0, 0); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if rows := owed(t, nil); len(rows) != 0 {
@@ -1592,7 +1592,7 @@ func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
 		t.Errorf("fields = %v, want both the new bpm and the earlier composer", rows[0].Fields)
 	}
 	// Settling below the newest value leaves the file owed; settling at it does not.
-	if err := st.SettleEnrichmentWrite(ctx, filePID, first); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, filePID, first, 0, 0); err != nil {
 		t.Fatalf("settle again: %v", err)
 	}
 	if rows := owed(t, nil); len(rows) != 1 {
@@ -1686,7 +1686,7 @@ func TestRescanRetiringEnrichmentClearsMootDrift(t *testing.T) {
 	}
 
 	labelAt := int64(scalarQueryInt(t, db, "SELECT updated_at FROM entity_curation WHERE field = 'label'"))
-	if err := st.SettleEnrichmentWrite(ctx, filePID, labelAt); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, filePID, labelAt, 0, 0); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	// The file holds a composer now, so the next fill is the bpm it still lacks until the
@@ -1698,9 +1698,10 @@ func TestRescanRetiringEnrichmentClearsMootDrift(t *testing.T) {
 	}
 }
 
-// TestEnrichedAlbumLabelFiles: the album label fan-out is planned by one query joining
-// the enrichment label rows to the member files still owed the label, not by a member
-// lookup per enriched album. Each such file comes back once with the label, when
+// TestEnrichedAlbumFiles, for the label: the album label fan-out is planned by one query
+// joining the enrichment label rows to the member files still owed the label, not by a
+// member lookup per enriched album. TestEnrichmentIDsAreOwedToEveryMemberOrNone covers the
+// ids the same query carries. Each such file comes back once with the label, when
 // enrichment wrote it, and what the write needs (the path and the on-disk state for the
 // optimistic update). A settled file drops out; a non-present item's file never
 // appears, since its write would fail on every pass; a shared or virtual file is
@@ -1708,7 +1709,7 @@ func TestRescanRetiringEnrichmentClearsMootDrift(t *testing.T) {
 // member with enrichment fields of its own gets the label through the item select
 // instead, folded into the one rewrite. A user-curated label is not the enrichment
 // write-back's to write.
-func TestEnrichedAlbumLabelFiles(t *testing.T) {
+func TestEnrichedAlbumFiles(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
@@ -1768,13 +1769,13 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 	albumID := int64(scalarQueryInt(t, db, "SELECT id FROM album"))
 	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album"))
 
-	plan := func(t *testing.T, scope *model.EnrichScope) map[model.PID]model.EntityFieldFile {
+	plan := func(t *testing.T, scope *model.EnrichScope) map[model.PID]model.EnrichedAlbumFile {
 		t.Helper()
-		rows, err := st.EnrichedAlbumLabelFiles(ctx, scope)
+		rows, err := st.EnrichedAlbumFiles(ctx, scope)
 		if err != nil {
-			t.Fatalf("EnrichedAlbumLabelFiles: %v", err)
+			t.Fatalf("EnrichedAlbumFiles: %v", err)
 		}
-		out := map[model.PID]model.EntityFieldFile{}
+		out := map[model.PID]model.EnrichedAlbumFile{}
 		for _, r := range rows {
 			if _, dup := out[r.FilePID]; dup {
 				t.Fatalf("file %s planned twice: a shared file appears once", r.FilePID)
@@ -1801,7 +1802,7 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 		if !ok {
 			t.Fatalf("file %s missing from the plan", pid)
 		}
-		if r.EntityType != model.MergeAlbum || r.Field != "label" || r.Value != "Harvest" || r.UpdatedAt == 0 {
+		if r.Label != "Harvest" || r.LabelUpdatedAt == 0 || r.AlbumMBID != "" || r.ReleaseGroupMBID != "" {
 			t.Errorf("file %s planned as %+v, want the album's label with its write time", pid, r)
 		}
 		if len(r.Path) == 0 || r.Size == 0 || r.MTimeNS == 0 {
@@ -1811,17 +1812,17 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 			t.Errorf("file %s shared = %v, want only the rip flagged", pid, r.Shared)
 		}
 	}
-	labelAt := got[files["a"]].UpdatedAt
+	labelAt := got[files["a"]].LabelUpdatedAt
 
 	// Settling a file at the label's time takes it out of the plan.
-	if err := st.SettleEnrichmentWrite(ctx, files["a"], labelAt); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, files["a"], labelAt, 0, 0); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
-	if err := st.SettleEnrichmentWrite(ctx, ripPID, labelAt); err != nil {
+	if err := st.SettleEnrichmentWrite(ctx, ripPID, labelAt, 0, 0); err != nil {
 		t.Fatalf("settle rip: %v", err)
 	}
 	got = plan(t, nil)
-	if len(got) != 1 || got[files["b"]].Value != "Harvest" {
+	if len(got) != 1 || got[files["b"]].Label != "Harvest" {
 		t.Fatalf("planned files after settling = %v, want b.mp3 alone", got)
 	}
 
@@ -1972,7 +1973,7 @@ func TestEnrichmentWritebackDropsALabelTheAlbumNoLongerHolds(t *testing.T) {
 		if r.Label != "" {
 			t.Fatalf("row %s carries label %q, want none from an album with an empty label", r.FilePID, r.Label)
 		}
-		if err := st.SettleEnrichmentWrite(ctx, r.FilePID, r.Newest); err != nil {
+		if err := st.SettleEnrichmentWrite(ctx, r.FilePID, r.Newest, 0, 0); err != nil {
 			t.Fatalf("settle %s: %v", r.FilePID, err)
 		}
 	}

@@ -155,6 +155,9 @@ type Action struct {
 	// Restores names the item whose gone file held this audio, which the import brings
 	// back: no file of the audio is on disk, so it is no duplicate under either policy.
 	Restores model.PID
+	// PlaceholderCover says the picture in the file's tags stands in for a cover, which
+	// the cataloging scan marks (scan.FileOptions.PlaceholderCover).
+	PlaceholderCover bool
 }
 
 // Request configures an import.
@@ -847,7 +850,7 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 		forced = a.Kind
 	}
 	// The staging folder's cover is placed after the batch's audio (placeCovers).
-	opts := scan.FileOptions{Kind: forced, Album: a.Album, CoverPending: !plan.Acquired}
+	opts := scan.FileOptions{Kind: forced, Album: a.Album, CoverPending: !plan.Acquired, PlaceholderCover: a.PlaceholderCover}
 	if a.Kind == model.KindBook {
 		opts.Position = &a.Position
 	}

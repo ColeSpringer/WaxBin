@@ -375,6 +375,11 @@ var itemFields = query.FieldMap{
 	// exactly this row.
 	"art_source": {Expr: "COALESCE((SELECT asq.source FROM art_map asq WHERE asq.entity_type = " + itemArtSlotExpr +
 		" AND asq.entity_id = pi.id AND asq.role = 'front'), '')", Kind: query.KindText},
+	// 1 when the item's own front cover is a picture marked as standing in for a cover
+	// (SetArtPlaceholder), on has_art's own-art-only rule. The mark is read in the track
+	// slot alone, so an episode reads 0.
+	"art_placeholder": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM art_map apq WHERE apq.entity_type = 'track'" +
+		" AND apq.entity_id = pi.id AND apq.role = 'front' AND " + placeholderOf + "apq.source_hash)) THEN 1 ELSE 0 END", Kind: query.KindInt},
 
 	// Advisory flags (see the header). The COALESCE covers the LEFT JOIN's NULL for a
 	// non-episode; without it `explicit is 0` would skip every track and book.

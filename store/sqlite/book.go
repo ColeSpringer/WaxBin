@@ -29,7 +29,14 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	seen := scanned(cover, in.NoCover, in.TagsUnread)
+	sidecar, skipped, err := s.examineSidecar(ctx, cover, in.SidecarCover, in.PlaceholderCover)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	seen := scanned(cover, sidecar, in.NoCover, in.TagsUnread)
+	seen.sidecarSkipped = skipped
+	// Asked here, ahead of the write lock, for the keep rule (keepItemForFileTx).
+	probe := s.probePrimary(ctx, in.File.Path)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
@@ -40,7 +47,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		fileID, filePID, priorMS, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, key.accept(), now, res)
+		fileID, filePID, priorMS, priorEssence, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, key.accept(), now, res)
 		if err != nil {
 			return err
 		}
@@ -58,13 +65,28 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 				res.MetadataChanged, res.Rekinded = true, true
 			}
 		}
+		// A book of one file retitled by hand keeps its item.
+		if !rekinded {
+			kept, others, err := keepItemForFileTx(ctx, tx, fileID, model.KindBook, in.Item.IdentityKey,
+				in.File.EssenceHash, priorEssence, res.FileCreated, key, probe)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if kept != 0 {
+				key = &resolvedItem{id: kept}
+				res.Promoted = append(res.Promoted, others...)
+			}
+		}
 
 		// Replace the file's sidecar observations (prunes a since-deleted .cue/.lrc so it
 		// does not force a full re-hash forever).
 		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := recordFileFrontTx(ctx, tx, fileID, seen); err != nil {
+		if err := markStatedPlaceholderTx(ctx, tx, seen, in.PlaceholderCover); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := recordFileFrontTx(ctx, tx, fileID, &seen); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -441,41 +463,41 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 // frozen); a real re-encode changes the bytes and reconciles normally. It also returns the
 // duration the row held before this read (0 for a new row), where a book part's old place
 // on its timeline ends.
-func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, accept map[int64]bool, now int64, res *model.ScanItemResult) (int64, model.PID, int64, error) {
+func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, accept map[int64]bool, now int64, res *model.ScanItemResult) (int64, model.PID, int64, string, error) {
 	if existing, err := fileByPathTx(ctx, tx, file.Path); err != nil {
-		return 0, "", 0, err
+		return 0, "", 0, "", err
 	} else if existing != nil {
 		res.ContentChanged = existing.ContentHash != file.ContentHash
 		if err := updateFileRow(ctx, tx, existing.ID, file, now); err != nil {
-			return 0, "", 0, err
+			return 0, "", 0, "", err
 		}
-		return existing.ID, existing.PID, existing.DurationMS, nil
+		return existing.ID, existing.PID, existing.DurationMS, existing.EssenceHash, nil
 	}
 	if file.EssenceHash != "" {
 		relink, err := fileByEssenceGoneTx(ctx, tx, file.EssenceHash, file.ContentHash, libraryID, accept)
 		if err != nil {
-			return 0, "", 0, err
+			return 0, "", 0, "", err
 		}
 		if relink != nil {
 			res.Relinked = true
 			res.RelinkedFrom = string(relink.Path)
 			res.ContentChanged = relink.ContentHash != file.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, file, now); err != nil {
-				return 0, "", 0, err
+				return 0, "", 0, "", err
 			}
 			if err := renameCopyDetailsTx(ctx, tx, relink.ID, relink.DisplayPath, file.DisplayPath); err != nil {
-				return 0, "", 0, err
+				return 0, "", 0, "", err
 			}
-			return relink.ID, relink.PID, relink.DurationMS, nil
+			return relink.ID, relink.PID, relink.DurationMS, relink.EssenceHash, nil
 		}
 	}
 	res.FileCreated = true
 	pid := model.NewPID()
 	id, err := insertFileRow(ctx, tx, libraryID, pid, file, now)
 	if err != nil {
-		return 0, "", 0, err
+		return 0, "", 0, "", err
 	}
-	return id, pid, 0, nil
+	return id, pid, 0, "", nil
 }
 
 // upsertBook writes the book subtype row, resolving its series and contributor

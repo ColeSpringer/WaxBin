@@ -11,30 +11,38 @@ import (
 // The art walk answers which stored picture an entity's art request lands on. It is the
 // one definition of the fallback chain, read by a single resolve and by a batch alike:
 //
-//	track          own cover -> album -> release group -> artist -> genre
-//	album          own row -> a member track's cover -> release group -> its primary artist
+//	track          own cover -> album row -> a member's cover -> release group
+//	               -> own placeholder -> a member's placeholder -> artist -> genre
+//	album          own row -> a member's cover -> release group -> a member's placeholder
+//	               -> its primary artist
 //	release group  own row -> its primary artist
 //	episode        own cover -> podcast
 //	artist, genre, podcast, playlist, and a book in the track slot: own row alone
 //
-// A track's artist rung is its album's release group's primary artist, else its album
-// artist, else its artist, and its genre rung is its lowest-id genre. Only the front
-// role climbs; every other role answers at the requested entity or not at all.
+// A placeholder is a track's front whose picture is marked as standing in for a cover
+// (art_source.placeholder). It is held while the walk climbs and answers when no real
+// cover was found up to the release group. A track's artist rung is its album's release
+// group's primary artist, else its album artist, else its artist, and its genre rung is
+// its lowest-id genre. Only the front role climbs; every other role answers at the
+// requested entity or not at all.
 //
 // It runs a rung at a time over the whole set rather than a chain per entity, so the
 // members of one album cost that album's rungs once, and an entity answered at its own
 // rung costs the one statement that found it.
 
 // artHit is the art_map row a walk landed on: the source to serve, the level that
-// answered, whether an album's answer came from a member track, and the row's provenance.
+// answered, whether an album's answer came from a member track and that member's item
+// id, and the row's provenance.
 type artHit struct {
-	hash      string
-	level     model.ArtEntity
-	derived   bool
-	source    model.ProvenanceSource
-	provider  string
-	sourceURL string
-	updatedAt int64
+	hash        string
+	level       model.ArtEntity
+	derived     bool
+	member      int64
+	placeholder bool
+	source      model.ProvenanceSource
+	provider    string
+	sourceURL   string
+	updatedAt   int64
 }
 
 // artFront is one entity's answer. An entity the walk knows and found nothing for has ok
@@ -81,7 +89,8 @@ const albumMemberFronts = ` FROM track t CROSS JOIN art_map tm
 const (
 	// The track slot holds a track's cover and a book's. An episode's lives in its own
 	// slot (artEntityIDTx is the write side of the same rule), so it is no entity here.
-	artItemEntry = `SELECT pi.pid, pi.id, pi.kind, t.album_id, t.album_artist_id, t.artist_id, ` + artHitCols + `
+	artItemEntry = `SELECT pi.pid, pi.id, pi.kind, t.album_id, t.album_artist_id, t.artist_id, ` + artHitCols + `,
+			CASE WHEN am.role = 'front' AND ` + placeholderOf + `am.source_hash) THEN 1 ELSE 0 END
 		FROM playable_item pi LEFT JOIN track t ON t.item_id = pi.id
 		LEFT JOIN art_map am ON am.entity_type = 'track' AND am.entity_id = pi.id AND am.role = ?
 		WHERE pi.kind <> 'episode' AND pi.pid IN ` + inArray
@@ -105,11 +114,18 @@ const (
 	artOwnFronts = `SELECT am.entity_id, ` + artHitCols + ` FROM art_map am
 		WHERE am.entity_type = ? AND am.role = 'front' AND am.entity_id IN ` + inArray
 
-	// The cover of the album's earliest-cataloged member that has one. The members come
-	// off their index in that order, so the read stops at the first cover, and the pick
-	// stays on a member through a change of its cover.
-	artDerivedFronts = `SELECT a.value, ` + artHitCols + ` FROM json_each(?) a
-		JOIN art_map am ON am.rowid = (SELECT tm.rowid` + albumMemberFronts + `a.value ORDER BY t.item_id LIMIT 1)`
+	// The cover of the album's earliest-cataloged member that has a real one, else the
+	// earliest member's placeholder, which is flagged, with the member's item id. The
+	// members come off their index in that order, so the read stops at the first cover and
+	// looks past it for a real one only when it is a placeholder, and the pick stays on a
+	// member through a change of its cover.
+	artDerivedFronts = `SELECT a.value, ` + artHitCols + `, ` + placeholderOf + `am.source_hash), am.entity_id
+		FROM json_each(?) a
+		JOIN art_map am ON am.rowid = (SELECT CASE WHEN f.stand_in THEN COALESCE(
+				(SELECT tm.rowid` + albumMemberFronts + `a.value AND NOT ` + placeholderOf + `tm.source_hash) ORDER BY t.item_id LIMIT 1),
+				f.rid) ELSE f.rid END
+			FROM (SELECT tm.rowid AS rid, ` + placeholderOf + `tm.source_hash) AS stand_in` + albumMemberFronts + `a.value
+				ORDER BY t.item_id LIMIT 1) f)`
 
 	artGenreFronts = `SELECT g.item_id, ` + artHitCols + ` FROM (
 			SELECT ig.item_id AS item_id, MIN(ig.genre_id) AS genre_id FROM item_genre ig
@@ -212,13 +228,15 @@ func (w *artWalker) own(typ model.ArtEntity, pids []model.PID) error {
 	}, string(typ), string(w.role), pidArray(pids))
 }
 
-// albumNode is an album partway up its chain: its own answer once one is found, and the
-// release group and that group's primary artist, each 0 when absent.
+// albumNode is an album partway up its chain: its own answer once one is found, the
+// member placeholder held below the release group, and the release group and that
+// group's primary artist, each 0 when absent.
 type albumNode struct {
 	pid           model.PID
 	id            int64
 	group, artist int64
 	artFront
+	held artFront
 }
 
 func (w *artWalker) albumNodes(where string, role model.ArtRole, list string) ([]*albumNode, error) {
@@ -238,9 +256,10 @@ func (w *artWalker) albumNodes(where string, role model.ArtRole, list string) ([
 	return nodes, err
 }
 
-// climbAlbums answers the albums their own row left open from a member track's cover,
-// then from their release group's row. The artist rung is the caller's, since a track
-// and an album reach different artists.
+// climbAlbums answers the albums their own row left open from a member track's real
+// cover, then from their release group's row, and holds a member's placeholder for the
+// caller, which ranks a track's own placeholder ahead of it. The artist rung is the
+// caller's too, since a track and an album reach different artists.
 func (w *artWalker) climbAlbums(nodes []*albumNode) error {
 	var open []int64
 	byID := make(map[int64]*albumNode, len(nodes))
@@ -256,11 +275,19 @@ func (w *artWalker) climbAlbums(nodes []*albumNode) error {
 	if err := w.query(artDerivedFronts, func(rows *sql.Rows) error {
 		var id int64
 		var h hitScan
-		if err := rows.Scan(append([]any{&id}, h.dests()...)...); err != nil {
+		var placeholder bool
+		var member int64
+		if err := rows.Scan(append(append([]any{&id}, h.dests()...), &placeholder, &member)...); err != nil {
 			return err
 		}
 		n := byID[id]
-		n.hit, n.ok = h.hit(model.ArtAlbum, true)
+		hit, ok := h.hit(model.ArtAlbum, true)
+		hit.placeholder, hit.member = placeholder, member
+		if placeholder {
+			n.held = artFront{hit, ok}
+		} else {
+			n.hit, n.ok = hit, ok
+		}
 		return nil
 	}, idArray(open)); err != nil {
 		return err
@@ -323,6 +350,9 @@ func (w *artWalker) albums(pids []model.PID) error {
 	}
 	artistOf := map[model.PID]int64{}
 	for _, n := range nodes {
+		if !n.ok {
+			n.artFront = n.held
+		}
 		w.out[n.pid] = n.artFront
 		if !n.ok && n.artist != 0 && w.climbs() {
 			artistOf[n.pid] = n.artist
@@ -392,7 +422,8 @@ func (w *artWalker) episodes(pids []model.PID) error {
 
 // items walks the track slot, which holds a track's cover and a book's. A book stops at
 // its own cover: an author's picture is a portrait and a genre's a category tile, neither
-// of them a jacket, so a coverless book answers nothing and a host draws its placeholder.
+// of them a jacket, so a coverless book answers nothing and a host draws its own stand-in.
+// A track whose own cover is a placeholder climbs with it held as its answer.
 func (w *artWalker) items(pids []model.PID) error {
 	type item struct {
 		pid                        model.PID
@@ -405,12 +436,14 @@ func (w *artWalker) items(pids []model.PID) error {
 		var kind string
 		var album, albumArtist, artist sql.NullInt64
 		var h hitScan
-		if err := rows.Scan(append([]any{&it.pid, &it.id, &kind, &album, &albumArtist, &artist}, h.dests()...)...); err != nil {
+		var placeholder bool
+		if err := rows.Scan(append(append([]any{&it.pid, &it.id, &kind, &album, &albumArtist, &artist}, h.dests()...), &placeholder)...); err != nil {
 			return err
 		}
 		hit, ok := h.hit(model.ArtTrack, false)
+		hit.placeholder = placeholder
 		w.out[it.pid] = artFront{hit, ok}
-		if !ok && w.climbs() && kind != string(model.KindBook) {
+		if (!ok || placeholder) && w.climbs() && kind != string(model.KindBook) {
 			it.album, it.albumArtist, it.artist = album.Int64, albumArtist.Int64, artist.Int64
 			open = append(open, it)
 		}
@@ -443,16 +476,22 @@ func (w *artWalker) items(pids []model.PID) error {
 	}
 
 	artistOf := map[model.PID]int64{}
-	idOf := make(map[model.PID]int64, len(open))
 	for _, it := range open {
-		idOf[it.pid] = it.id
+		held := w.out[it.pid].ok
 		artist := int64(0)
 		if n := albums[it.album]; n != nil {
 			if n.ok {
 				w.out[it.pid] = n.artFront
 				continue
 			}
+			if !held && n.held.ok {
+				w.out[it.pid] = n.held
+				continue
+			}
 			artist = n.artist
+		}
+		if held {
+			continue
 		}
 		if artist == 0 {
 			artist = it.albumArtist

@@ -34,13 +34,16 @@ func TestArtRoleViewsJSON(t *testing.T) {
 		},
 		{Role: model.ArtRoleFront, Attribution: model.Attribution{Source: model.SourceUser},
 			UpdatedAt: 9, Locked: true, RoleLocked: true},
+		{Role: model.ArtRoleFront, Format: "jpeg", SourceHash: "h2", Placeholder: true,
+			Attribution: model.Attribution{Source: model.SourceTag}, UpdatedAt: 11},
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := `[{"role":"back","format":"png","width":500,"height":500,"sourceHash":"h1",` +
 		`"source":"user","updatedAt":"7","locked":true,"roleLocked":false},` +
-		`{"role":"front","source":"user","updatedAt":"9","locked":true,"roleLocked":true}]`
+		`{"role":"front","source":"user","updatedAt":"9","locked":true,"roleLocked":true},` +
+		`{"role":"front","format":"jpeg","sourceHash":"h2","placeholder":true,"source":"tag","updatedAt":"11","locked":false,"roleLocked":false}]`
 	if string(b) != want {
 		t.Errorf("json = %s\nwant %s", b, want)
 	}
@@ -52,7 +55,7 @@ func TestArtRoleViewsJSON(t *testing.T) {
 // parser. artView adding `box` was itself an unpinned change to this payload.
 func TestArtViewKeySet(t *testing.T) {
 	t.Parallel()
-	want := []string{"box", "bytes", "derived", "format", "height", "level", "provider",
+	want := []string{"box", "bytes", "derived", "format", "height", "level", "memberPid", "placeholder", "provider",
 		"source", "sourceHash", "sourceUrl", "thumbnail", "updatedAt", "width"}
 	views := map[string]map[string]any{
 		"artView":         artView(&model.ArtProvenance{Format: "png"}, false, 0),
@@ -267,5 +270,66 @@ func TestArtHashesNamesTheCoverEachEntityDraws(t *testing.T) {
 	if err := json.Unmarshal([]byte(found), &hits); err != nil || len(hits.Data.Tracks) != 1 || len(hits.Data.Albums) != 1 ||
 		hits.Data.Tracks[0].ArtHash != want || hits.Data.Albums[0].ArtHash != want {
 		t.Errorf("search printed %+v (err %v), want the track and its album with artHash %s", hits.Data, err, want)
+	}
+}
+
+// TestArtPlaceholderMarksTheItemsCover marks a track's own cover by its pid and unmarks
+// it by its hash, and `art roles` and `art --json` report the mark in between.
+func TestArtPlaceholderMarksTheItemsCover(t *testing.T) {
+	t.Parallel()
+	db, root, pid := creditCLIFixture(t)
+	var img bytes.Buffer
+	if err := png.Encode(&img, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	cover := filepath.Join(t.TempDir(), "cover.png")
+	if err := os.WriteFile(cover, img.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCLIJSON(t, db, root, "art", "set", string(pid), "--file", cover); err != nil {
+		t.Fatalf("art set: %v", err)
+	}
+	hash := art.Hash(img.Bytes())
+	text, err := runCLIText(t, db, root, "art", "placeholder", string(pid))
+	if err != nil || text != "marked "+hash+" as a placeholder\n" {
+		t.Fatalf("art placeholder printed %q (err %v)", text, err)
+	}
+	if text, err := runCLIText(t, db, root, "art", "placeholder", string(pid)); err != nil || text != hash+" was already marked\n" {
+		t.Errorf("a second mark printed %q (err %v)", text, err)
+	}
+	roles, err := runCLIText(t, db, root, "art", "roles", string(pid))
+	if err != nil || !strings.Contains(roles, "png 4x4 placeholder") {
+		t.Errorf("art roles printed %q (err %v), want the front marked", roles, err)
+	}
+	out, err := runCLIJSON(t, db, root, "art", string(pid))
+	if err != nil {
+		t.Fatalf("art --json: %v", err)
+	}
+	var env struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil || env.Data["placeholder"] != true {
+		t.Errorf("art --json printed %s (err %v), want placeholder true", out, err)
+	}
+	if text, err := runCLIText(t, db, root, "art", "placeholder", "--hash", hash, "--off"); err != nil || text != "unmarked "+hash+"\n" {
+		t.Errorf("art placeholder --off printed %q (err %v)", text, err)
+	}
+	if _, err := runCLIText(t, db, root, "art", "placeholder", string(pid), "--hash", hash); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("a pid and a hash = %v, want CodeInvalid", err)
+	}
+}
+
+// TestArtPlaceholderNamesWhatIsMissing: the command takes a track or book pid or a
+// --hash, and each wrong shape is told what it got wrong.
+func TestArtPlaceholderNamesWhatIsMissing(t *testing.T) {
+	t.Parallel()
+	db, root, _ := creditCLIFixture(t)
+	_, err := runCLIText(t, db, root, "art", "placeholder")
+	if !waxerr.Is(err, waxerr.CodeInvalid) || strings.Contains(err.Error(), "not both") || !strings.Contains(err.Error(), "--hash") {
+		t.Errorf("art placeholder with nothing named = %v, want it asked for a pid or a --hash", err)
+	}
+	_, err = runCLIText(t, db, root, "art", "placeholder", "01M8AJ40MQQYQZWV43E94G08PX", "--hash", "x")
+	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "not both") {
+		t.Errorf("art placeholder with both named = %v, want it told to name one", err)
 	}
 }

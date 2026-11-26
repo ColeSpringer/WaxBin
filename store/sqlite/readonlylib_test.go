@@ -105,7 +105,7 @@ func TestReadOnlyLibraryIsLeftOutOfTheWritebacks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		labels, err := st.EnrichedAlbumLabelFiles(ctx, nil)
+		labels, err := st.EnrichedAlbumFiles(ctx, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +197,7 @@ func TestAWideReachStaysItsOwn(t *testing.T) {
 	if err != nil || len(tags) != 1 || string(tags[0].Path) != "/lib/a.mp3" {
 		t.Fatalf("tag rows = %+v (err %v), want a.mp3 alone", tags, err)
 	}
-	labels, err := st.EnrichedAlbumLabelFiles(ctx, reach)
+	labels, err := st.EnrichedAlbumFiles(ctx, reach)
 	if err != nil || len(labels) != 1 || string(labels[0].Path) != "/lib/a.mp3" {
 		t.Fatalf("label rows = %+v (err %v), want a.mp3 alone", labels, err)
 	}

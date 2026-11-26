@@ -88,14 +88,22 @@ const (
 	enrichProviderNone = model.EnrichProviderNone
 )
 
-// albumResolvesFrontArt is true when an album already answers a front-cover request: its
-// own art_map row, or the member track's cover ResolveArt derives one from. It is the art
-// walk's album rung, reading the same member covers (albumMemberFronts), so a caller can
-// ask the question outside a read without disagreeing with what the resolver would
-// actually return. It reads the album as al.
-const albumResolvesFrontArt = `(EXISTS (SELECT 1 FROM art_map am
-		WHERE am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front')
+// albumResolvesFrontArt is true when an album already answers a front-cover request
+// with a real cover: its own art_map row, or a member track's cover ResolveArt derives
+// one from that is not a placeholder. It is the art walk's album rung, reading the same
+// member covers (albumMemberFronts), so a caller can ask the question outside a read
+// without disagreeing with what the resolver would actually return. A placeholder leaves
+// the album open to a fill and to its release group's cover. It reads the album as al.
+const albumResolvesFrontArt = `(` + albumOwnFront + `
+	OR EXISTS (SELECT 1` + albumMemberFronts + `al.id AND NOT ` + placeholderOf + `tm.source_hash)))`
+
+// albumResolvesAnyFrontArt is albumResolvesFrontArt with a member's placeholder
+// counted, which answers ahead of the artist's picture.
+const albumResolvesAnyFrontArt = `(` + albumOwnFront + `
 	OR EXISTS (SELECT 1` + albumMemberFronts + `al.id))`
+
+const albumOwnFront = `EXISTS (SELECT 1 FROM art_map am
+		WHERE am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front')`
 
 // trackTakesGroupGenres is true for a member track the release-group genre fill reaches:
 // no genre yet and no genre lock. The fill and the queue's NeedsGenres read the same
@@ -638,7 +646,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 		if !in.Matched {
 			return s.settleMarkerTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, false, in.Incomplete, in.Unasked, "")
 		}
-		wroteMBID, err := setReleaseGroupMBIDTx(ctx, tx, s.log, in.ReleaseGroupID, in.MBID)
+		wroteMBID, err := setReleaseGroupMBIDTx(ctx, tx, s.log, in.ReleaseGroupID, in.MBID, enrichProviderMusicBrainz)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -708,8 +716,9 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 //
 // The bool is what the group-art marker hangs off, the way setAlbumMBIDTx's is: the
 // backfill walks by title and a standing no-match marker may predate the id, so a landed
-// id re-opens the ask.
-func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid string) (bool, error) {
+// id re-opens the ask. A landed id records an unlocked curation row naming provider,
+// which is what the enrichment tag write-back reads to write it to the member files.
+func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid, provider string) (bool, error) {
 	mbid = normMBID(mbid)
 	if mbid == "" {
 		return false, nil
@@ -734,8 +743,18 @@ func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int
 	if err != nil {
 		return false, err
 	}
-	n, err := r.RowsAffected()
-	return n > 0, err
+	return enrichedIDLandedTx(ctx, tx, r, model.MergeReleaseGroup, rgID, mbid, provider)
+}
+
+// enrichedIDLandedTx reports whether an enrichment id write took, and records the
+// unlocked curation row naming the provider when it did. A later user edit or clear
+// takes the row over.
+func enrichedIDLandedTx(ctx context.Context, tx *sql.Tx, r sql.Result, et model.MergeEntity, id int64, mbid, provider string) (bool, error) {
+	if n, err := r.RowsAffected(); err != nil || n == 0 {
+		return false, err
+	}
+	return true, upsertEntityCurationTx(ctx, tx, string(et), id, "mbid",
+		model.Attribution{Source: model.SourceEnrichment, Provider: provider}, mbid, model.LockUnchanged, nowNS())
 }
 
 // groupArtNeededPredicate selects the release groups the group-art backfill should ask
@@ -1500,7 +1519,7 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 		if !in.Matched {
 			return s.markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, false, "")
 		}
-		wrote, err := setAlbumMBIDTx(ctx, tx, s.log, in.AlbumID, in.MBID)
+		wrote, err := setAlbumMBIDTx(ctx, tx, s.log, in.AlbumID, in.MBID, provider)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -1528,8 +1547,9 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 //
 // The bool exists because an id that actually landed is evidence downstream: it re-opens
 // the album-art queue, which walks by identifier and may have asked while the album had
-// none. A declined write is evidence of nothing.
-func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, mbid string) (bool, error) {
+// none. A declined write is evidence of nothing. A landed id records the curation row
+// the tag write-back reads, naming provider, so an edition-tier match is told apart.
+func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, mbid, provider string) (bool, error) {
 	mbid = normMBID(mbid)
 	if mbid == "" {
 		return false, nil
@@ -1552,8 +1572,7 @@ func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, 
 	if err != nil {
 		return false, err
 	}
-	n, err := r.RowsAffected()
-	return n > 0, err
+	return enrichedIDLandedTx(ctx, tx, r, model.MergeAlbum, albumID, mbid, provider)
 }
 
 // populateReleaseGroupGenresTx attaches the release group's genres to member items
@@ -2169,6 +2188,11 @@ type logger interface {
 // one of those, since the fills are fill-when-empty and a filled field's updated_at never
 // moves again.
 //
+// A track's row carries the album's and its group's ids enrichment matched as well, while
+// they are owed (enrichedIDCols): each has a stamp of its own on the file, since an id is
+// held from every member file while one of them cannot take it, and a write of the
+// file's fields or of the other id in the meantime must not settle past it.
+//
 // One aggregated subquery names an item's enrichment-written fields, rather than a LEFT
 // JOIN per field: the fields walks made that list open-ended, and the columns are read
 // unconditionally with Go keeping only the ones the concat names. Locked rows are
@@ -2180,7 +2204,7 @@ type logger interface {
 // A track's row also carries its album's enrichment label and when it was written, so
 // the one rewrite stamps both and the file is owed by whichever is newer than the stamp.
 // The label lives on the album row, so it has no field_provenance row of its own; the
-// members with no enrichment field to carry it on are EnrichedAlbumLabelFiles' to write.
+// members with no enrichment field to carry it on are EnrichedAlbumFiles' to write.
 // The label term counts only while the album still holds a label, the guard the label
 // select applies for the same reason: a merge moves the loser's curation row onto a
 // survivor whose own label column is empty, and the write settles at the label's stamp
@@ -2196,11 +2220,13 @@ type logger interface {
 // settle the file past the other's and lose them.
 //
 // The /*SCOPE*/ marker takes a scoped run's reach clause; see enrichWriteScopeClause.
-const enrichedTagSelect = `SELECT pi.pid, f.pid, f.library_id, pi.kind, f.path, f.size, f.mtime_ns,
+const enrichedTagSelect = `WITH ` + enrichedIDHeldSets + `
+	SELECT pi.pid, f.pid, f.library_id, pi.kind, f.path, f.size, f.mtime_ns,
 		CASE WHEN itf.role = 'primary' THEN 1 ELSE 0 END,
 		CASE WHEN ` + fileSharedOrVirtualExpr + ` THEN 1 ELSE 0 END,
 		fpw.fields, fpw.newest,
-		CASE WHEN lab.entity_id IS NULL THEN '' ELSE COALESCE(al.label,'') END, COALESCE(lab.updated_at, 0),
+		CASE WHEN lab.entity_id IS NULL THEN '' ELSE COALESCE(al.label,'') END, COALESCE(lab.updated_at, 0), f.enrich_settled_at,
+		` + enrichedIDCols + `,
 		COALESCE(t.genre,''), COALESCE(NULLIF(CAST(t.bpm AS TEXT),'0'),''),
 		COALESCE(t.isrc,''), COALESCE(t.composer,''), COALESCE(NULLIF(CAST(t.year AS TEXT),'0'),''),
 		COALESCE(bk.asin,''), COALESCE(bk.isbn,''), COALESCE(bk.publisher,''),
@@ -2217,16 +2243,109 @@ const enrichedTagSelect = `SELECT pi.pid, f.pid, f.library_id, pi.kind, f.path, 
 	LEFT JOIN track t ON t.item_id = pi.id
 	LEFT JOIN album al ON al.id = t.album_id
 	LEFT JOIN entity_curation lab ON ` + enrichmentLabelRowJoin + `
+	` + enrichedIDJoins + `
 	WHERE pi.state = 'present' AND pi.kind IN ('track','book')
 	  AND (fpw.newest > f.enrich_settled_at
-	       OR (COALESCE(al.label,'') <> '' AND COALESCE(lab.updated_at, 0) > f.enrich_settled_at))/*SCOPE*/
+	       OR (COALESCE(al.label,'') <> '' AND COALESCE(lab.updated_at, 0) > f.enrich_settled_at)
+	       OR ` + enrichedIDsOwed + `)/*SCOPE*/
 	ORDER BY pi.id, CASE WHEN itf.role = 'primary' THEN 0 ELSE 1 END, itf.position, f.id`
 
 // enrichmentLabelRowJoin joins an album alias al to its enrichment-written, unlocked
-// label curation row as lab. A locked row is left out for the reason the item select
-// leaves one out: a curated value did not come from the file.
+// label curation row as lab, while the row still names the album's label: a merge can
+// move a loser's row onto a survivor holding another. A locked row is left out for the
+// reason the item select leaves one out: a curated value did not come from the file.
 const enrichmentLabelRowJoin = `lab.entity_type = 'album' AND lab.entity_id = al.id AND lab.field = 'label'
-	  AND lab.source = 'enrichment' AND lab.locked = 0`
+	  AND lab.source = 'enrichment' AND lab.locked = 0 AND lab.value = al.label`
+
+// enrichedIDJoins joins an album alias al to its release group rg and to the curation
+// rows enrichment recorded with their ids, aid and gid, while each row still names the
+// id its entity holds (a merge can leave a loser's row on a survivor holding another).
+// An album id the edition tier decided is left out: that tier can pick a wrong sibling
+// (enrich/release.go), and in the files the guess would reach every other tool. A user
+// who trusts it sets the same id with an entity edit and write-back, which makes it theirs.
+const enrichedIDJoins = `LEFT JOIN release_group rg ON rg.id = al.release_group_id
+	LEFT JOIN entity_curation aid ON aid.entity_type = 'album' AND aid.entity_id = al.id AND aid.field = 'mbid'
+	  AND aid.source = 'enrichment' AND aid.locked = 0 AND aid.value = al.mbid
+	  AND aid.provider IS NOT '` + model.EnrichProviderMBEdition + `'
+	LEFT JOIN entity_curation gid ON gid.entity_type = 'release_group' AND gid.entity_id = rg.id AND gid.field = 'mbid'
+	  AND gid.source = 'enrichment' AND gid.locked = 0 AND gid.value = rg.mbid`
+
+// An entity's id goes on all of its member files or none, since a catalog rebuilt from a
+// half-written album would key the tagged members apart from the rest. albumIDHeld and
+// groupIDHeld are true while a member file of the album, or of any album of the group,
+// cannot take it: its item is not present, its library is read-only, the tag writer
+// refused it as it is (file.tag_write_refused_hash), or it backs several items or a window
+// of a cue rip. They read one album's members, for a check of one item; the bulk selects
+// read enrichedIDHeldSets instead.
+const (
+	heldMemberFiles = ` FROM track ht JOIN playable_item hpi ON hpi.id = ht.item_id
+		JOIN item_file hif ON hif.item_id = ht.item_id AND hif.role IN ('primary', 'alternate')
+		JOIN file hf ON hf.id = hif.file_id JOIN library hl ON hl.id = hf.library_id
+		WHERE `
+	memberFileHeld = `(hpi.state <> 'present' OR hl.read_only = 1 OR hf.tag_write_refused_hash = hf.content_hash
+		OR (SELECT COUNT(DISTINCT o.item_id) FROM item_file o WHERE o.file_id = hf.id) > 1
+		OR EXISTS (SELECT 1 FROM item_file o WHERE o.file_id = hf.id
+			AND (o.start_frames IS NOT NULL OR o.end_frames IS NOT NULL)))`
+	albumIDHeld = `EXISTS (SELECT 1` + heldMemberFiles + `ht.album_id = al.id AND ` + memberFileHeld + `)`
+	groupIDHeld = `EXISTS (SELECT 1` + heldMemberFiles + `ht.album_id IN (SELECT hal.id FROM album hal
+		WHERE hal.release_group_id = rg.id) AND ` + memberFileHeld + `)`
+)
+
+// enrichedIDHeldSets works out the albums and the groups that hold their ids, once for a
+// whole select, over the albums enrichment matched an id for and every album of a group
+// it matched one for: held_albums has a member file that cannot take the album's id, and
+// held_groups an album in held_albums. It is a WITH clause's body.
+const enrichedIDHeldSets = `held_albums AS MATERIALIZED (
+		SELECT DISTINCT ht.album_id AS id` + heldMemberFiles + `ht.album_id IN (
+			SELECT ec.entity_id FROM entity_curation ec WHERE ec.entity_type = 'album' AND ec.field = 'mbid'
+				AND ec.source = 'enrichment' AND ec.locked = 0
+			UNION SELECT ga.id FROM entity_curation ec JOIN album ga ON ga.release_group_id = ec.entity_id
+				WHERE ec.entity_type = 'release_group' AND ec.field = 'mbid' AND ec.source = 'enrichment' AND ec.locked = 0)
+			AND ` + memberFileHeld + `),
+	held_groups AS MATERIALIZED (
+		SELECT DISTINCT hal.release_group_id AS id FROM album hal
+		WHERE hal.id IN (SELECT id FROM held_albums) AND hal.release_group_id IS NOT NULL)`
+
+// enrichedIDCols reads each id over enrichedIDJoins as its value (empty without a row),
+// the row's stamp, whether it is held (enrichedIDHeldSets), and the file's stamp for it,
+// in enrichedIDs' scan order.
+const enrichedIDCols = `CASE WHEN aid.entity_id IS NULL THEN '' ELSE al.mbid END, COALESCE(aid.updated_at, 0),
+		CASE WHEN aid.entity_id IS NOT NULL AND al.id IN (SELECT id FROM held_albums) THEN 1 ELSE 0 END, f.enrich_album_id_settled_at,
+		CASE WHEN gid.entity_id IS NULL THEN '' ELSE rg.mbid END, COALESCE(gid.updated_at, 0),
+		CASE WHEN gid.entity_id IS NOT NULL AND rg.id IN (SELECT id FROM held_groups) THEN 1 ELSE 0 END, f.enrich_group_id_settled_at`
+
+// enrichedIDsOwed is true for a file f an id over enrichedIDJoins is owed to, in a select
+// carrying enrichedIDHeldSets; enrichedIDsOwedOne is the same for a check of one item.
+const (
+	enrichedIDsOwed = `(aid.updated_at > f.enrich_album_id_settled_at AND al.id NOT IN (SELECT id FROM held_albums))
+	OR (gid.updated_at > f.enrich_group_id_settled_at AND rg.id NOT IN (SELECT id FROM held_groups))`
+	enrichedIDsOwedOne = `(aid.updated_at > f.enrich_album_id_settled_at AND NOT ` + albumIDHeld + `)
+	OR (gid.updated_at > f.enrich_group_id_settled_at AND NOT ` + groupIDHeld + `)`
+)
+
+// enrichedID is one id as enrichedIDCols reads it, with the file's stamp for it.
+type enrichedID struct {
+	value     string
+	at, stamp int64
+	held      bool
+}
+
+// owed returns the id and the stamp a write carrying it settles, when the id is newer
+// than the file's stamp and every member file can take it, and nothing otherwise.
+func (e enrichedID) owed() (string, int64) {
+	if e.value == "" || e.held || e.at <= e.stamp {
+		return "", 0
+	}
+	return e.value, e.at
+}
+
+// enrichedIDs reads an album's and a group's ids from a row carrying enrichedIDCols.
+type enrichedIDs struct{ album, group enrichedID }
+
+func (e *enrichedIDs) dests() []any {
+	return []any{&e.album.value, &e.album.at, &e.album.held, &e.album.stamp,
+		&e.group.value, &e.group.at, &e.group.held, &e.group.stamp}
+}
 
 // enrichWriteScopeClause is the reach of a scoped enrichment run, for the write-back
 // selects: the run's items, the members of its albums, and the members of its release
@@ -2301,17 +2420,20 @@ func (s *Store) enrichmentWriteback(ctx context.Context, scope *model.EnrichScop
 		var r model.EnrichedTagRow
 		var primary, shared int
 		var written string
+		var ids enrichedIDs
 		var trackGenre, bpm, isrc, composer, trackYear string
 		var asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description string
-		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.LibraryID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
-			&primary, &shared, &written, &r.Newest, &r.Label, &r.LabelUpdatedAt,
-			&trackGenre, &bpm, &isrc, &composer, &trackYear,
+		dests := append([]any{&r.ItemPID, &r.FilePID, &r.LibraryID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
+			&primary, &shared, &written, &r.Newest, &r.Label, &r.LabelUpdatedAt, &r.SettledAt}, ids.dests()...)
+		if err := rows.Scan(append(dests, &trackGenre, &bpm, &isrc, &composer, &trackYear,
 			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator,
-			&subtitle, &edition, &description); err != nil {
+			&subtitle, &edition, &description)...); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		r.IsPrimary = primary == 1
 		r.Shared = shared == 1
+		r.AlbumMBID, r.AlbumMBIDAt = ids.album.owed()
+		r.ReleaseGroupMBID, r.ReleaseGroupMBIDAt = ids.group.owed()
 		values := []string{trackGenre, bpm, isrc, composer, trackYear}
 		if r.Kind == model.KindBook {
 			values = []string{asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description}
@@ -2806,54 +2928,69 @@ func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.Album
 	return err
 }
 
-// EnrichedAlbumLabelFiles returns the member files still owed an enrichment-written
-// album label, from one query over the label curation rows and their members: the
-// label, when enrichment wrote it, and the file as a write needs it. A file is owed
-// while the label is newer than its settle stamp; scope, when not nil, bounds the
-// members to a scoped run's reach. The label lands on the album row rather than on any
-// item, so it carries no field_provenance row; a member with enrichment fields of its
-// own takes the label through EnrichmentWriteback instead, and the caller strikes
-// those from this set.
+// enrichedAlbumFilesQ is EnrichedAlbumFiles' statement. The /*SCOPE*/ marker takes a
+// scoped run's reach clause (enrichWriteScopeClause).
+const enrichedAlbumFilesQ = `WITH ` + enrichedIDHeldSets + `
+	SELECT DISTINCT al.id, f.pid, f.library_id, f.path, f.size, f.mtime_ns,
+		CASE WHEN ` + fileSharedOrVirtualExpr + ` THEN 1 ELSE 0 END,
+		CASE WHEN lab.entity_id IS NULL THEN '' ELSE COALESCE(al.label,'') END, COALESCE(lab.updated_at, 0), f.enrich_settled_at,
+		` + enrichedIDCols + `
+	FROM album al
+	JOIN track t ON t.album_id = al.id
+	JOIN playable_item pi ON pi.id = t.item_id AND pi.state = 'present'
+	JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
+	JOIN file f ON f.id = itf.file_id
+	JOIN library flib ON flib.id = f.library_id AND flib.read_only = ?
+	LEFT JOIN entity_curation lab ON ` + enrichmentLabelRowJoin + `
+	` + enrichedIDJoins + `
+	WHERE al.id IN (SELECT ec.entity_id FROM entity_curation ec WHERE ec.entity_type = 'album'
+			AND ec.field IN ('label', 'mbid') AND ec.source = 'enrichment' AND ec.locked = 0
+		UNION SELECT ga.id FROM entity_curation ec JOIN album ga ON ga.release_group_id = ec.entity_id
+			WHERE ec.entity_type = 'release_group' AND ec.field = 'mbid' AND ec.source = 'enrichment' AND ec.locked = 0)
+	  AND ((COALESCE(al.label,'') <> '' AND lab.updated_at > f.enrich_settled_at) OR ` + enrichedIDsOwed + `)/*SCOPE*/
+	ORDER BY al.id, f.pid`
+
+// EnrichedAlbumFiles returns the member files still owed what enrichment wrote on their
+// album or its release group: the album's label, while it is newer than the file's settle
+// stamp, and the ids enrichment matched, while they are owed (enrichedIDJoins), from one
+// query driven by the albums holding such a row. scope, when not nil, bounds the members
+// to a scoped run's reach. These values land on the entity rows rather than on any item,
+// so they carry no field_provenance row; a member with enrichment fields of its own takes
+// them through EnrichmentWriteback instead, and the caller strikes those from this set.
 //
 // Only a present item's file is returned, since a missing one's write would fail on
 // every pass and never settle. A shared or virtual file is returned and flagged, since
-// the caller records the refusal and settles it; it is never opened. The rows come in
-// album order, so a file two albums somehow claim is planned for the lower one.
-func (s *Store) EnrichedAlbumLabelFiles(ctx context.Context, scope *model.EnrichScope) ([]model.EntityFieldFile, error) {
-	return s.enrichedAlbumLabelFiles(ctx, scope, false)
+// the caller records the refusal and settles it; it is never opened, and it holds the
+// ids from its album anyway. The rows come in album order, so a file two albums somehow
+// claim is planned for the lower one.
+func (s *Store) EnrichedAlbumFiles(ctx context.Context, scope *model.EnrichScope) ([]model.EnrichedAlbumFile, error) {
+	return s.enrichedAlbumFiles(ctx, scope, false)
 }
 
-// enrichedAlbumLabelFiles is EnrichedAlbumLabelFiles over the libraries whose read-only
-// flag is readOnly.
-func (s *Store) enrichedAlbumLabelFiles(ctx context.Context, scope *model.EnrichScope, readOnly bool) ([]model.EntityFieldFile, error) {
-	const op = "store.EnrichedAlbumLabelFiles"
+// enrichedAlbumFiles is EnrichedAlbumFiles over the libraries whose read-only flag is
+// readOnly.
+func (s *Store) enrichedAlbumFiles(ctx context.Context, scope *model.EnrichScope, readOnly bool) ([]model.EnrichedAlbumFile, error) {
+	const op = "store.EnrichedAlbumFiles"
 	clause, args := enrichWriteScopeClause(scope, "pi.id", "al.id")
 	args = append([]any{readOnly}, args...)
-	rows, err := s.rdb().QueryContext(ctx, `SELECT DISTINCT al.id, f.pid, f.library_id, f.path, f.size, f.mtime_ns,
-			COALESCE(al.label,''), lab.updated_at,
-			CASE WHEN `+fileSharedOrVirtualExpr+` THEN 1 ELSE 0 END
-		FROM entity_curation lab
-		JOIN album al ON `+enrichmentLabelRowJoin+`
-		JOIN track t ON t.album_id = al.id
-		JOIN playable_item pi ON pi.id = t.item_id AND pi.state = 'present'
-		JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
-		JOIN file f ON f.id = itf.file_id
-		JOIN library flib ON flib.id = f.library_id AND flib.read_only = ?
-		WHERE COALESCE(al.label,'') <> '' AND lab.updated_at > f.enrich_settled_at`+clause+`
-		ORDER BY al.id, f.pid`, args...)
+	rows, err := s.rdb().QueryContext(ctx, strings.Replace(enrichedAlbumFilesQ, "/*SCOPE*/", clause, 1), args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
-	var out []model.EntityFieldFile
+	var out []model.EnrichedAlbumFile
 	for rows.Next() {
-		v := model.EntityFieldFile{EntityType: model.MergeAlbum, Field: "label"}
+		var v model.EnrichedAlbumFile
 		var albumID int64
 		var shared int
-		if err := rows.Scan(&albumID, &v.FilePID, &v.LibraryID, &v.Path, &v.Size, &v.MTimeNS, &v.Value, &v.UpdatedAt, &shared); err != nil {
+		var ids enrichedIDs
+		if err := rows.Scan(append([]any{&albumID, &v.FilePID, &v.LibraryID, &v.Path, &v.Size, &v.MTimeNS, &shared,
+			&v.Label, &v.LabelUpdatedAt, &v.SettledAt}, ids.dests()...)...); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		v.Shared = shared == 1
+		v.AlbumMBID, v.AlbumMBIDAt = ids.album.owed()
+		v.ReleaseGroupMBID, v.ReleaseGroupMBIDAt = ids.group.owed()
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {
@@ -2864,13 +3001,14 @@ func (s *Store) enrichedAlbumLabelFiles(ctx context.Context, scope *model.Enrich
 
 // EnrichmentHeldReadOnly counts the files owed an enrichment write, a tag or an album
 // label, that the write-backs leave alone because their library is read-only, within
-// scope's reach as EnrichmentWriteback reads it.
+// scope's reach as EnrichmentWriteback reads it. An id is never owed there, since a
+// member file in a read-only library holds it from the whole album.
 func (s *Store) EnrichmentHeldReadOnly(ctx context.Context, scope *model.EnrichScope) (int, error) {
 	rows, err := s.enrichmentWriteback(ctx, scope, true)
 	if err != nil {
 		return 0, err
 	}
-	labels, err := s.enrichedAlbumLabelFiles(ctx, scope, true)
+	labels, err := s.enrichedAlbumFiles(ctx, scope, true)
 	if err != nil {
 		return 0, err
 	}
@@ -2884,17 +3022,70 @@ func (s *Store) EnrichmentHeldReadOnly(ctx context.Context, scope *model.EnrichS
 	return len(held), nil
 }
 
+// EnrichmentIDsHeld lists the files of present items, within scope's reach, that an
+// album's or a release group's id enrichment matched is held from: the id is newer than
+// the file's stamp for it and a member file of the entity cannot take it, so it waits on
+// every member. A file in a read-only library is left out: EnrichmentHeldReadOnly
+// counts it.
+func (s *Store) EnrichmentIDsHeld(ctx context.Context, scope *model.EnrichScope) ([]model.PID, error) {
+	const op = "store.EnrichmentIDsHeld"
+	clause, args := enrichWriteScopeClause(scope, "pi.id", "al.id")
+	rows, err := s.rdb().QueryContext(ctx, `WITH `+enrichedIDHeldSets+`
+		SELECT DISTINCT f.pid FROM album al
+		JOIN track t ON t.album_id = al.id
+		JOIN playable_item pi ON pi.id = t.item_id AND pi.state = 'present'
+		JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
+		JOIN file f ON f.id = itf.file_id
+		JOIN library flib ON flib.id = f.library_id AND flib.read_only = 0
+		`+enrichedIDJoins+`
+		WHERE ((aid.updated_at > f.enrich_album_id_settled_at AND al.id IN (SELECT id FROM held_albums))
+		   OR (gid.updated_at > f.enrich_group_id_settled_at AND rg.id IN (SELECT id FROM held_groups)))`+clause+`
+		ORDER BY f.pid`, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.PID
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, model.PID(pid))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
+// NoteTagWriteRefused records that the tag writer refused the file in its current form or
+// could not store an id in it, which holds its album's and release group's ids from every
+// member until its bytes change (file.tag_write_refused_hash). size and mtimeNS are the
+// file as the writer met it: one changed since the catalog read it is not recorded, since
+// the hash the catalog holds is of other bytes, and the next read and pass record it.
+func (s *Store) NoteTagWriteRefused(ctx context.Context, filePID model.PID, size, mtimeNS int64) error {
+	const op = "store.NoteTagWriteRefused"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE file SET tag_write_refused_hash = NULLIF(content_hash, '')
+			WHERE pid = ? AND size = ? AND mtime_ns = ?`, string(filePID), size, mtimeNS)
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	})
+}
+
 // SettleEnrichmentWrite records that the enrichment tag write-back has settled every
 // enrichment value on a file up to upTo (the newest one it carried, or recorded as
-// unable to land), so only a newer value reopens the file. The stamp never moves back,
-// and a file that vanished since the select is not an error: there is nothing left to
-// settle.
-func (s *Store) SettleEnrichmentWrite(ctx context.Context, filePID model.PID, upTo int64) error {
+// unable to land), and the album and release-group ids up to albumIDUpTo and groupIDUpTo,
+// so only a newer value reopens the file. No stamp moves back, and a file that vanished
+// since the select is not an error: there is nothing left to settle.
+func (s *Store) SettleEnrichmentWrite(ctx context.Context, filePID model.PID, upTo, albumIDUpTo, groupIDUpTo int64) error {
 	const op = "store.SettleEnrichmentWrite"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE file SET enrich_settled_at = MAX(enrich_settled_at, ?) WHERE pid = ?",
-			upTo, string(filePID)); err != nil {
+			`UPDATE file SET enrich_settled_at = MAX(enrich_settled_at, ?),
+				enrich_album_id_settled_at = MAX(enrich_album_id_settled_at, ?),
+				enrich_group_id_settled_at = MAX(enrich_group_id_settled_at, ?) WHERE pid = ?`,
+			upTo, albumIDUpTo, groupIDUpTo, string(filePID)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return nil

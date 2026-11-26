@@ -61,8 +61,9 @@ func newArtCmd(g *globals) *cobra.Command {
 			"served at 32 and one over it is served as asked. The picture can come back wider " +
 			"than the size named, and the rung it was served at is reported. Writes " +
 			"the image bytes to --out (or stdout); with --json, reports metadata instead, " +
-			"including the chain level that answered, whether an album's cover was derived " +
-			"from a member track, and where the picture came from (" + artSourceList +
+			"including the chain level that answered, the member track an album's cover " +
+			"was derived from, whether the picture stands in for a cover (`art " +
+			"placeholder`), and where it came from (" + artSourceList +
 			") with its provider and fetch URL.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -127,22 +128,24 @@ func newArtCmd(g *globals) *cobra.Command {
 	f.IntVar(&size, "size", 0, "max dimension in px, rounded up to a ladder rung; "+
 		"also converts a format most clients cannot display (0 = stored image)")
 	f.StringVar(&outPath, "out", "", "write image bytes to this file instead of stdout")
-	cmd.AddCommand(newArtRolesCmd(g), newArtHashesCmd(g), newArtSetCmd(g), newArtLockCmd(g, true), newArtLockCmd(g, false))
+	cmd.AddCommand(newArtRolesCmd(g), newArtHashesCmd(g), newArtSetCmd(g), newArtLockCmd(g, true), newArtLockCmd(g, false),
+		newArtPlaceholderCmd(g))
 	return cmd
 }
 
 type artRoleView struct {
-	Role       string `json:"role"`
-	Format     string `json:"format,omitempty"`
-	Width      int    `json:"width,omitempty"`
-	Height     int    `json:"height,omitempty"`
-	SourceHash string `json:"sourceHash,omitempty"`
-	Source     string `json:"source,omitempty"`
-	Provider   string `json:"provider,omitempty"`
-	SourceURL  string `json:"sourceUrl,omitempty"`
-	Updated    int64  `json:"updatedAt,string"` // unix ns; a string, see playStateView
-	Locked     bool   `json:"locked"`
-	RoleLocked bool   `json:"roleLocked"`
+	Role        string `json:"role"`
+	Format      string `json:"format,omitempty"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	SourceHash  string `json:"sourceHash,omitempty"`
+	Placeholder bool   `json:"placeholder,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	Updated     int64  `json:"updatedAt,string"` // unix ns; a string, see playStateView
+	Locked      bool   `json:"locked"`
+	RoleLocked  bool   `json:"roleLocked"`
 }
 
 // artRoleViews renders the slots for --json. Everything but the role, the timestamp,
@@ -153,7 +156,7 @@ func artRoleViews(roles []model.ArtRoleInfo) []artRoleView {
 	for i, r := range roles {
 		out[i] = artRoleView{
 			Role: string(r.Role), Format: r.Format, Width: r.Width, Height: r.Height,
-			SourceHash: r.SourceHash, Source: string(r.Source), Provider: r.Provider,
+			SourceHash: r.SourceHash, Placeholder: r.Placeholder, Source: string(r.Source), Provider: r.Provider,
 			SourceURL: r.SourceURL, Updated: r.UpdatedAt,
 			Locked: r.Locked, RoleLocked: r.RoleLocked,
 		}
@@ -171,7 +174,7 @@ func artView(p *model.ArtProvenance, thumbnail bool, box int) map[string]any {
 	return map[string]any{
 		"format": p.Format, "width": p.Width, "height": p.Height,
 		"bytes": p.Size, "sourceHash": p.SourceHash, "thumbnail": thumbnail, "box": box,
-		"level": string(p.Level), "derived": p.Derived,
+		"level": string(p.Level), "derived": p.Derived, "memberPid": string(p.MemberPID), "placeholder": p.Placeholder,
 		"source": string(p.Source), "provider": p.Provider,
 		"sourceUrl": p.SourceURL, "updatedAt": strconv.FormatInt(p.UpdatedAt, 10),
 	}
@@ -185,7 +188,7 @@ func artView(p *model.ArtProvenance, thumbnail bool, box int) map[string]any {
 func artViewFromBlob(b *model.ArtBlob) map[string]any {
 	return artView(&model.ArtProvenance{
 		Format: b.Format, Width: b.Width, Height: b.Height, Size: len(b.Bytes),
-		SourceHash: b.SourceHash, Level: b.Level, Derived: b.Derived,
+		SourceHash: b.SourceHash, Level: b.Level, Derived: b.Derived, MemberPID: b.MemberPID, Placeholder: b.Placeholder,
 		Attribution: b.Attribution, UpdatedAt: b.UpdatedAt,
 	}, b.Thumbnail, b.Box)
 }
@@ -218,7 +221,8 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 		Short: "List the artwork slots an entity holds",
 		Long: "Lists the artwork an entity holds at its own level, with none of the album/" +
 			"artist fallback `art` follows: each stored role with its format, size, and where " +
-			"the picture came from, plus whether that role is locked. A row with no image is a " +
+			"the picture came from, whether a track's or book's cover is a placeholder (`art " +
+			"placeholder`), and whether that role is locked. A row with no image is a " +
 			"lock with nothing attached, the state that refuses every later `art set` in that " +
 			"role and holds the slot empty against enrichment; `art unlock` releases it. A " +
 			"role reads as locked under its own lock or under the entity's whole front-cover " +
@@ -258,6 +262,9 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 				desc := "(no image)"
 				if r.SourceHash != "" {
 					desc = fmt.Sprintf("%s %dx%d", r.Format, r.Width, r.Height)
+				}
+				if r.Placeholder {
+					desc += " placeholder"
 				}
 				// Which pin is standing, since only the role's own one answers to
 				// `art unlock --role`.
@@ -460,6 +467,89 @@ func newArtLockCmd(g *globals, lock bool) *cobra.Command {
 	cmd.Flags().StringVar(&entType, "type", "track", "entity type: "+artTypeList)
 	cmd.Flags().StringVar(&role, "role", "", "auxiliary role to "+verb+" alone: back|disc|booklet|background (default the front cover)")
 	return cmd
+}
+
+// newArtPlaceholderCmd marks a picture as standing in for a cover, or unmarks it.
+func newArtPlaceholderCmd(g *globals) *cobra.Command {
+	var hash string
+	var off bool
+	cmd := &cobra.Command{
+		Use:   "placeholder [<pid>]",
+		Short: "Mark a track's or a book's cover as a stand-in",
+		Long: "Marks a picture as a placeholder, such as a download's video thumbnail: it shows " +
+			"while nothing better does, a real cover on the album, a sibling track or the release " +
+			"group answers ahead of it, and the album stays open to a fetched cover. Names the " +
+			"track or book whose own cover to mark, or the picture by --hash (its sourceHash). " +
+			"The mark is the picture's, so every track or book showing the same bytes takes it; " +
+			"an album's or a release group's own cover is never a placeholder. A file whose tags " +
+			"hold the picture takes a cover file beside it instead, from the next scan. --off " +
+			"unmarks it.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch {
+			case len(args) == 1 && hash != "":
+				return waxerr.New(waxerr.CodeInvalid, "art placeholder", "name a track or book pid or a --hash, not both")
+			case len(args) == 0 && hash == "":
+				return waxerr.New(waxerr.CodeInvalid, "art placeholder", "name the track or book pid whose cover to mark, or the picture by --hash")
+			}
+			var pid model.PID
+			if len(args) == 1 {
+				pid = model.PID(args[0])
+				h, err := ownFrontHash(cmd, g, pid)
+				if err != nil {
+					return err
+				}
+				hash = h
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			changed, err := m.SetArtPlaceholder(ctx(cmd), hash, !off)
+			if err != nil {
+				return err
+			}
+			line := "marked " + hash + " as a placeholder\n"
+			switch {
+			case off && changed:
+				line = "unmarked " + hash + "\n"
+			case off:
+				line = hash + " was not marked\n"
+			case !changed:
+				line = hash + " was already marked\n"
+			}
+			return reply(cmd, g, struct {
+				PID         model.PID `json:"pid,omitempty"`
+				SourceHash  string    `json:"sourceHash"`
+				Placeholder bool      `json:"placeholder"`
+				Changed     bool      `json:"changed"`
+			}{pid, hash, !off, changed}, line)
+		},
+	}
+	cmd.Flags().StringVar(&hash, "hash", "", "the picture's sourceHash, in place of a pid")
+	cmd.Flags().BoolVar(&off, "off", false, "unmark the picture")
+	return cmd
+}
+
+// ownFrontHash reads the picture a track's or a book's own front holds, on a read-only
+// open so a running server keeps the write lock.
+func ownFrontHash(cmd *cobra.Command, g *globals, pid model.PID) (string, error) {
+	lib, _, err := g.openRead(cmd)
+	if err != nil {
+		return "", err
+	}
+	defer lib.Close()
+	roles, err := lib.ArtRoles(ctx(cmd), model.EntityRef{Type: model.ArtTrack, PID: pid})
+	if err != nil {
+		return "", err
+	}
+	for _, r := range roles {
+		if r.Role == model.ArtRoleFront && r.SourceHash != "" {
+			return r.SourceHash, nil
+		}
+	}
+	return "", waxerr.New(waxerr.CodeNotFound, "art placeholder", "item "+string(pid)+" holds no cover of its own")
 }
 
 // artLockLine renders what `art lock`/`art unlock` did. The plain past-tense line was

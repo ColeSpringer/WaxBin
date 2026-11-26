@@ -14,13 +14,16 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
+	wlerr "github.com/colespringer/waxlabel/waxerr"
 )
 
 // TestBookTagEditsClearDescriptionClearsTheLongForm: the reader folds DESCRIPTION and
@@ -1626,5 +1629,211 @@ func TestABatchNoKeyWentInOnKeepsTheFilesDrift(t *testing.T) {
 	}
 	if owed, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: song.FilePID, Code: model.DiagTagWriteOwed}); err != nil || len(owed) != 0 {
 		t.Errorf("owed = %+v (err %v), want both settled: the format can never carry them", owed, err)
+	}
+}
+
+// readAgain records the item's file as it is on disk now, its size, mtime and content
+// hash, as a read of it would, without a scan re-deriving its tags.
+func readAgain(t *testing.T, ctx context.Context, lib *Library, item *model.ItemView) {
+	t.Helper()
+	path := string(item.Path)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := identity.ContentHash(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := lib.store.FileByPID(ctx, item.FilePID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := lib.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{FilePID: item.FilePID,
+		ExpectedSize: file.Size, ExpectedMTimeNS: file.MTimeNS,
+		NewSize: info.Size(), NewMTimeNS: info.ModTime().UnixNano(), NewContentHash: hash}); err != nil || !ok {
+		t.Fatalf("record the file's state = %v (err %v)", ok, err)
+	}
+}
+
+// enrichAlbumID gives the album the item sits on the release id enrichment matched.
+func enrichAlbumID(t *testing.T, ctx context.Context, lib *Library, dbPath string, item model.PID, mbid string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	var id int64
+	var pid string
+	if err := raw.QueryRowContext(ctx, `SELECT al.id, al.pid FROM album al JOIN track t ON t.album_id = al.id
+		JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(item)).Scan(&id, &pid); err != nil {
+		t.Fatalf("album rowid: %v", err)
+	}
+	if err := lib.store.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{AlbumID: id, PID: model.PID(pid), Matched: true, MBID: mbid}); err != nil {
+		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
+	}
+}
+
+// TestEnrichmentIDsWaitForEveryMember: an album's id goes on every member file at once.
+// A pass whose reach holds one of the two members writes it to neither, and so does a
+// pass where a member has become a file the tag writer cannot write. Neither settles
+// it, and once a scan reads the member as one the writer takes, a pass writes both.
+func TestEnrichmentIDsWaitForEveryMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, db, items := openTwoTracks(t)
+	const release = "e2000000-0000-4000-8000-000000000001"
+	enrichAlbumID(t, ctx, lib, db, items[0].PID, release)
+	carried := func(when string, want string) {
+		t.Helper()
+		for _, it := range items {
+			fm, err := meta.NewReader().Read(ctx, string(it.Path))
+			if err != nil || fm.Tags.MBReleaseID != want {
+				t.Errorf("%s: %s names release %q (err %v), want %q", when, it.Path, fm.Tags.MBReleaseID, err, want)
+			}
+		}
+	}
+	raw, err := sql.Open("sqlite", "file:"+db+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first int64
+	if err := raw.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid = ?", string(items[0].PID)).Scan(&first); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	c, err := lib.writeEnrichmentTags(ctx, &model.EnrichScope{FieldsItemIDs: []int64{first}})
+	if err != nil || c.idsHeld != 1 || c.written != 0 {
+		t.Fatalf("a pass reaching one member = %+v (err %v), want its id held and nothing written", c, err)
+	}
+	carried("one member reached", "")
+
+	kept, err := os.ReadFile(string(items[1].Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRaw(t, string(items[1].Path), testaudio.Fixture(t, "lossless-s16.wma"))
+	readAgain(t, ctx, lib, items[1])
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil || c.idsHeld != 2 || c.written != 0 {
+		t.Fatalf("a pass over an unwritable member = %+v (err %v), want the id held from both", c, err)
+	}
+	if fm, err := meta.NewReader().Read(ctx, string(items[0].Path)); err != nil || fm.Tags.MBReleaseID != "" {
+		t.Errorf("the writable member names release %q (err %v), want none while the id is held", fm.Tags.MBReleaseID, err)
+	}
+
+	// The writer's refusal holds the id until the file changes, which a scan reads.
+	writeRaw(t, string(items[1].Path), kept)
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(string(items[1].Path), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil || c.idsHeld != 0 || c.written != 2 {
+		t.Fatalf("a pass once both can take it = %+v (err %v), want both written", c, err)
+	}
+	carried("written", release)
+}
+
+// TestAHeldIDLeavesItsAlbumAloneOnLaterPasses: both members owe an enriched composer and
+// the album's matched id, and one has become a file the writer never writes. The first
+// pass writes the composer where it can and holds the id from both; later passes find
+// nothing to do, reading no member again and leaving the lost row as it was.
+func TestAHeldIDLeavesItsAlbumAloneOnLaterPasses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, db, items := openTwoTracks(t)
+	for _, it := range items {
+		enrichItemFields(t, ctx, lib, db, it.PID, map[string]string{"composer": "Someone"})
+	}
+	enrichAlbumID(t, ctx, lib, db, items[0].PID, "e5000000-0000-4000-8000-000000000001")
+	writeRaw(t, string(items[1].Path), testaudio.Fixture(t, "lossless-s16.wma"))
+	readAgain(t, ctx, lib, items[1])
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil || c.written != 1 || c.unrepresented != 1 || c.idsHeld != 2 {
+		t.Fatalf("first pass = %+v (err %v), want the composer written once, the WMA lost and the id held from both", c, err)
+	}
+	lost := func() int64 {
+		t.Helper()
+		diags, err := lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: items[1].FilePID, Origin: model.OriginEnrichment})
+		if err != nil || len(diags) != 1 {
+			t.Fatalf("the WMA's rows = %+v (err %v), want its one lost row", diags, err)
+		}
+		return diags[0].SeenAt
+	}
+	seen := lost()
+	for pass := 2; pass <= 3; pass++ {
+		rows, err := lib.store.EnrichmentWriteback(ctx, nil)
+		if err != nil || len(rows) != 0 {
+			t.Errorf("pass %d selects %d rows (err %v), want none while the id is held", pass, len(rows), err)
+		}
+		c, err := lib.writeEnrichmentTags(ctx, nil)
+		if err != nil || c.written+c.failed+c.unrepresented != 0 || c.idsHeld != 2 {
+			t.Errorf("pass %d = %+v (err %v), want nothing done and the id still held from both", pass, c, err)
+		}
+		if got := lost(); got != seen {
+			t.Errorf("pass %d rewrote the lost row (seen at %d, was %d)", pass, got, seen)
+		}
+	}
+}
+
+// TestAnIDIsHeldForGoodByTheFilesForm: a check's answer holds a file's ids until its
+// bytes change when the writer refuses the file's form or would not store an id's key,
+// and for this pass alone when a key of another field is lost or the trouble may pass.
+func TestAnIDIsHeldForGoodByTheFilesForm(t *testing.T) {
+	t.Parallel()
+	form := waxerr.Classifyf(waxerr.CodeUnsupported, "check", wlerr.ErrUnsupportedFormat, "preparing %s", "a.wma")
+	io := waxerr.New(waxerr.CodeIO, "check", "permission denied")
+	for _, tc := range []struct {
+		name string
+		err  error
+		lost []string
+		want bool
+	}{
+		{"a refused form", form, nil, true},
+		{"a lost album id key", nil, []string{"musicbrainz_albumid"}, true},
+		{"a lost group id key", nil, []string{"MUSICBRAINZ_RELEASEGROUPID"}, true},
+		{"a lost field key", nil, []string{"BPM"}, false},
+		{"a file it cannot replace now", io, nil, false},
+		{"a clean check", nil, nil, false},
+	} {
+		if got := heldForGood(tc.err, tc.lost); got != tc.want {
+			t.Errorf("%s: held for good = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestAFolderTheWriterCannotWriteHoldsForThePass: the members sit in a folder the writer
+// cannot write into now, so the album's id waits on both. That may pass without the files
+// changing, so nothing is kept of it: the pass after the folder takes writes again writes
+// both.
+func TestAFolderTheWriterCannotWriteHoldsForThePass(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder mode the writer obeys")
+	}
+	ctx := context.Background()
+	lib, db, items := openTwoTracks(t)
+	enrichAlbumID(t, ctx, lib, db, items[0].PID, "e9000000-0000-4000-8000-000000000001")
+	dir := filepath.Dir(string(items[0].Path))
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil || c.idsHeld != 2 || c.written+c.failed != 0 {
+		t.Fatalf("a pass while the folder takes no write = %+v (err %v), want the id held from both", c, err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil || c.idsHeld != 0 || c.written != 2 {
+		t.Fatalf("a pass once the folder takes writes = %+v (err %v), want both written", c, err)
 	}
 }

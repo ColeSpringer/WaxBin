@@ -763,6 +763,7 @@ type enrichView struct {
 	TagsUnrepresented int      `json:"tagsUnrepresented,omitempty"`
 	TagsSkipped       int      `json:"tagsSkipped,omitempty"`
 	TagsReadOnly      int      `json:"tagsReadOnly,omitempty"`
+	IDsHeld           int      `json:"idsHeld,omitempty"`
 	JobPID            string   `json:"jobPid,omitempty"`
 }
 
@@ -786,8 +787,8 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten:   r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,
-		TagsReadOnly: r.Result.TagsReadOnly,
-		JobPID:       string(r.JobPID),
+		TagsReadOnly: r.Result.TagsReadOnly, IDsHeld: r.Result.IDsHeld,
+		JobPID: string(r.JobPID),
 	}
 }
 

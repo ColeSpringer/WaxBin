@@ -282,30 +282,25 @@ func BookFieldClearKeys(field string) []string {
 const BookSeriesTagKey = string(tag.Grouping)
 
 // EntityFieldTagKey returns the on-disk tag key an entity-curation field fans out to
-// across the entity's member files, and whether the field has one. Only the fields that
-// round-trip through a rescan WITHOUT disturbing the entity's identity are wired: an
-// album's non-identity release identifiers and sort (BARCODE, LABEL, CATALOGNUMBER,
-// ALBUMSORT) and an artist's sort (ARTISTSORT).
+// across the entity's member files, and whether the field has one: an album's release
+// identifiers and sort (MUSICBRAINZ_ALBUMID, BARCODE, LABEL, CATALOGNUMBER,
+// RELEASECOUNTRY, ALBUMSORT), a release group's id (MUSICBRAINZ_RELEASEGROUPID), and an
+// artist's sort (ARTISTSORT).
 //
-// An entity MBID is deliberately NOT fanned (neither album nor artist): a member track's
-// MusicBrainz ID is the entity's identity key on the next scan (AlbumKey/artist match are
-// mbid-first), but the entity edit updates only the mbid column, not the row's match_key,
-// so writing the MBID to the files would re-key the entity to a fresh row and orphan its
-// curation and locks. Clearing one is the exception that does re-key, deliberately, and
-// its write-back strips the id from the member files rather than fanning a value; that
-// strip keys on the clear itself (entityMBIDStripEdits) and not on this table, which maps
-// fields to the values a rescan reads back. Barcode/label/catalog#/sort are not identity
-// inputs, so they fan safely. A release-group field and a release-group type also stay
-// DB-only.
+// An album's or a group's id is safe to write because a scan of a file naming one joins
+// the row holding it in its mbid column, so the entity keeps its row though its key does
+// not move. Its write is all of the member files or none (the caller's check), since a
+// catalog rebuilt from a half-written album would key the tagged members apart from the
+// rest. An artist's id stays in the catalog: a file's artist ids are one positional list
+// over the whole credit, which a reader drops when its length disagrees with the names,
+// so one artist's id can land only where every co-credited artist has one.
 //
 // An album's media stays DB-only, for a reason that is about the tag rather than
 // identity: MEDIA is a per-medium tag while the fan-out writes one value to every member
 // file, so an album-level edit would stamp "CD" over a DVD medium's tracks. Country has no
-// such problem, since every disc of a release shares one, and it fans. It only became
-// fannable with WaxLabel v1.3.0, which made RELEASECOUNTRY canonical and writes it as the
-// Picard-interoperable frame on each format; before that there was no key worth writing.
-// The two-letter code model.NormalizeCountry produces is also what WaxLabel's
-// malformed-country lint accepts, so a fanned value is clean on disk.
+// such problem, since every disc of a release shares one, and it fans. The two-letter code
+// model.NormalizeCountry produces is also what WaxLabel's malformed-country lint accepts,
+// so a fanned value is clean on disk. A release group's type stays DB-only.
 func EntityFieldTagKey(entityType model.MergeEntity, field string) (string, bool) {
 	switch entityType {
 	case model.MergeAlbum:
@@ -320,6 +315,12 @@ func EntityFieldTagKey(entityType model.MergeEntity, field string) (string, bool
 			return string(tag.CatalogNumber), true
 		case "country":
 			return string(tag.ReleaseCountry), true
+		case "mbid":
+			return string(tag.MBReleaseID), true
+		}
+	case model.MergeReleaseGroup:
+		if field == "mbid" {
+			return string(tag.MBReleaseGroupID), true
 		}
 	case model.MergeArtist:
 		if field == "sort" {
@@ -524,7 +525,45 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 	if len(edits) == 0 && o.outputGain == nil {
 		return &WriteResult{Changed: false}, nil
 	}
-	return writeTags(ctx, "meta.Writer.Apply", path, func(doc *waxlabel.Document, ed *waxlabel.Editor) {
+	return writeTags(ctx, "meta.Writer.Apply", path, applyEdits(edits, o), nil)
+}
+
+// Check prepares the write Apply would make of edits to the file at path and writes
+// nothing. Its error is CodeIO for a file it could not replace now (Replaceable), asked
+// first since it reads nothing, or the one Apply would return before writing,
+// CodeUnsupported for a file or format that cannot take the edits. lost names each edited
+// key whose value the format would not store as given, as an unrepresented warning on
+// Apply's result would. A write can still fail while it runs, on a disk that fills or a
+// file another program takes in between.
+func (w *Writer) Check(ctx context.Context, path string, edits []TagEdit) (lost []string, err error) {
+	const op = "meta.Writer.Check"
+	if err := Replaceable(path); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	_, warnings, err := prepareTags(ctx, op, path, applyEdits(edits, applyOptions{}), nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, wn := range warnings {
+		if wn.Unrepresented && wn.Key != "" {
+			lost = append(lost, wn.Key)
+		}
+	}
+	return lost, nil
+}
+
+// FormRefused reports whether err is the tag writer refusing a file in its current
+// form, which no other set of edits gets past: a format it reads and never writes, a
+// fragmented MP4, a chained or unaligned Ogg stream. A key or a value it will not store
+// is not one, since the file still takes the rest.
+func FormRefused(err error) bool {
+	return errors.Is(err, wlerr.ErrUnsupportedFormat) || errors.Is(err, wlerr.ErrFragmented) ||
+		errors.Is(err, wlerr.ErrChainedStream) || errors.Is(err, wlerr.ErrUnalignedStream)
+}
+
+// applyEdits records Apply's edits on a parsed file.
+func applyEdits(edits []TagEdit, o applyOptions) func(*waxlabel.Document, *waxlabel.Editor) {
+	return func(doc *waxlabel.Document, ed *waxlabel.Editor) {
 		for _, e := range edits {
 			k := tag.Key(e.Key)
 			switch {
@@ -551,7 +590,7 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 		if o.outputGain != nil {
 			ed.SetOutputGain(*o.outputGain)
 		}
-	}, nil)
+	}
 }
 
 // ErrNotCustomTag is the cause of an ApplyCustomTags refusal that no later write-back

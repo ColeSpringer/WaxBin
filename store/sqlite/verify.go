@@ -248,9 +248,11 @@ WHERE (COALESCE(gr.track_count, -1) <>
         (SELECT COALESCE(SUM(` + itemDurationExpr + `), 0) FROM item_genre ig ` + liveGenreMembers + itemDurationJoins + `
          WHERE ig.genre_id = g.id))`
 
-// statedArtSourceQ selects the source hashes files state as their covers. The comparison
+// statedArtSourceQ selects the source hashes files state as their covers, and the
+// placeholders they passed over, whose marks have to outlive the pass. The comparison
 // leaves out a file that states none and one whose cover is unknown.
-const statedArtSourceQ = `SELECT front_hash FROM file WHERE front_hash <> ''`
+const statedArtSourceQ = `SELECT front_hash FROM file WHERE front_hash <> ''
+	UNION ALL SELECT front_stand_in FROM file WHERE front_stand_in <> ''`
 
 // liveArtSourceQ selects the source hashes still reachable: a picture a file states,
 // and one a live entity maps, an art_map row whose (entity_type, entity_id) exists in

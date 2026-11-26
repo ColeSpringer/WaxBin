@@ -124,6 +124,12 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err != nil {
 		return nil, err
 	}
+	// The tracks of both sides and the ids each sat under, which say after the merge
+	// whose files lack the survivor's ids (followMergedIDsTx).
+	follow, err := mergeFollowersTx(ctx, tx, et, sid, lid)
+	if err != nil {
+		return nil, err
+	}
 
 	// The credits column of a search row names each credited artist, so the items the
 	// loser is credited on are reindexed once the loser's delete has cascaded the credit
@@ -300,6 +306,10 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		return nil, err
 	}
 
+	if err := follow.owe(ctx, tx, et, sid); err != nil {
+		return nil, err
+	}
+
 	// Per-item deltas for every re-pointed item, then the entity update + loser delete.
 	for _, pid := range affectedItems {
 		if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
@@ -313,6 +323,92 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		return nil, err
 	}
 	return rep, nil
+}
+
+// mergeFollowers are an album or release-group merge's tracks, the loser's (movers) and
+// the survivor's own, with the ids each side held before it.
+type mergeFollowers struct {
+	movers, own           []int64
+	loserIDs, survivorIDs albumIDs
+}
+
+// mergeFollowersTx reads, ahead of the re-point, the tracks a merge of et moves and the
+// ones the survivor keeps, with the ids they sat under. Another type moves no track.
+func mergeFollowersTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, sid, lid int64) (*mergeFollowers, error) {
+	f := &mergeFollowers{}
+	var err error
+	switch et {
+	case model.MergeAlbum:
+		if f.movers, err = queryInt64sTx(ctx, tx, "SELECT item_id FROM track WHERE album_id = ?", lid); err != nil {
+			return nil, err
+		}
+		if f.own, err = queryInt64sTx(ctx, tx, "SELECT item_id FROM track WHERE album_id = ?", sid); err != nil {
+			return nil, err
+		}
+		if f.loserIDs, err = albumIDsTx(ctx, tx, lid); err != nil {
+			return nil, err
+		}
+		f.survivorIDs, err = albumIDsTx(ctx, tx, sid)
+	case model.MergeReleaseGroup:
+		const members = "SELECT t.item_id FROM track t JOIN album al ON al.id = t.album_id WHERE al.release_group_id = ?"
+		if f.movers, err = queryInt64sTx(ctx, tx, members, lid); err != nil {
+			return nil, err
+		}
+		if f.own, err = queryInt64sTx(ctx, tx, members, sid); err != nil {
+			return nil, err
+		}
+		var l, s sql.NullString
+		if err = tx.QueryRowContext(ctx, "SELECT (SELECT mbid FROM release_group WHERE id = ?), (SELECT mbid FROM release_group WHERE id = ?)",
+			lid, sid).Scan(&l, &s); err != nil {
+			return nil, err
+		}
+		f.loserIDs.group, f.survivorIDs.group = l.String, s.String
+	}
+	return f, err
+}
+
+// owe runs, once the merge is done, the follow of the ids that moved: a mover follows the
+// survivor's ids that differ from those it sat under, and the survivor's own tracks follow
+// an id the survivor took from the loser, which their files never carried. An album
+// merge also takes the loser's tracks into the survivor's release group.
+func (f *mergeFollowers) owe(ctx context.Context, tx *sql.Tx, et model.MergeEntity, sid int64) error {
+	if et != model.MergeAlbum && et != model.MergeReleaseGroup {
+		return nil
+	}
+	now := f.survivorIDs
+	if et == model.MergeAlbum {
+		ids, err := albumIDsTx(ctx, tx, sid)
+		if err != nil {
+			return err
+		}
+		now = ids
+	} else {
+		var g sql.NullString
+		if err := tx.QueryRowContext(ctx, "SELECT mbid FROM release_group WHERE id = ?", sid).Scan(&g); err != nil {
+			return err
+		}
+		now.group = g.String
+	}
+	movers, own := f.loserIDs.moved(now), f.survivorIDs.moved(now)
+	if et == model.MergeReleaseGroup {
+		movers.album, own.album = false, false
+	} else {
+		own.group = false
+	}
+	for _, step := range []struct {
+		items []int64
+		which idSet
+	}{{f.movers, movers}, {f.own, own}} {
+		if !step.which.album && !step.which.group {
+			continue
+		}
+		for _, id := range step.items {
+			if err := idsFollowTrackTx(ctx, tx, id, 0, nil, step.which); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // affectedItemPIDs returns the public ids of the playable items whose association
