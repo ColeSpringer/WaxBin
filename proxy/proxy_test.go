@@ -1238,3 +1238,48 @@ func TestRunRemoveRootRoundTrip(t *testing.T) {
 		t.Errorf("run_remove_root params = %+v", got)
 	}
 }
+
+// TestCancelJobRoundTrip: cancel_job carries the job's pid to the server, and a refusal
+// keeps its class.
+func TestCancelJobRoundTrip(t *testing.T) {
+	var got proxy.CancelJobParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodCancelJob: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			if got.JobPID == "elsewhere" {
+				return nil, waxerr.New(waxerr.CodeConflict, "waxbin.CancelJob", "job elsewhere runs in another process")
+			}
+			return nil, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	ctx := context.Background()
+	if err := c.CancelJob(ctx, "job1"); err != nil || got.JobPID != "job1" {
+		t.Fatalf("cancel_job = %v with params %+v, want job1 canceled", err, got)
+	}
+	if err := c.CancelJob(ctx, "elsewhere"); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Errorf("cancel_job of another process's job = %v, want CodeConflict", err)
+	}
+}
+
+// TestRunBookPartsRoundTrip: run_book_parts carries each part's file, book and place to the
+// server and answers with the job to follow.
+func TestRunBookPartsRoundTrip(t *testing.T) {
+	var got proxy.BookPartsParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodRunBookParts: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			return proxy.JobStartResult{JobPID: "job1"}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	job, err := c.RunBookParts(context.Background(), proxy.BookPartsParams{Changes: []proxy.BookPartParams{
+		{FilePID: "f1", BookPID: "b1", Disc: 2, Part: 3}, {FilePID: "f2"}}})
+	if err != nil || job != "job1" {
+		t.Fatalf("run_book_parts = %q, %v; want the job", job, err)
+	}
+	if len(got.Changes) != 2 || got.Changes[0] != (proxy.BookPartParams{FilePID: "f1", BookPID: "b1", Disc: 2, Part: 3}) ||
+		got.Changes[1] != (proxy.BookPartParams{FilePID: "f2"}) {
+		t.Errorf("params = %+v", got)
+	}
+}

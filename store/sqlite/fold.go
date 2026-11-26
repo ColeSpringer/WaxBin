@@ -490,6 +490,13 @@ func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int
 		return nil
 	}
 	book := skind == string(model.KindBook)
+	// A book takes the loser's assignments; any other survivor leaves them to go with the
+	// loser.
+	if book {
+		if _, err := tx.ExecContext(ctx, "UPDATE assigned_part SET item_id = ? WHERE item_id = ?", survivor, loser); err != nil {
+			return err
+		}
+	}
 	var span partSpan
 	if book {
 		var err error

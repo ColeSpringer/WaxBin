@@ -40,7 +40,8 @@ import (
 // carries reResolve, which an older server would drop and scan without, and run_unfold
 // and set_tags are added methods, set_tags replacing set_tag (a client asking for set_tag
 // meets an unknown method); a write-back failure naming the key it is about, or a value
-// lost, is an added field. Later on 26, set_art_placeholder is an added method.
+// lost, is an added field. Later on 26, set_art_placeholder, cancel_job and run_book_parts
+// are added methods.
 const ProtocolVersion = 26
 
 // ReasonUnknownMethod is a server's refusal of a method it does not have, which is how a
@@ -127,6 +128,11 @@ const (
 	MethodRunUnfold       = "run_unfold"
 
 	MethodRunRemoveRoot = "run_remove_root"
+	MethodRunBookParts  = "run_book_parts"
+
+	// MethodCancelJob cancels a job the server runs, by its pid; the client follows the job
+	// row to its end as for any job.
+	MethodCancelJob = "cancel_job"
 )
 
 // request is one wire frame from client to server.
@@ -1067,6 +1073,27 @@ type SetKindParams struct {
 	Kind      string   `json:"kind"`
 	WriteBack bool     `json:"writeBack,omitempty"`
 	Force     bool     `json:"force,omitempty"`
+}
+
+// BookPartsParams is the run_book_parts request payload: the parts to file (see
+// waxbin.AssignBookParts). The server checks them before starting the job, and the finished
+// job's result is the waxbin.BookPartsReport.
+type BookPartsParams struct {
+	Changes []BookPartParams `json:"changes"`
+}
+
+// BookPartParams is one part of run_book_parts: a file into a book at a disc and part, both
+// 0 for the number the file's own tags give it, or with no book to withdraw its assignment.
+type BookPartParams struct {
+	FilePID string `json:"filePid"`
+	BookPID string `json:"bookPid,omitempty"`
+	Disc    int    `json:"disc,omitempty"`
+	Part    int    `json:"part,omitempty"`
+}
+
+// CancelJobParams is the cancel_job request payload.
+type CancelJobParams struct {
+	JobPID string `json:"jobPid"`
 }
 
 // JobStartResult is the response for a run_* method: the PID of the started job,

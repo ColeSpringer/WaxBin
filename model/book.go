@@ -109,6 +109,9 @@ type BookDetail struct {
 	Chapters        []Chapter
 	Files           []BookPart // backing files in reading order
 	TotalDurationMS int64
+	// IdentityHeld says a host assigned the primary part to the book, so a scan keeps the
+	// book's title, author and identifiers as the catalog holds them, with no lock row.
+	IdentityHeld bool
 }
 
 // BookPart is one backing file of a multi-file book, in reading order. DurationMS is the
@@ -123,4 +126,6 @@ type BookPart struct {
 	DurationMS  int64
 	StartMS     int64
 	EffectiveMS int64
+	// Assigned says a host assigned the part's audio to the book (ItemFileRef.Assigned).
+	Assigned bool
 }

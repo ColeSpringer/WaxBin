@@ -40,6 +40,9 @@ type stagedBook struct {
 // a part credited to another artist is cataloged as a book of that artist's, and is
 // planned as one.
 func (s *Service) joinFolders(req Request, files []*staged) {
+	if req.Assign != nil {
+		return
+	}
 	byFolder := map[string][]*staged{}
 	var folders []string
 	for _, f := range files {

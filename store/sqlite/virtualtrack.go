@@ -41,6 +41,14 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 	seen.sidecarSkipped = skipped
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
+		if err := dropAssignedTx(ctx, tx, in.DropAssigned, in.File.Path, in.File.EssenceHash); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if in.Withdraw {
+			if err := withdrawAssignedTx(ctx, tx, in.File.Path, in.File.EssenceHash); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 
 		// Each track's key is resolved once, for the relink (a relinked rip may be one
 		// backing these tracks, or none), the copy check, the overlay and the item write.

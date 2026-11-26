@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
@@ -202,4 +203,24 @@ func sharedFolder(files []*staged) string {
 		}
 	}
 	return dir
+}
+
+// assignedTags puts the book an assignment names in a staged book file's tags in place of
+// the one they name, its title and author and the parts it has, and returns the key and place
+// the file's own tags and name gave it. Without an assignment it changes nothing.
+func assignedTags(asg *Assignment, tags *model.Tags, root, path string) (string, int) {
+	if asg == nil {
+		return "", 0
+	}
+	own := *tags
+	meta.PromoteBookFields(&own)
+	place, _ := scan.PartPosition(&own, root, path)
+	tags.Album, tags.AlbumSort = asg.Title, ""
+	if asg.Author != "" {
+		tags.AlbumArtist, tags.AlbumArtistSort, tags.ArtistSort = asg.Author, "", ""
+	}
+	if asg.Parts > 0 {
+		tags.TrackTotal = asg.Parts
+	}
+	return scan.BookIdentityKey(own), place
 }

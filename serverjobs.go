@@ -30,9 +30,9 @@ type jobFn = func(context.Context, *jobs.Handle) error
 
 // startJob starts a job and returns its PID as soon as the job row exists, then
 // keeps running it in the background under ctx (a server passes its own lifetime
-// context, so the job outlives the client request and is canceled only on server
-// shutdown). A failure to even start the job (a scope already leased, or a create
-// error) is returned synchronously.
+// context, so the job outlives the client request), until ctx ends, Close begins, or
+// CancelJob names it. A failure to even start the job (a scope already leased, or a
+// create error) is returned synchronously.
 func (l *Library) startJob(ctx context.Context, spec jobs.Spec, work jobFn) (model.PID, error) {
 	if l.ReadOnly() {
 		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.startJob", "a background job requires a read-write library")
@@ -52,6 +52,9 @@ func (l *Library) startJob(ctx context.Context, spec jobs.Spec, work jobFn) (mod
 		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.startJob", "the library is closed")
 	}
 	l.jobsWG.Go(func() {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(l.life, cancel)()
 		ran := false
 		_, err := l.jobs.Run(ctx, spec, func(jctx context.Context, h *jobs.Handle) error {
 			// The job row now exists: hand its PID back so the submit call can return
@@ -89,6 +92,35 @@ func (l *Library) jsonResult(v any) string {
 // JSON Result summary once done.
 func (l *Library) Job(ctx context.Context, pid model.PID) (*model.Job, error) {
 	return l.store.JobByPID(ctx, pid)
+}
+
+// CancelJob cancels a job this library runs and returns without waiting for it to end; the
+// caller follows the job row as it does for any job, which ends canceled on request (or
+// done, when the work finished first) with what the job did so far as its result. A job
+// that has ended needs nothing and returns nil. An unknown pid is CodeNotFound, a running
+// job of another process is CodeConflict (interrupt it there), and a read-only library is
+// CodeUnsupported.
+//
+// What a canceled job leaves is what a shutdown leaves: a scan, analyze or enrichment
+// pass picks up where it stopped when it is run again, an organize keeps the moves it made
+// (UndoOrganize takes them back), a kind change or root removal finishes when asked
+// again, and a watch's scan stops for that tick while the watch carries on.
+func (l *Library) CancelJob(ctx context.Context, pid model.PID) error {
+	const op = "waxbin.CancelJob"
+	if l.ReadOnly() {
+		return waxerr.New(waxerr.CodeUnsupported, op, "canceling a job requires a read-write library")
+	}
+	if l.jobs.Cancel(pid) {
+		return nil
+	}
+	job, err := l.store.JobByPID(ctx, pid)
+	if err != nil {
+		return err
+	}
+	if job.State != model.JobRunning {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeConflict, op, "job "+string(pid)+" runs in another process; interrupt it there")
 }
 
 // --- scan ---
@@ -201,6 +233,13 @@ func (l *Library) analyzeWork(writeRG bool, out *AnalyzeResult) jobFn {
 			out.Result = *r
 		}
 		if err != nil {
+			// A pass that stopped early, on a cancel most often, still brings album gain up
+			// to date with the loudness it measured.
+			if out.Result.LoudnessMeasured > 0 {
+				if rerr := l.store.RefreshAlbumGain(context.WithoutCancel(ctx)); rerr != nil {
+					l.log.Warn("analyze: refreshing album gain after the pass stopped", "err", rerr)
+				}
+			}
 			return err
 		}
 		if err := l.store.RefreshAlbumGain(ctx); err != nil {
@@ -227,11 +266,9 @@ func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.
 	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
 	return l.startJob(ctx, jobs.Spec{Kind: "analyze", Scope: "analyze"}, func(jctx context.Context, h *jobs.Handle) error {
 		out := &AnalyzeResult{}
-		if err := l.analyzeWork(writeRG, out)(jctx, h); err != nil {
-			return err
-		}
+		err := l.analyzeWork(writeRG, out)(jctx, h)
 		h.SetResult(l.jsonResult(out.Result))
-		return nil
+		return err
 	})
 }
 
@@ -301,11 +338,9 @@ func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PI
 	opts.Phases, opts.ForcePhases = slices.Clone(opts.Phases), slices.Clone(opts.ForcePhases)
 	return l.startJob(ctx, enrichSpec(opts), func(jctx context.Context, h *jobs.Handle) error {
 		out := &EnrichResult{}
-		if err := l.enrichWork(opts, scope, out)(jctx, h); err != nil {
-			return err
-		}
+		err := l.enrichWork(opts, scope, out)(jctx, h)
 		h.SetResult(l.jsonResult(out.Result))
-		return nil
+		return err
 	})
 }
 

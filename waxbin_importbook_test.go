@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/scan"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // stageBookPart writes one staged part of a book. album may be empty, and narrated adds
@@ -785,5 +787,675 @@ func TestReuploadOfABooksGonePartRestoresItInPlace(t *testing.T) {
 	}
 	if moves := organizeMoves(t, ctx, lib); len(moves) != 0 {
 		t.Errorf("organize after the restore would move %v", moves)
+	}
+}
+
+// acquirePart is one file an acquired book hands over: its tags, and the place the host
+// gives it.
+type acquirePart struct {
+	spec       testaudio.MP3Spec
+	disc, part int
+}
+
+// titled is a part whose tags hold a title and nothing else, which on its own keys a book
+// of that title.
+func titled(title string, seed byte) testaudio.MP3Spec {
+	return testaudio.MP3Spec{Title: title, Audio: testaudio.AudioWithSeed(seed)}
+}
+
+// acquireBook writes the parts to a folder of their own and imports them as one book under
+// book, failing unless every one lands.
+func acquireBook(t *testing.T, ctx context.Context, lib *waxbin.Library, book waxbin.AcquiredBook, parts ...acquirePart) *waxbin.AcquiredUnitResult {
+	t.Helper()
+	dir := t.TempDir()
+	files := make([]waxbin.AcquiredFile, len(parts))
+	for i, p := range parts {
+		path := filepath.Join(dir, fmt.Sprintf("upload-%c.mp3", 'a'+i))
+		writeFile(t, path, testaudio.BuildMP3FromSpec(p.spec))
+		files[i] = waxbin.AcquiredFile{Path: path, Disc: p.disc, Part: p.part}
+	}
+	res, err := lib.ImportAcquiredUnit(ctx, files, model.KindBook, waxbin.AcquiredMeta{Book: &book})
+	if err != nil {
+		t.Fatalf("ImportAcquiredUnit: %v", err)
+	}
+	if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != len(parts) {
+		t.Fatalf("ApplyImport = %+v (err %v), want %d imported; plan %+v", rep, err, len(parts), res.Plan.Actions)
+	}
+	return res
+}
+
+// chapterTitles lists a book's chapter titles in reading order, one per untitled-chapter
+// part.
+func chapterTitles(t *testing.T, ctx context.Context, lib *waxbin.Library, book model.PID) []string {
+	t.Helper()
+	d, err := lib.Book(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, c := range d.Chapters {
+		out = append(out, c.Title)
+	}
+	return out
+}
+
+// verifyClean fails unless the catalog's derived data is consistent and no assignment is
+// stranded.
+func verifyClean(t *testing.T, ctx context.Context, lib *waxbin.Library) {
+	t.Helper()
+	rep, err := lib.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() || rep.StrandedAssignments != 0 {
+		t.Errorf("db verify = %+v (err %v), want clean", rep, err)
+	}
+}
+
+// acquiredBook returns the catalog's only item, failing unless it is a book of parts files.
+// An acquired book whose parts carry no book signal holds the kind lock the import's forced
+// kind sets, so unlike oneBook it does not look for one.
+func acquiredBook(t *testing.T, ctx context.Context, lib *waxbin.Library, parts int) *model.ItemView {
+	t.Helper()
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 || items[0].Kind != model.KindBook {
+		t.Fatalf("items = %+v (err %v), want one book", items, err)
+	}
+	if files, err := lib.ItemFiles(ctx, items[0].PID); err != nil || len(files) != parts {
+		t.Fatalf("book files = %d (err %v), want %d", len(files), err, parts)
+	}
+	return items[0]
+}
+
+// dune is the book the assigned imports below name.
+var dune = waxbin.AcquiredBook{Title: "Dune", Author: "Frank Herbert", Parts: 3}
+
+// TestAnAcquiredBookFilesItsPartsAsOne: parts that key three books of their own, by their
+// titles, by three other albums, or by three ASINs, acquired as one book land as that book in
+// the order assigned, which takes none of their identifiers, and a forced rescan keeps it.
+func TestAnAcquiredBookFilesItsPartsAsOne(t *testing.T) {
+	t.Parallel()
+	asin := func(spec testaudio.MP3Spec, id string) testaudio.MP3Spec {
+		spec.TXXX = []testaudio.TXXXFrame{{Desc: "ASIN", Value: id}}
+		return spec
+	}
+	album := func(spec testaudio.MP3Spec, name string) testaudio.MP3Spec {
+		spec.Album, spec.Artist, spec.AlbumArtist = name, "Tagger "+name, "Tagger "+name
+		return spec
+	}
+	for name, parts := range map[string][]testaudio.MP3Spec{
+		"titles": {titled("Three", 3), titled("One", 1), titled("Two", 2)},
+		"albums": {album(titled("Three", 3), "Gamma"), album(titled("One", 1), "Alpha"), album(titled("Two", 2), "Beta")},
+		"asins":  {asin(titled("Three", 3), "B000000003"), asin(titled("One", 1), "B000000001"), asin(titled("Two", 2), "B000000002")},
+	} {
+		ctx := context.Background()
+		lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+		res := acquireBook(t, ctx, lib, dune, acquirePart{spec: parts[0], part: 3}, acquirePart{spec: parts[1], part: 1},
+			acquirePart{spec: parts[2], part: 2})
+		for _, f := range res.Files {
+			if !f.Assigned {
+				t.Errorf("%s: %s not assigned", name, f.Path)
+			}
+		}
+		check := func(when string) {
+			t.Helper()
+			book := acquiredBook(t, ctx, lib, 3)
+			d, err := lib.Book(ctx, book.PID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Item.Title != "Dune" || d.Item.Artist != "Frank Herbert" || d.ASIN != "" || !d.IdentityHeld {
+				t.Errorf("%s %s: book %q by %q asin %q held %v, want Dune by Frank Herbert with no ASIN, held",
+					name, when, d.Item.Title, d.Item.Artist, d.ASIN, d.IdentityHeld)
+			}
+			if got := strings.Join(chapterTitles(t, ctx, lib, book.PID), ","); got != "One,Two,Three" {
+				t.Errorf("%s %s: parts read %s, want One,Two,Three", name, when, got)
+			}
+		}
+		check("imported")
+		if moves := organizeMoves(t, ctx, lib); len(moves) != 0 {
+			t.Errorf("%s: organize after the import would move %v", name, moves)
+		}
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+			t.Fatal(err)
+		}
+		check("after a forced scan")
+		verifyClean(t, ctx, lib)
+	}
+}
+
+// TestAnAcquiredPartThatSaysItAllGetsNoRow: a part whose own tags already give the assigned
+// book, place and count of parts imports as it would have, with no assignment, beside parts
+// that need one.
+func TestAnAcquiredPartThatSaysItAllGetsNoRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	tagged := testaudio.MP3Spec{Title: "Two", Artist: "Frank Herbert", AlbumArtist: "Frank Herbert", Album: "Dune", Track: 2, TrackTotal: 3,
+		TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Scott Brick"}}, Audio: testaudio.AudioWithSeed(2)}
+	res := acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: tagged, part: 2},
+		acquirePart{spec: titled("Three", 3), part: 3})
+	if !res.Files[0].Assigned || res.Files[1].Assigned || !res.Files[2].Assigned {
+		t.Errorf("assigned = %v %v %v, want the tagged part alone left to its tags", res.Files[0].Assigned, res.Files[1].Assigned, res.Files[2].Assigned)
+	}
+	book := acquiredBook(t, ctx, lib, 3)
+	d, err := lib.Book(ctx, book.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{true, false, true} {
+		if d.Files[i].Assigned != want {
+			t.Errorf("part %d assigned %v, want %v", i+1, d.Files[i].Assigned, want)
+		}
+	}
+	verifyClean(t, ctx, lib)
+}
+
+// TestAnAcquiredBookOutlivesEditsAndOrganize: an acquired book of untagged parts keeps its
+// parts and order through a catalog-only title edit, an organize that renames its files, and
+// a forced scan, and through an edit written back into the files and another forced scan.
+func TestAnAcquiredBookOutlivesEditsAndOrganize(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: titled("Two", 2), part: 2},
+		acquirePart{spec: titled("Three", 3), part: 3})
+	book := acquiredBook(t, ctx, lib, 3).PID
+	after := func(when, title string) {
+		t.Helper()
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+			t.Fatal(err)
+		}
+		if b := acquiredBook(t, ctx, lib, 3); b.PID != book || b.Title != title {
+			t.Errorf("%s: book %s %q, want %s %q", when, b.PID, b.Title, book, title)
+		}
+		if got := strings.Join(chapterTitles(t, ctx, lib, book), ","); got != "One,Two,Three" {
+			t.Errorf("%s: parts read %s, want One,Two,Three", when, got)
+		}
+	}
+	if err := lib.EditFields(ctx, book, map[string]string{"title": "Dune Messiah"}, waxbin.EditOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Organize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	after("a catalog-only edit and an organize", "Dune Messiah")
+	if err := lib.EditFields(ctx, book, map[string]string{"title": "Children of Dune"}, waxbin.EditOptions{WriteBack: true}); err != nil {
+		t.Fatal(err)
+	}
+	after("an edit written back", "Children of Dune")
+	verifyClean(t, ctx, lib)
+}
+
+// TestAnAssignedPartsCopiesAndReencodes: a retagged copy of an assigned part joins its book
+// as the part's other file, the part keeping its place; a scan that ignores locks keeps the
+// assignment; and a part re-encoded where it stands stays the book's part at its place.
+func TestAnAssignedPartsCopiesAndReencodes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: titled("Two", 2), part: 2},
+		acquirePart{spec: titled("Three", 3), part: 3})
+	book := acquiredBook(t, ctx, lib, 3).PID
+	parts, err := lib.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "Elsewhere", "copy.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Retagged",
+		Artist: "Someone", Album: "Not Dune", Audio: testaudio.AudioWithSeed(2)}))
+	scanLib(t, ctx, lib)
+	files, err := lib.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alternates int
+	for _, f := range files {
+		if f.Role == "alternate" && f.Position == 2 {
+			alternates++
+		}
+		if f.FilePID == parts[1].FilePID && (f.Role == "alternate" || f.Position != 2) {
+			t.Errorf("part two = %+v, want it the part at 2", f)
+		}
+	}
+	if alternates != 1 {
+		t.Errorf("files = %+v, want the copy as part two's alternate", files)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true, IgnoreLocks: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(chapterTitles(t, ctx, lib, book), ","); got != "One,Two,Three" {
+		t.Errorf("after a scan ignoring locks the parts read %s, want One,Two,Three", got)
+	}
+	writeFile(t, parts[2].DisplayPath, testaudio.BuildMP3FromSpec(titled("Three Again", 33)))
+	scanLib(t, ctx, lib)
+	if got := strings.Join(chapterTitles(t, ctx, lib, book), ","); got != "One,Two,Three Again" {
+		t.Errorf("after a re-encode in place the parts read %s, want One,Two,Three Again", got)
+	}
+	verifyClean(t, ctx, lib)
+}
+
+// TestAnAssignedPartReturnsFromTheTrashAndARootAddedBack: a part trashed and restored, and a
+// book whose library is removed and added back, find their book and place again.
+func TestAnAssignedPartReturnsFromTheTrashAndARootAddedBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	managed, err := lib.AddRoot(ctx, config.Root{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: titled("Two", 2), part: 2},
+		acquirePart{spec: titled("Three", 3), part: 3})
+	book := acquiredBook(t, ctx, lib, 3).PID
+	parts, err := lib.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := lib.PlanDeleteFiles(ctx, []model.PID{parts[1].FilePID}, model.DeleteTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := lib.Trash(ctx, false, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("trash = %+v (err %v)", entries, err)
+	}
+	if err := lib.RestoreTrash(ctx, entries[0].PID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(chapterTitles(t, ctx, lib, book), ","); got != "One,Two,Three" {
+		t.Errorf("after a restore the parts read %s, want One,Two,Three", got)
+	}
+	if _, err := lib.RemoveRoot(ctx, managed.PID, waxbin.RemoveRootOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.AddRoot(ctx, config.Root{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}); err != nil {
+		t.Fatal(err)
+	}
+	scanLib(t, ctx, lib)
+	if b := acquiredBook(t, ctx, lib, 3); b.PID != book {
+		t.Errorf("after the root came back the book is %s, want %s", b.PID, book)
+	}
+	if got := strings.Join(chapterTitles(t, ctx, lib, book), ","); got != "One,Two,Three" {
+		t.Errorf("after the root came back the parts read %s, want One,Two,Three", got)
+	}
+	verifyClean(t, ctx, lib)
+}
+
+// TestALaterAcquisitionByPIDAddsAPart: a part acquired later for a book named by its pid
+// joins it after a catalog-only title edit has left its key behind, joins a book keyed by
+// its ASIN, and takes a place on a second disc.
+func TestALaterAcquisitionByPIDAddsAPart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: titled("Two", 2), part: 2},
+		acquirePart{spec: titled("Three", 3), part: 3})
+	book := acquiredBook(t, ctx, lib, 3).PID
+	if err := lib.EditFields(ctx, book, map[string]string{"title": "Dune Messiah"}, waxbin.EditOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	acquireBook(t, ctx, lib, waxbin.AcquiredBook{PID: book}, acquirePart{spec: titled("Four", 4), part: 4})
+	acquireBook(t, ctx, lib, waxbin.AcquiredBook{PID: book}, acquirePart{spec: titled("Disc Two", 5), disc: 2, part: 1})
+	if b := acquiredBook(t, ctx, lib, 5); b.PID != book || b.Title != "Dune Messiah" {
+		t.Fatalf("book = %s %q, want %s Dune Messiah with five parts", b.PID, b.Title, book)
+	}
+	if got := strings.Join(chapterTitles(t, ctx, lib, book), ","); got != "One,Two,Three,Four,Disc Two" {
+		t.Errorf("parts read %s, want the later parts after the first three", got)
+	}
+
+	other := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	staging := t.TempDir()
+	for i := 1; i <= 2; i++ {
+		writeFile(t, filepath.Join(staging, "Hyperion", fmt.Sprintf("0%d.mp3", i)), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: fmt.Sprintf("Part %d", i), Artist: "Dan Simmons", Album: "Hyperion", Track: i,
+			TXXX:  []testaudio.TXXXFrame{{Desc: "ASIN", Value: "B00HYPERIO"}, {Desc: "NARRATOR", Value: "Reader"}},
+			Audio: testaudio.AudioWithSeed(byte(40 + i))}))
+	}
+	importAll(t, ctx, other, staging, 2)
+	hyperion := oneBook(t, ctx, other, 2).PID
+	acquireBook(t, ctx, other, waxbin.AcquiredBook{PID: hyperion}, acquirePart{spec: titled("Part 3", 43), part: 3})
+	if b := acquiredBook(t, ctx, other, 3); b.PID != hyperion {
+		t.Errorf("the ASIN-keyed book is %s, want %s with the acquired part", b.PID, hyperion)
+	}
+	verifyClean(t, ctx, lib)
+	verifyClean(t, ctx, other)
+}
+
+// TestAnAcquiredBookIsRefused: a book named on a track or an episode, one with neither pid
+// nor title, a pid that names no book or a book of another library, a number without a book,
+// two files at one place, a part past the book's parts and a number past a disc's places are
+// refused before anything is planned.
+func TestAnAcquiredBookIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	inPlace := t.TempDir()
+	writeFile(t, filepath.Join(inPlace, "Elsewhere", "01.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Elsewhere",
+		Artist: "A", Album: "Elsewhere", TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "R"}}, Audio: testaudio.AudioWithSeed(90)}))
+	writeFile(t, filepath.Join(inPlace, "song.mp3"), testaudio.BuildMP3WithAudio("Song", "Band", "Record", 1, testaudio.AudioWithSeed(91)))
+	managed := t.TempDir()
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:    []config.Root{{Path: managed, Mode: model.ModeManaged, Profile: "waxbin-native"}, {Path: inPlace, Mode: model.ModeInPlace}},
+		Podcasts: config.PodcastConfig{Dir: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	scanLib(t, ctx, lib)
+	elsewhere, song := itemPIDByTitle(t, ctx, lib, "Elsewhere"), itemPIDByTitle(t, ctx, lib, "Song")
+	file := func() string {
+		p := filepath.Join(t.TempDir(), "part.mp3")
+		writeFile(t, p, testaudio.BuildMP3FromSpec(titled("Part", 92)))
+		return p
+	}
+	for _, c := range []struct {
+		name  string
+		kind  model.Kind
+		files []waxbin.AcquiredFile
+		book  *waxbin.AcquiredBook
+	}{
+		{"a track", model.KindTrack, []waxbin.AcquiredFile{{Path: file()}}, &dune},
+		{"an episode", model.KindEpisode, []waxbin.AcquiredFile{{Path: file()}}, &dune},
+		{"no pid nor title", model.KindBook, []waxbin.AcquiredFile{{Path: file()}}, &waxbin.AcquiredBook{Author: "A"}},
+		{"a track's pid", model.KindBook, []waxbin.AcquiredFile{{Path: file()}}, &waxbin.AcquiredBook{PID: song}},
+		{"an unknown pid", model.KindBook, []waxbin.AcquiredFile{{Path: file()}}, &waxbin.AcquiredBook{PID: model.NewPID()}},
+		{"another library's book", model.KindBook, []waxbin.AcquiredFile{{Path: file()}}, &waxbin.AcquiredBook{PID: elsewhere}},
+		{"a number with no book", model.KindBook, []waxbin.AcquiredFile{{Path: file(), Part: 2}}, nil},
+		{"two at one place", model.KindBook, []waxbin.AcquiredFile{{Path: file(), Part: 2}, {Path: file(), Part: 2}}, &dune},
+		{"past the parts", model.KindBook, []waxbin.AcquiredFile{{Path: file(), Part: 4}}, &dune},
+		{"past a disc", model.KindBook, []waxbin.AcquiredFile{{Path: file(), Part: model.DiscStride}}, &waxbin.AcquiredBook{Title: "T"}},
+	} {
+		meta := waxbin.AcquiredMeta{Book: c.book}
+		var err error
+		if len(c.files) == 1 {
+			_, err = lib.ImportAcquired(ctx, c.files[0], c.kind, meta)
+		} else {
+			_, err = lib.ImportAcquiredUnit(ctx, c.files, c.kind, meta)
+		}
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s: err = %v, want CodeInvalid", c.name, err)
+		}
+	}
+}
+
+// TestAWithdrawnAcquiredPartStaysABook: a part of an acquired book whose own tags name
+// another album, its assignment withdrawn, leaves for the book those tags name and keeps the
+// kind its import forced, rather than becoming the track its tags would make.
+func TestAWithdrawnAcquiredPartStaysABook(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	other := testaudio.MP3Spec{Title: "Two", Artist: "Someone", Album: "Other Title", Audio: testaudio.AudioWithSeed(2)}
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: other, part: 2})
+	book := acquiredBook(t, ctx, lib, 2).PID
+	parts, err := lib.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := lib.AssignBookParts(ctx, []waxbin.BookPartChange{{FilePID: parts[1].FilePID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := lib.Get(ctx, rep.Files[parts[1].FilePID])
+	if err != nil || v.Kind != model.KindBook || v.PID == book || v.Title != "Other Title" {
+		t.Errorf("withdrawn part's item = %+v (err %v), want a book of the title its tags name", v, err)
+	}
+	verifyClean(t, ctx, lib)
+}
+
+// TestAnAssignedBooksEditsStayOwedUntilWritten: a catalog-only title edit, and a cleared
+// identifier the files still carry, stay owed to the files of an assigned book through a
+// forced scan, since the files' own tags do not say them; a write-back pays them.
+func TestAnAssignedBooksEditsStayOwedUntilWritten(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	tagged := titled("One", 1)
+	tagged.TXXX = []testaudio.TXXXFrame{{Desc: "ASIN", Value: "B000000001"}}
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: tagged, part: 1})
+	book := acquiredBook(t, ctx, lib, 1).PID
+	if err := lib.EditFields(ctx, book, map[string]string{"title": "Dune Messiah", "asin": "B000000009"}, waxbin.EditOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.EditFields(ctx, book, map[string]string{"asin": ""}, waxbin.EditOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := owedOn(t, ctx, lib, book); !slices.Equal(got, []string{"asin", "title"}) {
+		t.Fatalf("owed after the edits = %v, want asin and title", got)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := owedOn(t, ctx, lib, book); !slices.Equal(got, []string{"asin", "title"}) {
+		t.Errorf("owed after a forced scan = %v, want asin and title, which the file does not state", got)
+	}
+	if err := lib.EditFields(ctx, book, map[string]string{"title": "Dune Messiah"}, waxbin.EditOptions{WriteBack: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := owedOn(t, ctx, lib, book); slices.Contains(got, "title") {
+		t.Errorf("owed after the title was written and read back = %v, want no title", got)
+	}
+}
+
+// TestAnAssignmentThatRestoresAGoneFileTakesTheNamedBook: audio whose file left the disk,
+// acquired again for a book named by title and author, comes back as that book, though it
+// takes back the item the audio stood as: a one-part book of another title, or a track.
+func TestAnAssignmentThatRestoresAGoneFileTakesTheNamedBook(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []model.Kind{model.KindBook, model.KindTrack} {
+		ctx := context.Background()
+		lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+		first := filepath.Join(t.TempDir(), "first.mp3")
+		writeFile(t, first, testaudio.BuildMP3FromSpec(titled("Wrong", 1)))
+		res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: first}, kind, waxbin.AcquiredMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lib.ApplyImport(ctx, res.Plan); err != nil {
+			t.Fatal(err)
+		}
+		items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+		if err != nil || len(items) != 1 {
+			t.Fatalf("%s: items = %+v (err %v)", kind, items, err)
+		}
+		if err := os.Remove(items[0].DisplayPath); err != nil {
+			t.Fatal(err)
+		}
+		// A track restores no book, so the audio a gone track held is a duplicate unless
+		// duplicates are let in.
+		again := filepath.Join(t.TempDir(), "again.mp3")
+		writeFile(t, again, testaudio.BuildMP3FromSpec(titled("Wrong", 1)))
+		unit, err := lib.ImportAcquiredUnit(ctx, []waxbin.AcquiredFile{{Path: again, Part: 1}}, model.KindBook,
+			waxbin.AcquiredMeta{Book: &dune, DupPolicy: model.DupAllow})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep, err := lib.ApplyImport(ctx, unit.Plan); err != nil || rep.Imported != 1 {
+			t.Fatalf("%s: apply = %+v (err %v)", kind, rep, err)
+		}
+		book := acquiredBook(t, ctx, lib, 1)
+		if book.Title != "Dune" || book.Artist != "Frank Herbert" {
+			t.Errorf("%s: book = %q by %q, want Dune by Frank Herbert", kind, book.Title, book.Artist)
+		}
+		verifyClean(t, ctx, lib)
+	}
+}
+
+// TestApplyImportHoldsAPartWhoseBookIsGone: a plan naming a standing book whose book is no
+// longer one when the plan is applied lands nothing.
+func TestApplyImportHoldsAPartWhoseBookIsGone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1})
+	book := acquiredBook(t, ctx, lib, 1).PID
+	later := filepath.Join(t.TempDir(), "later.mp3")
+	writeFile(t, later, testaudio.BuildMP3FromSpec(titled("Two", 2)))
+	unit, err := lib.ImportAcquiredUnit(ctx, []waxbin.AcquiredFile{{Path: later, Part: 2}}, model.KindBook,
+		waxbin.AcquiredMeta{Book: &waxbin.AcquiredBook{PID: book}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.SetItemKind(ctx, []model.PID{book}, model.KindTrack, waxbin.KindOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := lib.ApplyImport(ctx, unit.Plan)
+	if err != nil || rep.Imported != 0 || rep.Quarantined != 1 {
+		t.Fatalf("apply = %+v (err %v), want the part held", rep, err)
+	}
+	if _, err := os.Stat(later); err != nil {
+		t.Errorf("the held part left its upload: %v", err)
+	}
+}
+
+// TestAnAcquiredBookByTitleTakesOneAuthor: a book named by its title alone takes one author
+// for all its parts, the first a part states, so parts that disagree still make one book.
+func TestAnAcquiredBookByTitleTakesOneAuthor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	credited := titled("One", 1)
+	credited.Artist = "Frank Herbert"
+	acquireBook(t, ctx, lib, waxbin.AcquiredBook{Title: "Dune"}, acquirePart{spec: credited, part: 1},
+		acquirePart{spec: titled("Two", 2), part: 2}, acquirePart{spec: titled("Three", 3), part: 3})
+	if b := acquiredBook(t, ctx, lib, 3); b.Title != "Dune" || b.Artist != "Frank Herbert" {
+		t.Errorf("book = %q by %q, want Dune by Frank Herbert", b.Title, b.Artist)
+	}
+	verifyClean(t, ctx, lib)
+}
+
+// TestAnAcquiredBooksPartCountOutlivesARewrite: the parts an acquisition says its book has
+// stay the book's when the primary is read again and states none, so a lone part keeps the
+// number organize gave it.
+func TestAnAcquiredBooksPartCountOutlivesARewrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("Two", 2), part: 2})
+	book := acquiredBook(t, ctx, lib, 1)
+	if book.PartTotal != 3 {
+		t.Fatalf("part total = %d, want 3", book.PartTotal)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true, ReResolve: true}); err != nil {
+		t.Fatal(err)
+	}
+	if b := acquiredBook(t, ctx, lib, 1); b.PartTotal != 3 {
+		t.Errorf("part total after a re-resolving scan = %d, want 3", b.PartTotal)
+	}
+	if moves := organizeMoves(t, ctx, lib); len(moves) != 0 {
+		t.Errorf("organize would move %v", moves)
+	}
+}
+
+// TestAnAcquiredPartTakesNoPlaceAnotherPartHolds: a part acquired for a standing book at a
+// place one of its parts holds is held with the reason, and the book's parts stay as they
+// were.
+func TestAnAcquiredPartTakesNoPlaceAnotherPartHolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1}, acquirePart{spec: titled("Two", 2), part: 2})
+	book := acquiredBook(t, ctx, lib, 2).PID
+	dir := t.TempDir()
+	taken, free := filepath.Join(dir, "taken.mp3"), filepath.Join(dir, "free.mp3")
+	writeFile(t, taken, testaudio.BuildMP3FromSpec(titled("Other Two", 3)))
+	writeFile(t, free, testaudio.BuildMP3FromSpec(titled("Three", 4)))
+	unit, err := lib.ImportAcquiredUnit(ctx, []waxbin.AcquiredFile{{Path: taken, Part: 2}, {Path: free, Part: 3}}, model.KindBook,
+		waxbin.AcquiredMeta{Book: &waxbin.AcquiredBook{PID: book}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := unit.Files[0]; f.Outcome != inbox.OutcomeQuarantine || f.Code != inbox.HoldPlaceTaken {
+		t.Errorf("planned = %+v, want the part held for the place its book's part 2 holds", f)
+	}
+	if f := unit.Files[1]; f.Outcome != inbox.OutcomeQuarantine {
+		t.Errorf("planned = %+v, want the rest of the book held with it", f)
+	}
+	if _, err := lib.ApplyImport(ctx, unit.Plan); err != nil {
+		t.Fatal(err)
+	}
+	acquiredBook(t, ctx, lib, 2)
+}
+
+// TestAnAcquiredPartsCountIsTheHosts: the parts an acquisition gives its book stand over the
+// count a mis-tagged part's TRACKTOTAL states, on the import and when a retag reads the part
+// again.
+func TestAnAcquiredPartsCountIsTheHosts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	other := testaudio.MP3Spec{Title: "Four", Artist: "Someone", Album: "Other Album", Track: 4, TrackTotal: 12, Audio: testaudio.AudioWithSeed(4)}
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: other, part: 2})
+	b := acquiredBook(t, ctx, lib, 1)
+	if b.PartTotal != 3 {
+		t.Fatalf("part total = %d, want the 3 the host gave", b.PartTotal)
+	}
+	files, err := lib.ItemFiles(ctx, b.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Genre = "Retagged"
+	writeFile(t, files[0].DisplayPath, testaudio.BuildMP3FromSpec(other))
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if b := acquiredBook(t, ctx, lib, 1); b.PartTotal != 3 {
+		t.Errorf("part total after a retag = %d, want 3", b.PartTotal)
+	}
+}
+
+// TestAnAcquiredBookWithNoCountTakesItsFiles: a book an acquisition makes with no count of
+// parts takes the count its parts' tags state.
+func TestAnAcquiredBookWithNoCountTakesItsFiles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	one := titled("One", 1)
+	one.Track, one.TrackTotal = 1, 5
+	acquireBook(t, ctx, lib, waxbin.AcquiredBook{Title: "Dune", Author: "Frank Herbert"}, acquirePart{spec: one, part: 1})
+	if b := acquiredBook(t, ctx, lib, 1); b.PartTotal != 5 {
+		t.Errorf("part total = %d, want the 5 its part states", b.PartTotal)
+	}
+}
+
+// TestAHostsCountHoldsOverAgreeingTags: parts whose own tags key the book the host names
+// and number the places it gives them still take the count of parts the host gives.
+func TestAHostsCountHoldsOverAgreeingTags(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	part := func(title string, n int) acquirePart {
+		return acquirePart{part: n, spec: testaudio.MP3Spec{Title: title, Artist: "Frank Herbert", AlbumArtist: "Frank Herbert",
+			Album: "Dune", Track: n, Audio: testaudio.AudioWithSeed(byte(n))}}
+	}
+	acquireBook(t, ctx, lib, dune, part("One", 1), part("Two", 2))
+	if b := acquiredBook(t, ctx, lib, 2); b.PartTotal != 3 {
+		t.Errorf("part total = %d, want the 3 the host gave", b.PartTotal)
+	}
+}
+
+// TestAnAcquiredBookIsNamedOneWay: a book named by its pid and by a title is refused, since
+// only one of them can say which book it is.
+func TestAnAcquiredBookIsNamedOneWay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	acquireBook(t, ctx, lib, dune, acquirePart{spec: titled("One", 1), part: 1})
+	book := acquiredBook(t, ctx, lib, 1).PID
+	later := filepath.Join(t.TempDir(), "later.mp3")
+	writeFile(t, later, testaudio.BuildMP3FromSpec(titled("Two", 2)))
+	_, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: later, Part: 2}, model.KindBook,
+		waxbin.AcquiredMeta{Book: &waxbin.AcquiredBook{PID: book, Title: "Dune Messiah"}})
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("a pid and a title = %v, want refused", err)
 	}
 }

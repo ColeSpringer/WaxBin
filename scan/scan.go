@@ -423,6 +423,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		if isAudio(path) {
 			res.AudioFiles++
 			if err := s.scanAudioFile(ctx, req.Library, root, path, res, sc, ""); err != nil {
+				// A file the cancel cut short is no fault of the file's.
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				s.log.Warn("scanning file", "path", path, "err", err)
 				res.Errored++
 			}
@@ -484,13 +488,15 @@ type scanCtx struct {
 	open               []string
 	adoptOnly, unadopt bool
 	albums             map[string]string
-	// album, position, pin, coverPending, placeholder and job are FileOptions', for a
-	// single-file scan; job reaches the re-reads of the files its puts promote too.
+	// album, position, pin, coverPending, placeholder, assign, withdraw and job are FileOptions', for
+	// a single-file scan; job reaches the re-reads of the files its puts promote too.
 	album        string
 	position     *int
 	pin          bool
 	coverPending bool
 	placeholder  bool
+	assign       *Assignment
+	withdraw     bool
 	job          model.PID
 	// rollups is the walk's settle cadence, nil outside a walk, where a put recomputes the
 	// rollups it touches itself.
@@ -677,6 +683,23 @@ type FileOptions struct {
 	// PlaceholderCover says the picture in the file's tags stands in for a cover, as a
 	// download's video thumbnail does (model.PutScannedTrackInput.PlaceholderCover).
 	PlaceholderCover bool
+	// Assign files the file by a host's assignment, which the put records for later reads
+	// to follow, in place of one the catalog holds for its audio.
+	Assign *Assignment
+	// Withdraw reads the file by its own tags and the folder rule, as every later read will,
+	// withdrawing the assignment of its audio in the same write.
+	Withdraw bool
+}
+
+// Assignment is a host's place for a file in a book: the book BookPID names, or with none
+// the book Title by Author keys from those alone (an empty Author leaves the file's own),
+// at Position when it is set (model.PartPosition), with Total the parts the book has (see
+// model.AssignedPlace).
+type Assignment struct {
+	BookPID       model.PID
+	Title, Author string
+	Total         int
+	Position      *int
 }
 
 // ScanFileWith is ScanFileAs with the options an import passes. A file whose folder is
@@ -699,7 +722,7 @@ func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path str
 	// Preserve user-locked fields by default, like a full scan.
 	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position,
 		pin: opts.Pin, job: opts.Job, reResolve: opts.ReResolve, coverPending: opts.CoverPending,
-		placeholder: opts.PlaceholderCover, ids: &identities{}}
+		placeholder: opts.PlaceholderCover, assign: opts.Assign, withdraw: opts.Withdraw, ids: &identities{}}
 	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, opts.Kind); err != nil {
 		res.Errored++
 		return res, nil, err
@@ -795,6 +818,13 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		lock = standing.Kind
 	}
 	kind := EffectiveKind(&tags, lib, forceKind, lock)
+	asg, dropAssigned, err := s.assignedRead(ctx, lib, path, essenceHash, sc, forceKind, lock)
+	if err != nil {
+		return err
+	}
+	if asg != nil {
+		kind = model.KindBook
+	}
 	// A sibling .cue is read once, here: a file with no embedded chapters and a sheet
 	// beside it is a rip the folder rule leaves alone, and the sheet is applied below.
 	var cueRead struct {
@@ -820,7 +850,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 	var adopt *model.FolderBook
 	walked, by := false, joinedBy(0)
-	if loose && !sc.unadopt {
+	if loose && !sc.unadopt && asg == nil {
 		if adopt, walked, by, err = s.adoption(ctx, lib, root, folder, sc, looseTrack, part, albumName, standing); err != nil {
 			return err
 		}
@@ -849,7 +879,11 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 	isBook := kind == model.KindBook
 	folderTitled := false
+	var stated *model.StatedBook
 	if isBook {
+		if asg != nil {
+			stated = statedBook(tags)
+		}
 		// A numbered part with no album is a part of the book its folder names, so the
 		// parts of an untagged book key one book.
 		// WaxBin gave a managed file its name and folder, so where they would give a book's
@@ -857,6 +891,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		kept := lib.Mode == model.ModeManaged && album == "" && (part && folder != "" || fm.TitleFromName) &&
 			standing != nil && standing.Book != nil && standing.Book.Title != "" && bytes.Equal(standing.Book.Primary, []byte(path))
 		switch {
+		case asg != nil:
+			asg.state(&tags)
 		case hinted:
 			tags.Album, folderTitled = sc.album, true
 		case kept:
@@ -865,6 +901,10 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			tags.Album, folderTitled = filepath.Base(folder), true
 		}
 		meta.PromoteBookFields(&tags)
+		if asg != nil {
+			// Tags that name another book, if any, say nothing of this one's identity.
+			tags.ASIN, tags.ISBN, tags.Edition, tags.MBReleaseID = "", "", "", ""
+		}
 	}
 
 	rel := pathx.RelUnder(root, path)
@@ -915,6 +955,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		if lib.FolderFallback && lib.Mode == model.ModeInPlace {
 			derived = append(derived, folderNames(&tags, rel)...)
 		}
+	case asg != nil && !NamesBook(album, tags.Album):
+		derived = []string{"title"}
 	case album == "" && (fm.TitleFromName || adopt != nil || folderTitled):
 		derived = []string{"title"}
 	}
@@ -1016,7 +1058,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, NoCover: noCover, TagsUnread: tagsUnread, AuxObservations: aux,
 			SidecarCover: sidecar,
 			Acquisition:  tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
-			DeferRollups: sc.rollups != nil, Job: sc.job,
+			DeferRollups: sc.rollups != nil, Job: sc.job, DropAssigned: dropAssigned, Withdraw: sc.withdraw,
 		})
 	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover, partPlace(&tags, root, path, lib.Mode == model.ModeManaged, sc.position))
@@ -1024,6 +1066,13 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			bin.OwnKey = bin.Item.IdentityKey
 			bin.Item.IdentityKey, bin.Adopted = adopt.Key, true
 		}
+		if asg != nil {
+			if asg.book != nil {
+				bin.Item.IdentityKey = asg.book.Key
+			}
+			bin.Assigned, bin.Stated = &model.AssignedPlace{Position: asg.position, Total: asg.total}, stated
+		}
+		bin.Withdraw = sc.withdraw
 		bookKey = bin.Item.IdentityKey
 		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
 		// embedded chapters still win). Its observation was recorded above whether or not
@@ -1046,7 +1095,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		in.PlaceholderCover, in.SidecarCover = sc.placeholder, sidecar
 		in.PreferredItemPID, in.Diagnostics, in.PreserveLocks = adoptedPID(sc, fm), diags, sc.preserveLocks
 		in.Derived, in.LockKind, in.KindForced = derived, lockKind, forceKind != ""
-		in.DeferRollups, in.ReResolve, in.Job = sc.rollups != nil, sc.reResolve, sc.job
+		in.DeferRollups, in.ReResolve, in.Job, in.DropAssigned = sc.rollups != nil, sc.reResolve, sc.job, dropAssigned
+		in.Withdraw = sc.withdraw
 		out, err = s.cat.PutScannedTrack(ctx, in)
 	}
 	if err != nil {
@@ -1067,8 +1117,14 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	// file whose tags named no book of its own, unless a book read here took it in by name.
 	// A part the folder's only book took as the walk passed is checked again at the settle.
 	only := walked && by == byOnly
-	if f := sc.folderState(folder, (!walked || only) && (loose || (isBook && album != ""))); f != nil {
+	if f := sc.folderState(folder, (!walked || only) && (loose || (isBook && album != "") || asg != nil)); f != nil {
 		switch {
+		case asg != nil:
+			// An assigned file is a book its folder holds, never one the rule moves.
+			f.addBook(folderBook{
+				FolderBook: model.FolderBook{ItemPID: out.ItemPID, Key: bookKey, Title: tags.Album},
+				strong:     lib.MediaType() == model.MediaAudiobook || tags.BookSignal == model.BookTagSignal,
+			})
 		case isBook && album != "" && !walked:
 			f.addBook(folderBook{
 				FolderBook: model.FolderBook{ItemPID: out.ItemPID, Key: bookKey, Title: cleanBookTitle(album)},
@@ -1447,6 +1503,22 @@ func BookIdentityKey(tags model.Tags) string {
 // a trailing abridged or unabridged marker.
 func BookTitle(tags model.Tags) string {
 	return cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
+}
+
+// statedBook is what a book file's own tags state of the fields an assignment holds: the
+// title its ALBUM names, the author and the identifiers.
+func statedBook(tags model.Tags) *model.StatedBook {
+	meta.PromoteBookFields(&tags)
+	authors, author := identity.CreditDisplay(firstNonEmpty(tags.AlbumArtist, tags.Artist))
+	title := strings.TrimSpace(tags.Album)
+	if title != "" {
+		title = cleanBookTitle(title)
+	}
+	return &model.StatedBook{
+		Title: title, TitleSort: tags.AlbumSort,
+		Author: author, Authors: authors, AuthorSort: firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort),
+		ASIN: tags.ASIN, ISBN: tags.ISBN, Edition: tags.Edition, MBID: strings.TrimSpace(tags.MBReleaseID),
+	}
 }
 
 // bookTitleSort is the spelling beside the tag a book's title comes from: its ALBUMSORT,

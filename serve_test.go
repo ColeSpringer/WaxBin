@@ -22,6 +22,7 @@ import (
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/internal/testsock"
+	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
@@ -2587,5 +2588,105 @@ func TestServeSetsAPlaceholderMark(t *testing.T) {
 	}
 	if _, err := c.SetArtPlaceholder(ctx, "no-such-picture", true); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("an unknown picture = %v, want CodeNotFound", err)
+	}
+}
+
+// TestServeProxiedCancelJob: cancel_job stops a job the server runs, whose row then says it
+// was canceled on request with what it did so far; a job that has ended needs nothing, and
+// an unknown pid is not found.
+func TestServeProxiedCancelJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Held Artist", "Held", 1))
+	asked := make(chan struct{}, 1)
+	held := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(ctx context.Context, _ enrich.Request) (*enrich.Candidate, error) {
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}}
+	lib, err := waxbin.OpenSeeded(t, ctx, waxbin.Options{
+		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		IPCSocket:           sock,
+		EnrichmentProviders: []enrich.Provider{held},
+	})
+	if err != nil {
+		t.Fatalf("open served library: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	serveLib(t, ctx, lib, sock)
+	c := dialWhenReady(t, sock)
+	phases := []string{string(model.EnrichPhaseArtistArt)}
+	job, err := c.RunEnrich(ctx, proxy.EnrichParams{Phases: phases, ForcePhases: phases})
+	if err != nil {
+		t.Fatalf("run_enrich: %v", err)
+	}
+	<-asked
+	if err := c.CancelJob(ctx, job); err != nil {
+		t.Fatalf("cancel_job: %v", err)
+	}
+	deadline := time.Now().Add(asyncTestTimeout)
+	var row *model.Job
+	for {
+		if row, err = lib.Job(ctx, job); err != nil {
+			t.Fatal(err)
+		}
+		if row.State != model.JobRunning || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if row.State != model.JobCanceled || row.ErrorReason != jobs.ReasonCancelRequested || row.Result == "" {
+		t.Fatalf("enrich after cancel_job = %+v, want canceled on request with its result", row)
+	}
+	if err := c.CancelJob(ctx, job); err != nil {
+		t.Errorf("cancel_job of an ended job = %v, want nil", err)
+	}
+	if err := c.CancelJob(ctx, model.NewPID()); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("cancel_job of an unknown pid = %v, want CodeNotFound", err)
+	}
+}
+
+// TestServeProxiedBookParts: run_book_parts files a part into a book as a job in the server,
+// whose result is the report, and a refused change starts no job.
+func TestServeProxiedBookParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	for i := 1; i <= 2; i++ {
+		writeFile(t, filepath.Join(root, "Author", "Tome", fmt.Sprintf("0%d.mp3", i)), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: fmt.Sprintf("Chapter %d", i), Artist: "Author", AlbumArtist: "Author", Album: "Tome", Track: i,
+			TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}, Audio: testaudio.AudioWithSeed(byte(i))}))
+	}
+	stray := filepath.Join(root, "Other", "stray.mp3")
+	writeFile(t, stray, testaudio.BuildMP3WithAudio("Stray", "Someone", "Wrong", 9, testaudio.AudioWithSeed(30)))
+	lib := openServed(t, ctx, db, root, sock)
+	c := dialWhenReady(t, sock)
+	tome := itemPIDByTitle(t, ctx, lib, "Tome")
+	files, err := lib.ItemFiles(ctx, itemPIDByTitle(t, ctx, lib, "Stray"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("stray files = %+v (err %v)", files, err)
+	}
+	file := files[0].FilePID
+	job, err := c.RunBookParts(ctx, proxy.BookPartsParams{Changes: []proxy.BookPartParams{{FilePID: string(file), BookPID: string(tome), Part: 3}}})
+	if err != nil {
+		t.Fatalf("run_book_parts: %v", err)
+	}
+	var rep waxbin.BookPartsReport
+	if err := json.Unmarshal([]byte(waitForJobDone(t, ctx, lib, job).Result), &rep); err != nil || rep.Files[file] != tome {
+		t.Fatalf("job result %+v (err %v), want the file in Tome", rep, err)
+	}
+	if _, err := c.RunBookParts(ctx, proxy.BookPartsParams{Changes: []proxy.BookPartParams{{FilePID: string(file), BookPID: string(file)}}}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("a change naming no item = %v, want CodeNotFound", err)
 	}
 }

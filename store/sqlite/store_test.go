@@ -366,6 +366,26 @@ func TestLeaseExclusion(t *testing.T) {
 	}
 }
 
+// TestCreateJobKeepsAGivenPID: a job that arrives with a pid is stored under it, and one
+// without is given one.
+func TestCreateJobKeepsAGivenPID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, _ := openTestStore(t)
+	given := model.NewPID()
+	job := &model.Job{PID: given, Kind: "scan", Scope: "scan", State: model.JobRunning, Owner: "test", StartedAt: 1, HeartbeatAt: 1}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.JobByPID(ctx, given); err != nil || job.PID != given || got.ID != job.ID {
+		t.Fatalf("job = %+v, row %+v (err %v), want it stored under %s", job, got, err, given)
+	}
+	minted := &model.Job{Kind: "scan", Scope: "scan", State: model.JobRunning, Owner: "test", StartedAt: 1, HeartbeatAt: 1}
+	if err := st.CreateJob(ctx, minted); err != nil || minted.PID == "" || minted.PID == given {
+		t.Fatalf("minted pid = %q (err %v), want a new one", minted.PID, err)
+	}
+}
+
 func TestReclaimOrphans(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

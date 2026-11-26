@@ -281,6 +281,7 @@ type bookPartView struct {
 	DurationMS  int64  `json:"durationMs"`
 	StartMS     int64  `json:"startMs"`
 	EffectiveMS int64  `json:"effectiveMs"`
+	Assigned    bool   `json:"assigned,omitempty"`
 }
 
 // bookView is the JSON shape for `book`: the full audiobook detail.
@@ -304,6 +305,7 @@ type bookView struct {
 	Abridged        *bool          `json:"abridged,omitempty"`
 	Description     string         `json:"description,omitempty"`
 	TotalDurationMS int64          `json:"totalDurationMs"`
+	IdentityHeld    bool           `json:"identityHeld,omitempty"`
 	Parts           []bookPartView `json:"parts"`
 	Chapters        []chapterView  `json:"chapters"`
 }
@@ -316,12 +318,12 @@ func toBookView(d *model.BookDetail) bookView {
 		Series: d.Series, SeriesPID: string(d.SeriesPID), SeriesSeq: d.SeriesSeq,
 		Year: d.Item.Year, Publisher: d.Publisher, ASIN: d.ASIN, ISBN: d.ISBN, Edition: d.Edition,
 		Abridged: d.Abridged, Description: d.Description, TotalDurationMS: d.TotalDurationMS,
-		Chapters: chapterViews(d.Chapters),
+		IdentityHeld: d.IdentityHeld, Chapters: chapterViews(d.Chapters),
 	}
 	for _, p := range d.Files {
 		v.Parts = append(v.Parts, bookPartView{
 			FilePID: string(p.FilePID), Path: p.DisplayPath, Position: p.Position, DurationMS: p.DurationMS,
-			StartMS: p.StartMS, EffectiveMS: p.EffectiveMS,
+			StartMS: p.StartMS, EffectiveMS: p.EffectiveMS, Assigned: p.Assigned,
 		})
 	}
 	return v
@@ -635,8 +637,10 @@ type derivedView struct {
 	// Custom-tag provenance rows under a key WaxBin has since reserved.
 	OrphanReservedTagProvenance int `json:"orphanReservedTagProvenance"`
 	// Custom-tag rows and locks under a key the key rule no longer accepts.
-	StrandedTagKeyRows int  `json:"strandedTagKeyRows"`
-	Consistent         bool `json:"consistent"`
+	StrandedTagKeyRows int `json:"strandedTagKeyRows"`
+	// Book part assignments whose item is no book.
+	StrandedAssignments int  `json:"strandedAssignments"`
+	Consistent          bool `json:"consistent"`
 	// Present only under --fix: what each repair rewrote.
 	Refreshed *refreshView `json:"refreshed,omitempty"`
 	// Present only when --fix rewrote sort keys, which invalidates open page cursors.
@@ -686,6 +690,7 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ThumbnailsDamaged:           r.ThumbnailsDamaged,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
 		StrandedTagKeyRows:          r.StrandedTagKeyRows,
+		StrandedAssignments:         r.StrandedAssignments,
 		Consistent:                  r.Consistent(),
 	}
 }

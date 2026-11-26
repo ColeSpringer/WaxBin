@@ -141,6 +141,30 @@ func (m *mutator) SetItemKind(ctx context.Context, pids []model.PID, kind model.
 	return &rep, err
 }
 
+func (m *mutator) AssignBookParts(ctx context.Context, changes []waxbin.BookPartChange,
+	tail func(model.PID) (*model.Job, error)) (*waxbin.BookPartsReport, error) {
+	if m.px == nil {
+		return m.lib.AssignBookParts(ctx, changes)
+	}
+	params := proxy.BookPartsParams{Changes: make([]proxy.BookPartParams, len(changes))}
+	for i, c := range changes {
+		params.Changes[i] = proxy.BookPartParams{FilePID: string(c.FilePID), BookPID: string(c.BookPID), Disc: c.Disc, Part: c.Part}
+	}
+	jobPID, err := m.px.RunBookParts(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	job, err := tail(jobPID)
+	if job == nil {
+		return nil, err
+	}
+	var rep waxbin.BookPartsReport
+	if uerr := unmarshalJobResult(job, &rep); uerr != nil && err == nil {
+		return nil, uerr
+	}
+	return &rep, err
+}
+
 // toCreditEdits converts wire credit entries back to the facade's own shape.
 func toCreditEdits(items []proxy.ItemCreditsEdit) []model.ItemCreditEdit {
 	if len(items) == 0 {

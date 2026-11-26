@@ -112,10 +112,13 @@ type Library struct {
 	// jobsWG tracks in-flight asynchronous (server-run) jobs started via startJob, so
 	// Close drains them against the still-open store instead of tearing it down mid-job.
 	// jobsMu orders each start against Close: a job counts in jobsWG before Close sets
-	// jobsClosed, or it is refused, so the drain cannot miss one.
+	// jobsClosed, or it is refused, so the drain cannot miss one. life ends when Close
+	// begins, and each of those jobs with it.
 	jobsMu     sync.Mutex
 	jobsClosed bool
 	jobsWG     sync.WaitGroup
+	life       context.Context
+	endLife    context.CancelFunc
 
 	// rootMu serializes runtime root-set mutations (AddRoot, RelocateRoot, RemoveRoot) so
 	// each validates against the registered set and writes its row atomically. Without
@@ -235,6 +238,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		fpcalc:    fpcalc,
 		fpcalcErr: fpcalcErr,
 	}
+	l.life, l.endLife = context.WithCancel(context.Background())
 	// The importer catalogs each placed file through the scanner, so it is wired
 	// after the struct is built and shares that scanner.
 	l.importer = inbox.New(st, meta.NewReader(), l.scanner, log)
@@ -260,10 +264,12 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 
 	if !opts.ReadOnly {
 		if err := l.checkConfiguredRoots(ctx); err != nil {
+			l.endLife()
 			_ = st.Close()
 			return nil, err
 		}
 		if err := l.ensureRoots(ctx); err != nil {
+			l.endLife()
 			_ = st.Close()
 			return nil, err
 		}
@@ -391,13 +397,15 @@ func auditProbe(r meta.Inspector, eng *decode.Engine) audit.AudioProbe {
 // The flush is best effort, since a flush error should not block release, and a
 // read-only handle skips it.
 //
-// It first drains any in-flight server-run jobs so they finalize against the still-open
-// store; otherwise a shutdown mid-scan leaves a job row stuck "running", reclaimed as
-// crashed only on a later open. A job started once Close has begun is refused.
+// It first cancels any in-flight server-run jobs and waits for them to finalize against
+// the still-open store; otherwise a shutdown mid-scan leaves a job row stuck "running",
+// reclaimed as crashed only on a later open. A job started once Close has begun is
+// refused. A job running in a caller's own call is the caller's to end.
 func (l *Library) Close() error {
 	l.jobsMu.Lock()
 	l.jobsClosed = true
 	l.jobsMu.Unlock()
+	l.endLife()
 	l.jobsWG.Wait()
 	if l.playback != nil && !l.ReadOnly() {
 		_ = l.playback.Flush(context.Background())
@@ -1069,6 +1077,12 @@ func (l *Library) GCStrandedTagKeys(ctx context.Context) (int, error) {
 	return l.store.GCStrandedTagKeys(ctx)
 }
 
+// GCStrandedAssignments deletes the book part assignments whose item is no book, returning
+// how many went: the repair for the count VerifyDerived reports.
+func (l *Library) GCStrandedAssignments(ctx context.Context) (int, error) {
+	return l.store.GCStrandedAssignments(ctx)
+}
+
 // Lyrics returns an item's structured lyrics (synced timed lines and/or an
 // unsynchronized block), or CodeNotFound when it has none. Lyrics come from a
 // sibling .lrc sidecar or embedded USLT/SYLT tags, captured at scan time, from
@@ -1518,13 +1532,11 @@ func watchRoots(libs []*model.Library) []watch.Root {
 
 func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath string, force bool) (bool, error) {
 	res, err := e.lib.Scan(ctx, ScanRequest{LibraryPID: libPID, SubPath: subPath, Force: force})
-	if err != nil {
-		return false, err
-	}
 	// A live .lrc/.cue edit mutates the catalog without touching the audio bytes, so it
 	// counts as a sidecar update, not an item update; Changed includes it, or a sidecar-only
-	// change would skip every downstream scheduler.
-	return res.Total.Changed(), nil
+	// change would skip every downstream scheduler. A scan that stopped early says what it
+	// changed before it stopped.
+	return res != nil && res.Total.Changed(), err
 }
 
 func (e *watchEngine) Analyze(ctx context.Context) error {
@@ -4229,6 +4241,16 @@ func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Rep
 				a.Refuse(inbox.OutcomeQuarantine, inbox.HoldReadOnlyLibrary, model.ReasonLibraryReadOnly, nil)
 				continue
 			}
+			if a.Assign != nil && a.Assign.BookPID != "" {
+				st, err := l.store.BookStanding(ctx, a.Assign.BookPID)
+				if err != nil {
+					return err
+				}
+				if st == nil {
+					a.Refuse(inbox.OutcomeQuarantine, inbox.HoldBookGone, "book "+string(a.Assign.BookPID)+" the file is assigned to is no longer a book", nil)
+					continue
+				}
+			}
 			if plan.DupPolicy == model.DupSkip && a.Essence != "" && target != nil {
 				occ, err := l.store.FilesByEssence(ctx, a.Essence)
 				if err != nil {
@@ -4277,6 +4299,25 @@ func (l *Library) ImportBatches(ctx context.Context, limit int) ([]*model.Import
 type AcquiredFile struct {
 	Path             string
 	PlaceholderCover bool
+	// Disc and Part are a book part's place in the book AcquiredMeta.Book names, its whole
+	// place being model.PartPosition(Disc, Part) with Part below model.DiscStride; both 0
+	// leave the place to the file's own tags and name.
+	Disc, Part int
+}
+
+// AcquiredBook names the book acquired parts belong to (AcquiredMeta.Book), which the
+// import files them into whatever their tags say: the standing book PID names, or the book
+// Title by Author keys from those alone (an empty Author taking, for every part, the first
+// author a part states), made when none stands under that key; naming a book both ways is
+// refused. PID is how a later acquisition adds a part to a book whose key is no longer made
+// from its title and author (a catalog-only title edit, a key from an ASIN), which title and
+// author alone would not find. Parts is how many parts the book has; with none a standing
+// book keeps its count, and a book the import makes takes the count its parts state.
+type AcquiredBook struct {
+	PID    model.PID
+	Title  string
+	Author string
+	Parts  int
 }
 
 // AcquiredMeta carries the origin provenance recorded against an acquired item plus
@@ -4301,6 +4342,11 @@ type AcquiredMeta struct {
 	// HoldUnits keeps an album's tracks of ImportAcquiredUnit, those naming one album
 	// title, where they are when one of them cannot land, as a book's parts always are.
 	HoldUnits bool
+	// Book names the book a book's parts are filed into (AcquiredBook); nil leaves each part
+	// to its tags. A part whose own tags and name give that book and its place imports as it
+	// would without it, and the rest keep the assignment for later scans
+	// (Library.AssignBookParts).
+	Book *AcquiredBook
 
 	// Episode ingest.
 	ShowPID   model.PID // existing show to add the episode under; empty creates a manual show
@@ -4337,6 +4383,8 @@ type AcquiredResult struct {
 	// back (inbox.Action.Restores); AlreadyPresent is false then, no file of it being on
 	// disk.
 	Restores model.PID
+	// Assigned says the file is filed by AcquiredMeta.Book (AcquiredFileResult.Assigned).
+	Assigned bool
 }
 
 // ImportAcquired routes an acquired or manual file by kind. Tracks and books go through
@@ -4346,6 +4394,9 @@ type AcquiredResult struct {
 // go into the internal podcast library under an existing or manual show, pinned by
 // default. WaxBin never performs platform extraction itself.
 func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
+	if kind == model.KindEpisode && (meta.Book != nil || file.Disc != 0 || file.Part != 0) {
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.ImportAcquired", "an episode is filed under its show, not a book")
+	}
 	switch kind {
 	case model.KindTrack, model.KindBook:
 		unit, err := l.importAcquiredUnit(ctx, "Library.ImportAcquired", []AcquiredFile{file}, kind, meta)
@@ -4354,7 +4405,7 @@ func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind mo
 		}
 		f := unit.Files[0]
 		return &AcquiredResult{Kind: kind, Plan: unit.Plan, AlreadyPresent: f.AlreadyPresentPID != "",
-			AlreadyPresentPID: f.AlreadyPresentPID, AttachedTo: f.AttachedTo, Restores: f.Restores}, nil
+			AlreadyPresentPID: f.AlreadyPresentPID, AttachedTo: f.AttachedTo, Restores: f.Restores, Assigned: f.Assigned}, nil
 	case model.KindEpisode:
 		return l.importAcquiredEpisode(ctx, file, meta)
 	default:
@@ -4379,6 +4430,9 @@ type AcquiredFileResult struct {
 	Restores          model.PID
 	AlreadyPresentPID model.PID
 	AttachedTo        model.PID
+	// Assigned says the file is filed by the book AcquiredMeta.Book names rather than by its
+	// own tags, which do not give that book and place.
+	Assigned bool
 }
 
 // ImportAcquiredUnit plans files a host acquired together (an album's tracks, a book's
@@ -4414,6 +4468,10 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 	if err != nil {
 		return nil, err
 	}
+	assign, err := l.acquiredAssignment(ctx, op, files, kind, meta.Book, lib)
+	if err != nil {
+		return nil, err
+	}
 	prof, err := libraryProfile(l.profileSet(), op, lib, meta.Profile)
 	if err != nil {
 		return nil, err
@@ -4425,7 +4483,7 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 	plan, err := l.importer.PlanPaths(ctx, inbox.Request{
 		Library: lib, Profile: prof, DupPolicy: meta.DupPolicy, Copy: meta.Copy,
 		ReserveBytes: l.opts.FreeSpaceReserveBytes, Acquisition: acquisitionInput(meta),
-		Hold: readOnlySources(libs, meta.Copy), HoldUnits: meta.HoldUnits, Acquired: true,
+		Hold: readOnlySources(libs, meta.Copy), HoldUnits: meta.HoldUnits, Acquired: true, Assign: assign,
 	}, paths, kind)
 	if err != nil {
 		return nil, err
@@ -4443,7 +4501,7 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 		}
 		if a := bySrc[src]; a != nil {
 			a.PlaceholderCover = f.PlaceholderCover
-			r.Outcome, r.Code, r.Restores = a.Outcome, a.Code, a.Restores
+			r.Outcome, r.Code, r.Restores, r.Assigned = a.Outcome, a.Code, a.Restores, a.Assign != nil
 			// Already-present is reported whatever the policy, from the cataloged files the
 			// plan's duplicate gate read, so a DupAllow import of a genuine duplicate still
 			// says so and a duplicate never reads as absent; audio whose only file is gone is
@@ -4462,6 +4520,80 @@ func (l *Library) importAcquiredUnit(ctx context.Context, op string, files []Acq
 		res.Files[i] = r
 	}
 	return res, nil
+}
+
+// acquiredAssignment checks the book an acquisition names (AcquiredMeta.Book) and the places
+// its files take, and returns what the import files them by, nil when it names none. The
+// book must stand in lib, the library the import lands in, when a pid names it.
+func (l *Library) acquiredAssignment(ctx context.Context, op string, files []AcquiredFile, kind model.Kind, b *AcquiredBook, lib *model.Library) (*inbox.Assignment, error) {
+	refuse := func(msg string) error { return waxerr.New(waxerr.CodeInvalid, op, msg) }
+	if b == nil {
+		for _, f := range files {
+			if f.Disc != 0 || f.Part != 0 {
+				return nil, refuse(f.Path + " is given a part number but no book (AcquiredMeta.Book)")
+			}
+		}
+		return nil, nil
+	}
+	if kind != model.KindBook {
+		return nil, refuse("a book is named only for a book's parts, not a " + string(kind))
+	}
+	if b.Parts < 0 {
+		return nil, refuse("a book has no fewer than 0 parts")
+	}
+	asg := &inbox.Assignment{Parts: b.Parts, Places: map[string]int{}}
+	switch {
+	case b.PID != "" && (b.Title != "" || b.Author != ""):
+		return nil, refuse("a book is named by its pid or by its title and author, not both")
+	case b.PID != "":
+		st, err := l.store.BookStanding(ctx, b.PID)
+		if err != nil {
+			return nil, err
+		}
+		v, err := l.store.ItemByPID(ctx, b.PID)
+		if st == nil || waxerr.Is(err, waxerr.CodeNotFound) {
+			return nil, refuse("no book has pid " + string(b.PID))
+		}
+		if err != nil {
+			return nil, err
+		}
+		parts, err := l.store.ItemFiles(ctx, b.PID)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range parts {
+			if p.Role != "alternate" && p.LibraryPID != lib.PID {
+				return nil, refuse("book " + string(b.PID) + " has files in another library than " + lib.DisplayRoot)
+			}
+		}
+		asg.BookPID, asg.Key, asg.Title, asg.Author = b.PID, st.Key, st.Title, v.Artist
+	case strings.TrimSpace(b.Title) == "":
+		return nil, refuse("a book is named by its pid or its title")
+	default:
+		asg.Title, asg.Author = strings.TrimSpace(b.Title), strings.TrimSpace(b.Author)
+	}
+	for _, f := range files {
+		switch {
+		case f.Disc < 0 || f.Part < 0 || f.Part >= model.DiscStride || f.Disc > 0 && f.Part == 0:
+			return nil, refuse(fmt.Sprintf("disc %d part %d is no part's place (parts number from 1, below %d)", f.Disc, f.Part, model.DiscStride))
+		case f.Part == 0:
+			continue
+		case b.Parts > 0 && f.Part > b.Parts:
+			return nil, refuse(fmt.Sprintf("part %d is past the book's %d parts", f.Part, b.Parts))
+		}
+		path := f.Path
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		p := model.PartPosition(f.Disc, f.Part)
+		for other, q := range asg.Places {
+			if q == p && other != path {
+				return nil, refuse(fmt.Sprintf("two files are given disc %d part %d", f.Disc, f.Part))
+			}
+		}
+		asg.Places[path] = p
+	}
+	return asg, nil
 }
 
 // presentHolder is the cataloged file that holds a staged file's audio, among the files

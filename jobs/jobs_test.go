@@ -321,3 +321,175 @@ func TestSetParamsRecordsTheJobsRequest(t *testing.T) {
 		t.Errorf("row = %+v (err %v), want the params kept", row, err)
 	}
 }
+
+// TestCancelEndsTheJobOnRequest: a cancel by pid ends the job canceled with the request's
+// reason, keeps the progress it reached, and Run returns that class and reason around the
+// work's own error.
+func TestCancelEndsTheJobOnRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	started := make(chan model.PID, 1)
+	var workErr error
+	type ran struct {
+		job *model.Job
+		err error
+	}
+	done := make(chan ran, 1)
+	go func() {
+		job, err := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, h *jobs.Handle) error {
+			if err := h.Heartbeat(ctx, 0.4, "walking"); err != nil {
+				return err
+			}
+			started <- h.JobPID()
+			<-ctx.Done()
+			workErr = waxerr.FromContext("scan.Scan", ctx.Err(), waxerr.CodeIO)
+			return workErr
+		})
+		done <- ran{job, err}
+	}()
+	pid := <-started
+	if !m.Cancel(pid) {
+		t.Fatal("Cancel = false for a running job")
+	}
+	r := <-done
+	if !waxerr.Is(r.err, waxerr.CodeCanceled) || waxerr.ReasonOf(r.err) != jobs.ReasonCancelRequested || !errors.Is(r.err, workErr) {
+		t.Fatalf("Run = %v (%s %q), want canceled on request around the work's error", r.err, waxerr.CodeOf(r.err), waxerr.ReasonOf(r.err))
+	}
+	row, err := st.JobByPID(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.State != model.JobCanceled || row.Error != "canceled on request" || row.ErrorCode != waxerr.CodeCanceled ||
+		row.ErrorReason != jobs.ReasonCancelRequested || row.Progress != 0.4 {
+		t.Fatalf("row = %+v, want canceled on request at 40%%", row)
+	}
+	if m.Cancel(pid) {
+		t.Error("Cancel = true for a finished job")
+	}
+	if m.Cancel("01UNKNOWNJOBPID0000000000") {
+		t.Error("Cancel = true for a job that never ran")
+	}
+}
+
+// TestACallersCancelIsNotARequest: a run its caller's context ends keeps the interrupted
+// text and no reason, and returns the work's error as it was.
+func TestACallersCancelIsNotARequest(t *testing.T) {
+	t.Parallel()
+	m, st := newManager(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	var workErr error
+	job, err := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, _ *jobs.Handle) error {
+		cancel()
+		workErr = waxerr.FromContext("scan.Scan", ctx.Err(), waxerr.CodeIO)
+		return workErr
+	})
+	if err != workErr || waxerr.ReasonOf(err) == jobs.ReasonCancelRequested {
+		t.Fatalf("Run = %v, want the work's own error", err)
+	}
+	row, rerr := st.JobByPID(context.Background(), job.PID)
+	if rerr != nil || row.Error != "interrupted before it finished" || row.ErrorReason != "" {
+		t.Fatalf("row = %+v (err %v), want interrupted with no reason", row, rerr)
+	}
+}
+
+// TestAJobKeepsItsProgressUnlessDone: a job that fails or is canceled lists the progress
+// it reached; only a finished one reads 100%.
+func TestAJobKeepsItsProgressUnlessDone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m, st := newManager(t)
+	progressOf := func(ctx context.Context, end func(context.Context) error) float64 {
+		t.Helper()
+		job, _ := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, h *jobs.Handle) error {
+			if err := h.Heartbeat(ctx, 0.25, "a quarter"); err != nil {
+				return err
+			}
+			return end(ctx)
+		})
+		row, err := st.JobByPID(context.Background(), job.PID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.Progress
+	}
+	if p := progressOf(ctx, func(context.Context) error { return waxerr.New(waxerr.CodeIO, "test", "disk gone") }); p != 0.25 {
+		t.Errorf("failed job progress = %v, want 0.25", p)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	if p := progressOf(cctx, func(ctx context.Context) error { cancel(); return ctx.Err() }); p != 0.25 {
+		t.Errorf("canceled job progress = %v, want 0.25", p)
+	}
+	if p := progressOf(ctx, func(context.Context) error { return nil }); p != 1 {
+		t.Errorf("done job progress = %v, want 1", p)
+	}
+}
+
+// TestAJobThatFinishesDespiteACancelIsDone: work that returns nil after a cancel landed
+// finished, and its row says so.
+func TestAJobThatFinishesDespiteACancelIsDone(t *testing.T) {
+	t.Parallel()
+	m, _ := newManager(t)
+	job, err := m.Run(context.Background(), jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, h *jobs.Handle) error {
+		m.Cancel(h.JobPID())
+		<-ctx.Done()
+		return nil
+	})
+	if err != nil || job.State != model.JobDone {
+		t.Fatalf("Run = %v, state %s; want done", err, job.State)
+	}
+}
+
+// blockedCreateStore holds CreateJob until release closes, telling entered the pid the
+// job was given.
+type blockedCreateStore struct {
+	model.JobStore
+	entered chan model.PID
+	release chan struct{}
+}
+
+func (s *blockedCreateStore) CreateJob(ctx context.Context, j *model.Job) error {
+	s.entered <- j.PID
+	<-s.release
+	return s.JobStore.CreateJob(ctx, j)
+}
+
+// TestCancelBeforeTheRowExists: a job is cancelable from the moment it has a pid, before
+// its row is written; Cancel does not wait on that write, and the job ends canceled on
+// request under the pid it was given.
+func TestCancelBeforeTheRowExists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, st := newManager(t)
+	bs := &blockedCreateStore{JobStore: st, entered: make(chan model.PID, 1), release: make(chan struct{})}
+	m := jobs.NewManager(bs, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, _ *jobs.Handle) error {
+			<-ctx.Done()
+			return waxerr.FromContext("scan.Scan", ctx.Err(), waxerr.CodeIO)
+		})
+		done <- err
+	}()
+	pid := <-bs.entered
+	if pid == "" {
+		t.Fatal("the job reached its insert with no pid")
+	}
+	canceled := make(chan bool, 1)
+	go func() { canceled <- m.Cancel(pid) }()
+	select {
+	case ok := <-canceled:
+		if !ok {
+			t.Fatal("Cancel = false while the row is being written")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cancel waited on the job's insert")
+	}
+	close(bs.release)
+	if err := <-done; waxerr.ReasonOf(err) != jobs.ReasonCancelRequested {
+		t.Fatalf("Run = %v, want canceled on request", err)
+	}
+	if row, err := st.JobByPID(ctx, pid); err != nil || row.State != model.JobCanceled || row.ErrorReason != jobs.ReasonCancelRequested {
+		t.Fatalf("row = %+v (err %v), want canceled on request under the given pid", row, err)
+	}
+}

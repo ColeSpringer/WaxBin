@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // The folder rule: a book's parts share a folder (identity.AlbumFolder, so a disc
@@ -449,4 +450,68 @@ func (s *Scanner) rejoin(ctx context.Context, lib *model.Library, root, path str
 	res.SidecarsUpdated += again.SidecarsUpdated
 	res.Copies += again.Copies
 	res.Unchanged += again.Unchanged
+}
+
+// heldPart is the assignment a read files its file by: the book a stored assignment or a
+// named book gives (nil for one a first read names by title and author), the title and
+// author that name it then, the parts it has (0 for the files to say), and the part's
+// place, nil for the one the file's own tags give.
+type heldPart struct {
+	book          *model.FolderBook
+	title, author string
+	total         int
+	position      *int
+}
+
+// state puts the book the assignment names in the tags in place of the one they name.
+func (h *heldPart) state(tags *model.Tags) {
+	tags.AlbumSort = ""
+	if h.book != nil {
+		tags.Album = h.book.Title
+		return
+	}
+	tags.Album = h.title
+	if h.author != "" {
+		tags.AlbumArtist, tags.AlbumArtistSort, tags.ArtistSort = h.author, "", ""
+	}
+}
+
+// assignedRead returns the assignment a read files its file by, the read's own
+// (FileOptions.Assign) before the one the catalog holds for its audio, or nil when none
+// applies: there is none, the read withdraws it, the read forces or pins the file to a
+// track, or the library takes no books. A read forced to a track returns the book whose
+// assignment it withdraws.
+func (s *Scanner) assignedRead(ctx context.Context, lib *model.Library, path, essence string, sc *scanCtx, forced, lock model.Kind) (*heldPart, model.PID, error) {
+	if sc.withdraw {
+		return nil, "", nil
+	}
+	if forced == model.KindTrack {
+		ap, err := s.cat.AssignedPart(ctx, []byte(path), essence)
+		if err != nil || ap == nil {
+			return nil, "", err
+		}
+		return nil, ap.Book.ItemPID, nil
+	}
+	if lock == model.KindTrack || !lib.TakesBooks() {
+		return nil, "", nil
+	}
+	if a := sc.assign; a != nil {
+		h := &heldPart{title: strings.TrimSpace(a.Title), author: strings.TrimSpace(a.Author), total: a.Total, position: a.Position}
+		if a.BookPID != "" {
+			b, err := s.cat.BookStanding(ctx, a.BookPID)
+			if err != nil {
+				return nil, "", err
+			}
+			if b == nil {
+				return nil, "", waxerr.New(waxerr.CodeNotFound, "scan.file", "no such book: "+string(a.BookPID))
+			}
+			h.book = b
+		}
+		return h, "", nil
+	}
+	ap, err := s.cat.AssignedPart(ctx, []byte(path), essence)
+	if err != nil || ap == nil {
+		return nil, "", err
+	}
+	return &heldPart{book: &ap.Book, position: ap.Position}, "", nil
 }

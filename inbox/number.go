@@ -209,6 +209,17 @@ func (s *Service) catalogNumbers(ctx context.Context, view *model.ItemView, part
 			}
 		}
 	}
+	// A place an assignment gives a part is held by no other: one a part of the book holds
+	// keeps the staged part out, and with it the rest of the book.
+	for _, f := range lead {
+		if _, ok := twin[f]; ok || !f.placeGiven {
+			continue
+		}
+		if i := slices.IndexFunc(parts, func(p model.ItemFileRef) bool { return p.Position == f.place }); i >= 0 {
+			f.Refuse(OutcomeQuarantine, HoldPlaceTaken, "its assigned place is held by part "+parts[i].DisplayPath,
+				&Occupant{Path: parts[i].DisplayPath, FilePID: parts[i].FilePID})
+		}
+	}
 	type entry struct {
 		pos  int
 		part int // the cataloged part's index, or -1

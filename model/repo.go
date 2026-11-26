@@ -96,6 +96,13 @@ type PutScannedTrackInput struct {
 	// each item the put folds away and makes (item_lineage), so a change a crash or a cancel
 	// cuts off can still say what it did; empty for any other put, which records none.
 	Job PID
+	// DropAssigned names the book a host assigned the file's audio to, for a read that
+	// forced the file to a track: the put withdraws the assignment when the file is that
+	// book's part, and leaves it when the file is only a copy of the part.
+	DropAssigned PID
+	// Withdraw deletes the assignment of the file's audio in the put's own transaction, for
+	// a read that withdraws it (Library.AssignBookParts).
+	Withdraw bool
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -171,6 +178,17 @@ type PutScannedBookInput struct {
 	// takes in place of its own unless it says less (an identifier, or an author, lost).
 	Adopted bool
 	OwnKey  string
+	// Assigned says a host assigned the file's audio to this book, whose key Item carries,
+	// at Assigned.Position when it gave a number. The put records the assignment, and the
+	// book keeps the title, author and identifiers the catalog holds for it, which tags that
+	// name another book do not get to change.
+	Assigned *AssignedPlace
+	// Withdraw is PutScannedTrackInput's.
+	Withdraw bool
+	// Stated is what an assigned file's own tags state of the fields the assignment holds,
+	// which Item and Book carry the book's values for; the put settles the file's owed tag
+	// writes against it. Nil for a file read by its own tags.
+	Stated *StatedBook
 	// LockKind and KindForced are PutScannedTrackInput's.
 	LockKind   bool
 	KindForced bool
@@ -220,9 +238,11 @@ type PutScannedVirtualTracksInput struct {
 	// PreserveLocks keeps a user-locked field on a virtual track from being re-derived
 	// from the .cue on a forced rescan (see PutScannedTrackInput.PreserveLocks).
 	PreserveLocks bool
-	// DeferRollups and Job are PutScannedTrackInput's.
+	// DeferRollups, Job, DropAssigned and Withdraw are PutScannedTrackInput's.
 	DeferRollups bool
 	Job          PID
+	DropAssigned PID
+	Withdraw     bool
 }
 
 // VirtualTrack is one cue TRACK of a single-file rip: a full track item plus the
@@ -352,6 +372,9 @@ type ItemFileRef struct {
 	Path        []byte // raw bytes of the current path
 	DisplayPath string
 	Position    int
+	// Assigned says a host assigned this part's audio to the book (AssignedPart), so a scan
+	// files it there whatever its tags say.
+	Assigned bool
 	// Role is the file's edge role: "primary", "part", or "alternate" for a file that
 	// backs the item without owning its metadata (a copy of its audio, or a lesser
 	// encoding of its recording; a book's copy of a part shares that part's Position).
@@ -457,6 +480,31 @@ type FolderBook struct {
 	Title   string
 	Files   int
 	Primary []byte
+}
+
+// AssignedPart is the place a host assigned an audio in a book: the book, and the part's
+// position there, nil when the host gave no number and the file's own tags number it.
+type AssignedPart struct {
+	Book     FolderBook
+	Position *int
+}
+
+// StatedBook is what a book file's own tags state of its title and of the fields that name
+// its book (PutScannedBookInput.Stated).
+type StatedBook struct {
+	Title, TitleSort          string
+	Author, AuthorSort        string
+	Authors                   []string
+	ASIN, ISBN, Edition, MBID string
+}
+
+// AssignedPlace is what a put records for an assigned part: its position, nil when the
+// file's own tags number it, and the parts the assignment says its book has. With no Total
+// a standing book keeps the count it holds whatever the part's tags state, and a book the
+// put makes takes the count its file states.
+type AssignedPlace struct {
+	Position *int
+	Total    int
 }
 
 // EnrichedTagRow is one file an enrichment write-back should stamp, carrying the
@@ -681,6 +729,13 @@ type Catalog interface {
 	// else a row holding the same audio, this library's first. It is nil when no item
 	// holds either.
 	FileStanding(ctx context.Context, libraryID int64, path []byte, essence string) (*FileStanding, error)
+	// AssignedPart returns the book part a host assigned the audio of the file at path to:
+	// the assignment of essence, else of the audio the file's row held before it changed
+	// in place. It is nil when neither is assigned.
+	AssignedPart(ctx context.Context, path []byte, essence string) (*AssignedPart, error)
+	// BookStanding returns the book pid names as the folder rule sees one, nil when no book
+	// has the pid.
+	BookStanding(ctx context.Context, pid PID) (*FolderBook, error)
 	// FolderStanding returns the standing of each cataloged file directly in folder, or in
 	// a disc folder under it (identity.AlbumFolder against root), in path order.
 	FolderStanding(ctx context.Context, libraryID int64, root, folder string) ([]FileStanding, error)
@@ -777,7 +832,7 @@ type JobStore interface {
 	RenewLease(ctx context.Context, scope, owner string, ts int64) error
 	ReleaseLease(ctx context.Context, scope, owner string) error
 
-	CreateJob(ctx context.Context, j *Job) error // assigns ID + PID
+	CreateJob(ctx context.Context, j *Job) error // assigns ID, and a PID when j has none
 	UpdateJob(ctx context.Context, j *Job) error
 	Heartbeat(ctx context.Context, jobID, ts int64, progress float64, msg string) error
 	// SaveJobResult writes a running job's result so far (a checkpoint), and SaveJobParams

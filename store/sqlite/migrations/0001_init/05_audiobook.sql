@@ -100,3 +100,16 @@ CREATE TABLE chapter (
 -- alone is its prefix.
 CREATE INDEX chapter_book_file ON chapter(book_item_id, file_id);
 CREATE INDEX chapter_file ON chapter(file_id);
+
+-- The book part a host assigned an audio to, and its place there (position NULL when the
+-- host gave no number and the file's tags number it). A scan files the file holding the
+-- audio by this, whatever its tags say, until the assignment is withdrawn, the file is
+-- read as a track by force, or the book goes. One audio has one place. Keyed by the audio
+-- and the item's rowid, which outlive a file row and a re-key, so a moved file, a copy, a
+-- restore and a root added back find the book again.
+CREATE TABLE assigned_part (
+  essence_hash TEXT PRIMARY KEY,
+  item_id      INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
+  position     INTEGER
+) WITHOUT ROWID;
+CREATE INDEX assigned_part_item ON assigned_part(item_id);

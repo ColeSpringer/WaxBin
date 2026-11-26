@@ -13,6 +13,8 @@ func newImportCmd(g *globals) *cobra.Command {
 	var (
 		as, sourceType, sourceURL, sourceID, provider string
 		profile, dup, showPID, showTitle, epTitle     string
+		book, author, bookPID                         string
+		disc, part, parts                             int
 		apply, asCopy, noPin, placeholder             bool
 	)
 	cmd := &cobra.Command{
@@ -23,7 +25,11 @@ func newImportCmd(g *globals) *cobra.Command {
 			"selected kind is also the scanner override, so --as book can catalog an audiobook " +
 			"whose tags do not identify it as one; that kind is then locked (`waxbin provenance` " +
 			"shows it, `unlock <pid> kind` clears it) so later scans keep it. WaxBin records an " +
-			"acquisition row with the supplied source metadata.",
+			"acquisition row with the supplied source metadata.\n\n" +
+			"--book with --author, or --book-pid, files a book's part into that book at --disc and " +
+			"--part whatever its tags say, and later scans keep it there (`book part --clear` " +
+			"withdraws that); --book-pid adds a part to a standing book whose title has moved " +
+			"since its key was made.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind := model.Kind(as)
@@ -41,11 +47,19 @@ func newImportCmd(g *globals) *cobra.Command {
 				Provider: provider, Profile: profile, Copy: asCopy, DupPolicy: model.DupPolicy(dup),
 				ShowPID: model.PID(showPID), ShowTitle: showTitle, Title: epTitle,
 			}
+			switch {
+			case bookPID != "" && (book != "" || author != ""):
+				return waxerr.New(waxerr.CodeInvalid, "import", "--book-pid names the book; --book and --author go without it")
+			case book != "" || bookPID != "":
+				meta.Book = &waxbin.AcquiredBook{PID: model.PID(bookPID), Title: book, Author: author, Parts: parts}
+			case author != "" || parts != 0:
+				return waxerr.New(waxerr.CodeInvalid, "import", "--author and --parts go with --book or --book-pid")
+			}
 			if kind == model.KindEpisode && noPin {
 				no := false
 				meta.Pinned = &no
 			}
-			res, err := lib.ImportAcquired(ctx(cmd), waxbin.AcquiredFile{Path: args[0], PlaceholderCover: placeholder}, kind, meta)
+			res, err := lib.ImportAcquired(ctx(cmd), waxbin.AcquiredFile{Path: args[0], PlaceholderCover: placeholder, Disc: disc, Part: part}, kind, meta)
 			if err != nil {
 				return err
 			}
@@ -92,6 +106,12 @@ func newImportCmd(g *globals) *cobra.Command {
 	f.StringVar(&showTitle, "show-title", "", "manual show title for a new-show episode")
 	f.StringVar(&epTitle, "title", "", "episode title (default the file base name)")
 	f.BoolVar(&noPin, "no-pin", false, "do not pin an acquired episode (retention may reclaim it)")
+	f.StringVar(&book, "book", "", "the title of the book the file is a part of, whatever its tags say (book)")
+	f.StringVar(&author, "author", "", "the author of the book --book names")
+	f.StringVar(&bookPID, "book-pid", "", "the standing book the file is a part of (book)")
+	f.IntVar(&disc, "disc", 0, "the disc the part is on in its book")
+	f.IntVar(&part, "part", 0, "the part's number on its disc (0 = the number its own tags give it)")
+	f.IntVar(&parts, "parts", 0, "how many parts the book has")
 	f.BoolVar(&placeholder, "placeholder-cover", false,
 		"the picture in the file's tags stands in for a cover, as a video thumbnail does (track/book; see `art placeholder`)")
 	_ = cmd.MarkFlagRequired("as")

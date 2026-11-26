@@ -33,7 +33,7 @@ func (g *globals) jobServer(cmd *cobra.Command) (*proxy.Client, error) {
 // handle (WAL lets it read the job row while the server holds the write lock),
 // printing progress to stderr, and returns the terminal job. A failed, crashed, or
 // canceled job returns an error carrying the job's recorded message. Interrupting
-// the CLI stops watching but leaves the job running on the server.
+// the CLI stops watching but leaves the job running on the server, which it says.
 func (g *globals) tailJob(cmd *cobra.Command, jobPID model.PID) (*model.Job, error) {
 	lib, _, err := g.openRead(cmd)
 	if err != nil {
@@ -68,6 +68,10 @@ func (g *globals) tailJob(cmd *cobra.Command, jobPID model.PID) (*model.Job, err
 		}
 		select {
 		case <-ctx(cmd).Done():
+			if printed {
+				fmt.Fprintln(errOut(cmd))
+			}
+			fmt.Fprintf(errOut(cmd), "job %s runs on in the server; stop it with: waxbin jobs cancel %s\n", jobPID, jobPID)
 			return nil, waxerr.FromContext("cli.tailJob", ctx(cmd).Err(), waxerr.CodeCanceled)
 		case <-time.After(200 * time.Millisecond):
 		}

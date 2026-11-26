@@ -69,6 +69,12 @@ func (l *Library) MediaType() MediaType {
 	return l.Media
 }
 
+// TakesBooks reports whether the library's files can be books: a user library whose media
+// type accepts them, never the internal podcast library, whose files are episodes.
+func (l *Library) TakesBooks() bool {
+	return l.Mode != ModePodcast && l.MediaType().Accepts(KindBook)
+}
+
 // UserLibraries is libs without the internal podcast library, which no one registers
 // and no scan or watch walks.
 func UserLibraries(libs []*Library) []*Library {

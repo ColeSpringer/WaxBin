@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -13,7 +16,7 @@ import (
 )
 
 func newBookCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "book <pid>",
 		Short: "Show an audiobook: contributors, series, chapters, and resume",
 		Args:  cobra.ExactArgs(1),
@@ -86,16 +89,111 @@ func newBookCmd(g *globals) *cobra.Command {
 			if cur != nil && resume.PositionMS > 0 {
 				fmt.Fprintf(w, "resume:       ch %d %q at %s\n", cur.Position+1, cur.Title, durationLabel(resume.PositionMS))
 			}
-			if len(d.Files) > 1 {
+			if d.IdentityHeld {
+				fmt.Fprintln(w, "identity:     held by assignment (title, author and identifiers stay as the catalog holds them)")
+			}
+			if len(d.Files) > 1 || slices.ContainsFunc(d.Files, func(p model.BookPart) bool { return p.Assigned }) {
 				fmt.Fprintln(w, "parts:")
 				for _, p := range d.Files {
-					fmt.Fprintf(w, "  [%d] %s  from %s (%s)\n", p.Position, p.DisplayPath, durationLabel(p.StartMS), durationLabel(p.DurationMS))
+					assigned := ""
+					if p.Assigned {
+						assigned = "  assigned"
+					}
+					fmt.Fprintf(w, "  [%d] %s  from %s (%s)%s\n", p.Position, p.DisplayPath, durationLabel(p.StartMS), durationLabel(p.DurationMS), assigned)
 				}
 			}
 			printChapters(cmd, d.Chapters)
 			return nil
 		},
 	}
+	cmd.AddCommand(newBookPartCmd(g))
+	return cmd
+}
+
+func newBookPartCmd(g *globals) *cobra.Command {
+	var (
+		book         string
+		disc, number int
+		clear        bool
+	)
+	cmd := &cobra.Command{
+		Use:   "part <file-pid>...",
+		Short: "File parts into a book whatever their tags say, or withdraw that",
+		Long: "Files each named file into the book --book names, as its part at --disc and " +
+			"--number (the files take that number and the ones after it, in the order named), or " +
+			"at the number its own tags give it when no number is given. Later scans keep the " +
+			"file there whatever its tags say, and the book keeps its title, author and " +
+			"identifiers, until --clear withdraws the assignment, a kind change makes the file a " +
+			"track, or the book goes. A one-part book a file leaves folds into the book it joins, and " +
+			"the file's copies go with it. --clear withdraws the assignment and files each file as " +
+			"later scans will, by its own tags and its folder; a file with no assignment is left as " +
+			"it is. `book <pid>` marks the assigned parts.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch {
+			case (book == "") == !clear:
+				return waxerr.New(waxerr.CodeInvalid, "book part", "give --book <pid> or --clear")
+			case clear && (disc != 0 || number != 0):
+				return waxerr.New(waxerr.CodeInvalid, "book part", "--clear takes no number")
+			case disc < 0 || number < 0:
+				return waxerr.New(waxerr.CodeInvalid, "book part", "--disc and --number count from 1")
+			case disc != 0 && number == 0:
+				return waxerr.New(waxerr.CodeInvalid, "book part", "--disc needs --number")
+			}
+			changes := make([]waxbin.BookPartChange, len(args))
+			for i, a := range args {
+				changes[i] = waxbin.BookPartChange{FilePID: model.PID(a), BookPID: model.PID(book)}
+				if number > 0 {
+					changes[i].Disc, changes[i].Part = disc, number+i
+				}
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			rep, err := m.AssignBookParts(ctx(cmd), changes, func(job model.PID) (*model.Job, error) { return g.tailJob(cmd, job) })
+			if rep != nil && (err == nil || len(rep.Files) > 0) {
+				if perr := emitBookParts(cmd, g, rep, clear, err); err == nil {
+					err = perr
+				}
+			}
+			return err
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&book, "book", "", "the book to file the parts into")
+	f.IntVar(&disc, "disc", 0, "the disc the parts are on")
+	f.IntVar(&number, "number", 0, "the first part's number on its disc; the files after it follow")
+	f.BoolVar(&clear, "clear", false, "withdraw the files' assignments and read them by their own tags")
+	return cmd
+}
+
+// emitBookParts prints what a book part change did. Under --json a change cut short carries
+// its failure as the error member.
+func emitBookParts(cmd *cobra.Command, g *globals, rep *waxbin.BookPartsReport, withdrew bool, failure error) error {
+	if g.jsonOut {
+		return printJSON(cmd, struct {
+			*waxbin.BookPartsReport
+			Error string `json:"error,omitempty"`
+		}{rep, errText(failure)})
+	}
+	w := out(cmd)
+	if withdrew {
+		fmt.Fprintf(w, "Withdrew %s\n", plural(len(rep.Withdrawn), "part"))
+	} else {
+		fmt.Fprintf(w, "Filed %s\n", plural(len(rep.Files), "part"))
+	}
+	for _, f := range slices.Sorted(maps.Keys(rep.Files)) {
+		fmt.Fprintf(w, "  file %s -> %s\n", f, rep.Files[f])
+	}
+	for _, p := range slices.Sorted(maps.Keys(rep.Absorbed)) {
+		fmt.Fprintf(w, "  absorbed  %s -> %s\n", p, rep.Absorbed[p])
+	}
+	for _, p := range slices.Sorted(maps.Keys(rep.Created)) {
+		fmt.Fprintf(w, "  created   %s from %s\n", p, rep.Created[p])
+	}
+	return nil
 }
 
 func newChaptersCmd(g *globals) *cobra.Command {

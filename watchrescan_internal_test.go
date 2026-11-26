@@ -102,3 +102,20 @@ func TestWatchRescanCountsARevivalAsAChange(t *testing.T) {
 		t.Errorf("rescan changed = %v (err %v), want a change", changed, err)
 	}
 }
+
+// TestWatchRescanReportsWhatACanceledScanChanged: a rescan canceled after it cataloged a
+// file reports the change beside the cancel.
+func TestWatchRescanReportsWhatACanceledScanChanged(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, _ := threeTracks(t, model.ModeInPlace)
+	cancelScansAt(t, lib, 2)
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := (&watchEngine{lib: lib}).Rescan(ctx, libs[0].PID, "", false)
+	if !changed || waxerr.ReasonOf(err) != jobs.ReasonCancelRequested {
+		t.Errorf("rescan changed = %v (err %v), want the change beside the cancel", changed, err)
+	}
+}

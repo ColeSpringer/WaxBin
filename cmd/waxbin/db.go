@@ -450,6 +450,10 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				if _, err := lib.GCStrandedTagKeys(ctx(cmd)); err != nil {
 					return err
 				}
+				// Book part assignments left on an item that is no book.
+				if _, err := lib.GCStrandedAssignments(ctx(cmd)); err != nil {
+					return err
+				}
 				// Last, so it indexes what the steps above left.
 				if reindexed, err = lib.RebuildSearchIndex(ctx(cmd)); err != nil {
 					return err
@@ -520,6 +524,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				}
 				fmt.Fprintf(w, "orphan tag provenance:    %d\n", rep.OrphanReservedTagProvenance)
 				fmt.Fprintf(w, "stranded tag keys:        %d\n", rep.StrandedTagKeyRows)
+				fmt.Fprintf(w, "stranded assignments:     %d\n", rep.StrandedAssignments)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())
 				if fix {
 					r := refreshed
@@ -560,6 +565,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return verdict
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and ISBN keys, and album and release years, settle covers from disk, renumber playlist positions, refold stale sort keys, reclaim orphaned art and tag provenance, and rebuild stale search rows before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and ISBN keys, and album and release years, settle covers from disk, renumber playlist positions, refold stale sort keys, reclaim orphaned art, tag provenance and stranded book part assignments, and rebuild stale search rows before verifying (takes the write lock)")
 	return cmd
 }

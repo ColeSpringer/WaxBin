@@ -198,6 +198,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"profiles"}},
 		{args: []string{"doctor"}},
 		{args: []string{"jobs"}},
+		{args: []string{"jobs", "cancel", "JOB"}},
 		{args: []string{"library", "list"}},
 		{args: []string{"user", "list"}},
 		{args: []string{"query"}},
@@ -291,6 +292,8 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"lyrics", "set", p(fx.one), "--clear", "--force"}},
 		{args: []string{"chapters", "set", p(fx.book), "--file", asset("chapters.cue")}},
 		{args: []string{"chapters", "set", p(fx.book), "--clear", "--force"}},
+		{args: []string{"book", "part", "BOOKFILE", "--book", p(fx.book), "--number", "1"}},
+		{args: []string{"book", "part", "BOOKFILE", "--clear"}},
 		{args: []string{"kind", p(fx.two), "--to", "book", "--dry-run"}},
 		{args: []string{"kind", "--artist", "Artist", "--to", "book"}},
 		{args: []string{"kind", "--artist", "Nobody At All", "--to", "book"}},
@@ -358,8 +361,9 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 	}
 	for _, c := range cases {
 		// TRASH stands for the trash entry the last delete wrote, read off trash list, ADDED
-		// for the library `library add` registered, FOLD for the first artist fold and
-		// ORGJOB for the newest organize job the journal holds.
+		// for the library `library add` registered, FOLD for the first artist fold, ORGJOB
+		// for the newest organize job the journal holds, JOB for the newest job and BOOKFILE
+		// for the book's first part.
 		for i, a := range c.args {
 			switch a {
 			case "TRASH":
@@ -374,6 +378,12 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 			case "ORGJOB":
 				c.args = append([]string(nil), c.args...)
 				c.args[i] = firstListedIn(t, fx, "batches", "jobPid", "organize", "history")
+			case "JOB":
+				c.args = append([]string(nil), c.args...)
+				c.args[i] = firstListedIn(t, fx, "", "pid", "jobs")
+			case "BOOKFILE":
+				c.args = append([]string(nil), c.args...)
+				c.args[i] = firstListedIn(t, fx, "parts", "filePid", "book", p(fx.book))
 			}
 		}
 		stdout, stderr, err := runJSONCommand(fx, c.args, c.bare)

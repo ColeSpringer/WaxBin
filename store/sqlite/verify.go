@@ -55,6 +55,9 @@ type DerivedReport struct {
 	// or unlock one, and the scan keeps a locked one on purpose, since its value has no
 	// other home.
 	StrandedTagKeyRows int
+	// Book part assignments whose item is no book, which no scan applies and nothing
+	// withdraws.
+	StrandedAssignments int
 }
 
 // Consistent reports whether the writer-maintained derived data is correct: FTS
@@ -75,7 +78,7 @@ func (r DerivedReport) Consistent() bool {
 // reserved tag key. It is informational, and independent of Consistent.
 func (r DerivedReport) Reclaimable() bool {
 	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0 || r.OrphanReservedTagProvenance > 0 ||
-		r.StrandedTagKeyRows > 0
+		r.StrandedTagKeyRows > 0 || r.StrandedAssignments > 0
 }
 
 // VerifyDerived checks FTS coverage, the maintained rollups, and the generated
@@ -126,6 +129,7 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		// A map row pointing at a deleted entity does not count as a reference here,
 		// matching GCArt, which removes the stale map before deleting the source.
 		{&rep.OrphanArtSources, "SELECT COUNT(*) FROM art_source WHERE hash NOT IN (" + liveArtSourceQ + ")"},
+		{&rep.StrandedAssignments, "SELECT COUNT(*) " + strandedAssignmentsQ},
 	}
 	for _, c := range checks {
 		if err := s.rdb().QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {

@@ -39,6 +39,11 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	probe := s.probePrimary(ctx, in.File.Path)
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
+		if in.Withdraw {
+			if err := withdrawAssignedTx(ctx, tx, in.File.Path, in.File.EssenceHash); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 
 		// One resolution of the book key serves the relink, the overlay and the item write,
 		// so an ambiguous identifier is looked up and logged once.
@@ -47,6 +52,9 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		// An assignment holds the identity of the book that stands under its key, never of an
+		// item the file's old row hands the put below (a rekinded track, a kept book).
+		heldIdentity := in.Assigned != nil && key.id != 0
 		fileID, filePID, priorMS, priorEssence, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, key.accept(), now, res)
 		if err != nil {
 			return err
@@ -100,10 +108,22 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 
 		fileTitle, fileBook := titleOf(in.Item), in.Book
+		if st := in.Stated; st != nil {
+			fileTitle = itemTitle{st.Title, st.TitleSort}
+			fileBook.Author, fileBook.AuthorSort, fileBook.Authors = st.Author, st.AuthorSort, st.Authors
+			fileBook.ASIN, fileBook.ISBN, fileBook.Edition, fileBook.MBID = st.ASIN, st.ISBN, st.Edition, st.MBID
+		}
 
 		// Overlay locked book fields, and the fills the part says nothing about, onto the
 		// scanned values before any writer runs (overlayStoredBookTx).
-		prior, err := overlayStoredBookTx(ctx, tx, s.log, fileID, &in.Book, &in.Item, in.Derived, in.PreserveLocks, key)
+		var heldPlace *model.AssignedPlace
+		if heldIdentity {
+			heldPlace = in.Assigned
+		}
+		if a := in.Assigned; a != nil && a.Total > 0 {
+			in.Book.TrackTotal = a.Total
+		}
+		prior, err := overlayStoredBookTx(ctx, tx, s.log, fileID, &in.Book, &in.Item, in.Derived, in.PreserveLocks, heldPlace, key)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -163,6 +183,11 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		role := link.role
+		if in.Assigned != nil {
+			if err := recordAssignedTx(ctx, tx, in.File.EssenceHash, priorEssence, itemID, in.Assigned.Position); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		// Chapters sync OUTSIDE the audio-change gate (idempotent): an external .cue can
 		// change independently of the audio, and a forced rescan must re-import chapters
 		// even when the content is unchanged. It no-ops when the stored chapters already
@@ -253,7 +278,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// A book a file the folder rule kept alone makes up takes the key the file's tags
 		// give it now (a retitled book with no ALBUM, one named for a renamed folder), so a
 		// book found later under the old key is a book of its own.
-		if in.Adopted && in.OwnKey != "" && role == bookPrimaryRole {
+		if in.Adopted && in.OwnKey != "" && role == bookPrimaryRole && in.Assigned == nil {
 			rekeyed, err := rekeyOwnBookTx(ctx, tx, itemID, in.OwnKey, now)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -843,10 +868,14 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 	return link, nil
 }
 
-// keptPositionTx is the position a book part takes: the one the scan read, with the disc
-// or the place the file does not state (PutScannedBookInput.DiscUnstated, PlaceUnstated)
-// kept from the position the catalog holds for the file, in this book first.
+// keptPositionTx is the position a book part takes: the one a host assigned it, else the one
+// the scan read, with the disc or the place the file does not state
+// (PutScannedBookInput.DiscUnstated, PlaceUnstated) kept from the position the catalog holds
+// for the file, in this book first.
 func keptPositionTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, in model.PutScannedBookInput) (int, error) {
+	if in.Assigned != nil && in.Assigned.Position != nil {
+		return *in.Assigned.Position, nil
+	}
 	if !in.DiscUnstated && !in.PlaceUnstated {
 		return in.Position, nil
 	}
@@ -1479,6 +1508,7 @@ func (s *Store) BookByPID(ctx context.Context, pid model.PID) (*model.BookDetail
 	d.Files = make([]model.BookPart, len(parts))
 	for i, p := range parts {
 		d.Files[i] = p.BookPart
+		d.IdentityHeld = d.IdentityHeld || (p.role == bookPrimaryRole && p.Assigned)
 	}
 	d.Chapters = chapters
 	d.TotalDurationMS = total
@@ -1541,7 +1571,8 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	const op = "store.bookParts"
 	rows, err := q.QueryContext(ctx,
 		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, f.rel_path, itf.role,
-			(SELECT l.pid FROM library l WHERE l.id = f.library_id), itf.start_frames IS NOT NULL, `+fileFactCols+`
+			(SELECT l.pid FROM library l WHERE l.id = f.library_id), itf.start_frames IS NOT NULL,
+			EXISTS(SELECT 1 FROM assigned_part ap WHERE ap.essence_hash = f.essence_hash AND ap.item_id = itf.item_id), `+fileFactCols+`
 		 FROM item_file itf JOIN file f ON f.id = itf.file_id
 		 WHERE itf.item_id = ? AND itf.role IN ('primary', 'part')`, bookItemID)
 	if err != nil {
@@ -1553,7 +1584,7 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 		var p bookPart
 		var rel []byte
 		if err := rows.Scan(append([]any{&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &rel, &p.role,
-			&p.libraryPID, &p.virtual}, fileFactDests(&p.facts)...)...); err != nil {
+			&p.libraryPID, &p.virtual, &p.Assigned}, fileFactDests(&p.facts)...)...); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		p.DurationMS = p.facts.DurationMS
@@ -1803,7 +1834,7 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	for i, p := range parts {
 		ref := p.facts
 		ref.FilePID, ref.Path, ref.DisplayPath, ref.Position, ref.Role = p.FilePID, p.path, p.DisplayPath, p.Position, p.role
-		ref.LibraryPID, ref.Virtual = p.libraryPID, p.virtual
+		ref.LibraryPID, ref.Virtual, ref.Assigned = p.libraryPID, p.virtual, p.Assigned
 		out[i] = ref
 	}
 	rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid, itf.start_frames IS NOT NULL,

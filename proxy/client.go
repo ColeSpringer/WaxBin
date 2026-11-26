@@ -882,6 +882,11 @@ func (c *Client) RunRemoveRoot(ctx context.Context, params RemoveRootParams) (mo
 	return c.runJob(ctx, MethodRunRemoveRoot, params)
 }
 
+// RunBookParts submits filing book parts by assignment to the server and returns the job PID.
+func (c *Client) RunBookParts(ctx context.Context, params BookPartsParams) (model.PID, error) {
+	return c.runJob(ctx, MethodRunBookParts, params)
+}
+
 // RunOrganize submits an organize pass to the server and returns the job PID. rule
 // is a marshaled query rule document selecting the items to organize.
 func (c *Client) RunOrganize(ctx context.Context, rule []byte, profile string) (model.PID, error) {
@@ -897,6 +902,12 @@ func (c *Client) RunOrganizeUndo(ctx context.Context, jobPID model.PID) (model.P
 // RunUnfold submits an unfold (Library.StartUnfold) and returns its job's PID.
 func (c *Client) RunUnfold(ctx context.Context, et model.MergeEntity, keys []string, reResolve bool) (model.PID, error) {
 	return c.runJob(ctx, MethodRunUnfold, UnfoldParams{EntityType: string(et), Keys: keys, ReResolve: reResolve})
+}
+
+// CancelJob asks the server to cancel a job it runs (Library.CancelJob). It returns once
+// the cancel is sent to the job, which the caller follows through the job row.
+func (c *Client) CancelJob(ctx context.Context, jobPID model.PID) error {
+	return c.call(ctx, MethodCancelJob, CancelJobParams{JobPID: string(jobPID)}, nil)
 }
 
 // runJob is the shared submit path for the run_* methods: it returns the started

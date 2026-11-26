@@ -174,6 +174,9 @@ func emitImportPlan(cmd *cobra.Command, g *globals, plan *inbox.Plan) error {
 		switch a.Outcome {
 		case inbox.OutcomeImport:
 			fmt.Fprintf(w, "  import     %s\n             -> %s\n", a.Src, a.Dst)
+			if a.Assign != nil {
+				fmt.Fprintln(w, "             filed by its assigned book and place")
+			}
 			if a.Restores != "" {
 				fmt.Fprintf(w, "             restores item %s\n", a.Restores)
 			}
@@ -216,10 +219,13 @@ func emitImportReport(cmd *cobra.Command, g *globals, src string, rep *inbox.Rep
 		if f.ItemPID != "" {
 			item = ": item " + string(f.ItemPID)
 		}
+		if f.Assigned {
+			item += " (assigned)"
+		}
 		switch {
 		case f.Restores != "" && f.Verdict != scan.VerdictRevived:
 			fmt.Fprintf(out(cmd), "  restored %s: item %s\n", f.Path, f.Restores)
-		case f.Verdict != scan.VerdictCreated:
+		case f.Verdict != scan.VerdictCreated || f.Assigned:
 			fmt.Fprintf(out(cmd), "  %s %s%s\n", f.Verdict, f.Path, item)
 		}
 	}
@@ -245,13 +251,15 @@ type importedFile struct {
 	Relinked       bool              `json:"relinked"`
 	Absorbed       map[string]string `json:"absorbed,omitempty"`
 	Restores       string            `json:"restores,omitempty"`
+	Assigned       bool              `json:"assigned,omitempty"`
 }
 
 func importedFiles(fs []inbox.FileOutcome) []importedFile {
 	out := make([]importedFile, len(fs))
 	for i, f := range fs {
 		out[i] = importedFile{Path: f.Path, ItemPID: string(f.ItemPID), Verdict: string(f.Verdict),
-			AttachedAsCopy: f.AttachedAsCopy, Relinked: f.Relinked, Absorbed: pidMapStrings(f.Absorbed), Restores: string(f.Restores)}
+			AttachedAsCopy: f.AttachedAsCopy, Relinked: f.Relinked, Absorbed: pidMapStrings(f.Absorbed), Restores: string(f.Restores),
+			Assigned: f.Assigned}
 	}
 	return out
 }
@@ -265,11 +273,12 @@ func importPlanJSON(plan *inbox.Plan) any {
 		Reason   string          `json:"reason,omitempty"`
 		Occupant *inbox.Occupant `json:"occupant,omitempty"`
 		Restores string          `json:"restores,omitempty"`
+		Assigned bool            `json:"assigned,omitempty"`
 	}
 	actions := make([]actionJSON, 0, len(plan.Actions))
 	for _, a := range plan.Actions {
 		actions = append(actions, actionJSON{Src: a.Src, Dst: a.Dst, Outcome: string(a.Outcome), Code: string(a.Code),
-			Reason: a.Reason, Occupant: a.Occupant, Restores: string(a.Restores)})
+			Reason: a.Reason, Occupant: a.Occupant, Restores: string(a.Restores), Assigned: a.Assign != nil})
 	}
 	return struct {
 		Source     string `json:"source"`

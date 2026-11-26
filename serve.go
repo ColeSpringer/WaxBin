@@ -1005,6 +1005,28 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return proxy.JobStartResult{JobPID: string(pid)}, nil
 		},
+		proxy.MethodRunBookParts: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.BookPartsParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			changes := make([]BookPartChange, len(p.Changes))
+			for i, c := range p.Changes {
+				changes[i] = BookPartChange{FilePID: model.PID(c.FilePID), BookPID: model.PID(c.BookPID), Disc: c.Disc, Part: c.Part}
+			}
+			pid, err := l.StartAssignBookParts(ctx, changes)
+			if err != nil {
+				return nil, err
+			}
+			return proxy.JobStartResult{JobPID: string(pid)}, nil
+		},
+		proxy.MethodCancelJob: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.CancelJobParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.CancelJob(ctx, model.PID(p.JobPID))
+		},
 	}
 }
 

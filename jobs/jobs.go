@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/colespringer/waxbin/model"
@@ -21,6 +22,10 @@ type Manager struct {
 	store model.JobStore
 	owner string
 	log   *slog.Logger
+
+	// mu guards running, the cancel of each job Run is running, by pid.
+	mu      sync.Mutex
+	running map[model.PID]context.CancelCauseFunc
 }
 
 // NewManager builds a job manager bound to a store and owner identity.
@@ -28,7 +33,23 @@ func NewManager(store model.JobStore, owner string, log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, owner: owner, log: log}
+	return &Manager{store: store, owner: owner, log: log, running: map[model.PID]context.CancelCauseFunc{}}
+}
+
+// ErrCancelRequested is the cause on the context of a job Cancel ended.
+var ErrCancelRequested = errors.New("canceled on request")
+
+// Cancel cancels the job with this pid if Run is running it here, and reports whether it
+// was. The job's work sees its context end with ErrCancelRequested as the cause; Run
+// waits for the work to return before it records the ending.
+func (m *Manager) Cancel(pid model.PID) bool {
+	m.mu.Lock()
+	cancel, ok := m.running[pid]
+	m.mu.Unlock()
+	if ok {
+		cancel(ErrCancelRequested)
+	}
+	return ok
 }
 
 // Handle is the live job context passed to a job function for progress updates.
@@ -90,7 +111,10 @@ type Spec struct {
 // Run acquires the lease for spec.Scope, creates a running job, invokes fn, then
 // finalizes the job and releases the lease. It returns CodeConflict if the scope is
 // already leased. A run ends done, or canceled when its context was canceled and fn
-// returned that cancel (CodeCanceled, or the context's own error), else failed. A panic from fn is recovered,
+// returned that cancel (CodeCanceled, or the context's own error), else failed. A cancel
+// by Cancel is recorded as canceled on request, and Run then returns a CodeCanceled
+// error with ReasonCancelRequested around fn's, so a caller can tell it from its own
+// context ending. A panic from fn is recovered,
 // recorded as a failed job, and returned as a CodeInternal error rather than
 // propagating to the caller. Finalization uses a cancel-free context so a
 // canceled or panicked run still records its terminal state and frees the lease.
@@ -103,12 +127,24 @@ func (m *Manager) Run(ctx context.Context, spec Spec, fn func(context.Context, *
 	defer release()
 
 	cleanup := context.WithoutCancel(ctx)
+	jctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	now := time.Now().UnixNano()
 	job = &model.Job{
-		Kind: kind, Scope: spec.Scope, State: model.JobRunning, Owner: m.owner,
+		PID: model.NewPID(), Kind: kind, Scope: spec.Scope, State: model.JobRunning, Owner: m.owner,
 		TargetType: spec.TargetType, TargetPID: spec.TargetPID,
 		StartedAt: now, HeartbeatAt: now,
 	}
+	// Registered before the row is written and dropped after it is finalized, so a reader
+	// who finds the row running can cancel the job, and one who cannot finds it finished.
+	m.mu.Lock()
+	m.running[job.PID] = cancel
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.running, job.PID)
+		m.mu.Unlock()
+	}()
 	if cerr := m.store.CreateJob(ctx, job); cerr != nil {
 		return nil, cerr
 	}
@@ -122,12 +158,18 @@ func (m *Manager) Run(ctx context.Context, spec Spec, fn func(context.Context, *
 		}
 	}()
 
-	runErr := fn(ctx, &Handle{mgr: m, job: job})
+	runErr := fn(jctx, &Handle{mgr: m, job: job})
 	switch {
 	case runErr == nil:
 		m.finalize(cleanup, job, kind, model.JobDone, "", nil)
-	case ctx.Err() != nil && (waxerr.Is(runErr, waxerr.CodeCanceled) ||
+	case jctx.Err() != nil && (waxerr.Is(runErr, waxerr.CodeCanceled) ||
 		errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)):
+		if errors.Is(context.Cause(jctx), ErrCancelRequested) {
+			requested := &waxerr.Error{Code: waxerr.CodeCanceled, Op: "jobs.Run", Msg: ErrCancelRequested.Error(),
+				Err: runErr, Reason: ReasonCancelRequested}
+			m.finalize(cleanup, job, kind, model.JobCanceled, ErrCancelRequested.Error(), requested)
+			return job, requested
+		}
 		m.finalize(cleanup, job, kind, model.JobCanceled, "interrupted before it finished", waxerr.New(waxerr.CodeCanceled, "jobs.Run", ""))
 	default:
 		m.finalize(cleanup, job, kind, model.JobFailed, runErr.Error(), runErr)
@@ -196,6 +238,10 @@ func (m *Manager) RunLeasedWait(ctx context.Context, scope string, fn func(conte
 // holds its scope.
 const ReasonLeaseHeld waxerr.Reason = "lease_held"
 
+// ReasonCancelRequested is the reason on the CodeCanceled error Run returns, and on the
+// row it records, for a job Cancel ended.
+const ReasonCancelRequested waxerr.Reason = "cancel_requested"
+
 // LeaseHeldError is the cause of a held-lease conflict, naming the scope. It stays in
 // process; a proxied conflict carries ReasonLeaseHeld alone.
 type LeaseHeldError struct{ Scope string }
@@ -227,10 +273,14 @@ func (m *Manager) acquire(ctx context.Context, scope, op string) (func(), error)
 }
 
 // finalize stamps a job's terminal state and persists it (best-effort), with the class and
-// reason of the error that ended it, if any.
+// reason of the error that ended it, if any. A job that did not finish keeps the progress
+// it reached.
 func (m *Manager) finalize(ctx context.Context, job *model.Job, kind string, state model.JobState, errMsg string, cause error) {
 	fin := time.Now().UnixNano()
-	job.HeartbeatAt, job.FinishedAt, job.Progress = fin, fin, 1
+	job.HeartbeatAt, job.FinishedAt = fin, fin
+	if state == model.JobDone {
+		job.Progress = 1
+	}
 	job.State, job.Error = state, errMsg
 	job.ErrorCode, job.ErrorReason = "", ""
 	if cause != nil {

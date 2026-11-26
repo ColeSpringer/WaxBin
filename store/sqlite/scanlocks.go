@@ -443,8 +443,11 @@ func bookColumnOf(field string) string {
 // the primary part rebuilds every contributor role from the scanned lists, which a
 // locked role must overlay, whether it was locked as a scalar or a credit, and translator
 // and editor have only their credit locks. It must run before upsertItem and upsertBook.
-// known is the caller's resolution of the book's key, as for overlayStoredTrackTx.
-func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int64, b *model.Book, item *model.PlayableItem, derived []string, preserveLocks bool, known *resolvedItem) (*scanPrior, error) {
+// known is the caller's resolution of the book's key, as for overlayStoredTrackTx. An
+// assigned part's put into a standing book (held) keeps the book's title, author and
+// identifiers as the catalog holds them, and its count of parts unless the assignment gives
+// one: the part's tags name another book, if any, so they say nothing of this one.
+func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int64, b *model.Book, item *model.PlayableItem, derived []string, preserveLocks bool, held *model.AssignedPlace, known *resolvedItem) (*scanPrior, error) {
 	if known == nil {
 		var err error
 		if known, err = resolveItemTx(ctx, tx, log, item.Kind, item.IdentityKey, bookAdoptKey{author: b.Author, title: item.Title}); err != nil {
@@ -461,7 +464,7 @@ func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int
 	}
 	prior := &scanPrior{itemID: id, rows: rows}
 	locked, fills := partitionStoredRows(rows, preserveLocks)
-	if len(locked) == 0 && len(fills) == 0 {
+	if len(locked) == 0 && len(fills) == 0 && held == nil {
 		return prior, nil
 	}
 	cur, curTitle, err := loadBookForEditTx(ctx, tx, id)
@@ -469,6 +472,15 @@ func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int
 		return nil, err
 	}
 	prior.book = &cur
+	if held != nil {
+		item.Title, item.TitleSort = curTitle.title, curTitle.sort
+		for _, f := range []string{"author", "asin", "isbn", "edition", "mbid"} {
+			copyBookField(b, cur, f)
+		}
+		if held.Total == 0 {
+			b.TrackTotal = cur.TrackTotal
+		}
+	}
 
 	keepLockedTitle(item, curTitle, locked)
 	for f := range locked {

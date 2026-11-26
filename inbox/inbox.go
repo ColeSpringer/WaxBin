@@ -5,12 +5,14 @@
 package inbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/diskfree"
@@ -107,6 +109,8 @@ const (
 	HoldAlbum            HoldCode = "album-held"         // a track of its album will not land, and the request holds units
 	HoldReadOnlyLibrary  HoldCode = "read-only-library"  // its library was flagged read-only since the plan
 	HoldLandedSince      HoldCode = "landed-since"       // its audio reached the catalog since the plan
+	HoldBookGone         HoldCode = "book-gone"          // the book it is assigned to is no longer one
+	HoldPlaceTaken       HoldCode = "place-taken"        // another part of its book holds its assigned place
 )
 
 // Occupant is what turned an action away: the file at Path (with the catalog's file and
@@ -158,6 +162,25 @@ type Action struct {
 	// PlaceholderCover says the picture in the file's tags stands in for a cover, which
 	// the cataloging scan marks (scan.FileOptions.PlaceholderCover).
 	PlaceholderCover bool
+	// Assign is the assignment the cataloging scan records for a file of an assigned import
+	// (Request.Assign), nil for one whose own tags and name already give its book, its place
+	// and the count of parts the assignment gives.
+	Assign *scan.Assignment
+}
+
+// Assignment files an import's files into one book whatever their tags say, for an
+// acquisition that names its book: the standing book BookPID names, keyed Key and titled
+// Title by Author, or with no BookPID the book Title by Author keys from those alone (an
+// empty Author takes, for every file, the first author a file states). Parts is how many
+// parts the book has (see model.AssignedPlace), and Places gives a file its place in the
+// book (model.PartPosition) by its absolute path; a file with none takes the place its tags
+// and name give it.
+type Assignment struct {
+	BookPID       model.PID
+	Key           string
+	Title, Author string
+	Parts         int
+	Places        map[string]int
 }
 
 // Request configures an import.
@@ -199,6 +222,9 @@ type Request struct {
 	// staged in a folder the import owns: their folders name no book, and the import
 	// carries nothing from them and removes none.
 	Acquired bool
+	// Assign files every file into the book it names, as its kind, whatever the files' tags
+	// say, and the folder rule leaves them alone.
+	Assign *Assignment
 }
 
 // Plan is a reviewable set of import actions.
@@ -275,6 +301,8 @@ type FileOutcome struct {
 	// one brought back, set only when the file landed on that item, its verdict saying what
 	// else the put did.
 	Restores model.PID
+	// Assigned says the file was filed by the import's assignment (Action.Assign).
+	Assigned bool
 	// filePID is the file's row, for the cover settled once the batch's covers are placed.
 	filePID model.PID
 }
@@ -350,6 +378,11 @@ func (s *Service) PlanPaths(ctx context.Context, req Request, paths []string, ki
 	if req.Acquired {
 		req.Source, req.Inbox = "", false
 	}
+	if a := req.Assign; a != nil && a.BookPID == "" && a.Author == "" {
+		unit := *a
+		unit.Author = s.unitAuthor(ctx, paths)
+		req.Assign = &unit
+	}
 	plan := &Plan{
 		Source: req.Source, Inbox: req.Inbox, Acquired: req.Acquired, Library: req.Library, Profile: req.Profile.Name,
 		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes, Acquisition: req.Acquisition,
@@ -397,6 +430,27 @@ func (s *Service) PlanPaths(ctx context.Context, req Request, paths []string, ki
 		}
 	}
 	return plan, nil
+}
+
+// unitAuthor is the first author the files at paths state, in order, the one a book named by
+// its title alone takes for all of them, so files that disagree still key one book.
+func (s *Service) unitAuthor(ctx context.Context, paths []string) string {
+	for _, path := range paths {
+		var fm *meta.FileMeta
+		var err error
+		if in, ok := s.reader.(meta.Inspector); ok {
+			fm, err = in.Inspect(ctx, path)
+		} else {
+			fm, err = s.reader.Read(ctx, path)
+		}
+		if err != nil {
+			continue
+		}
+		if a := cmp.Or(strings.TrimSpace(fm.Tags.AlbumArtist), strings.TrimSpace(fm.Tags.Artist)); a != "" {
+			return a
+		}
+	}
+	return ""
 }
 
 // resolveLibrary picks the managed library a file targets. When a Route is set it is
@@ -456,6 +510,7 @@ type staged struct {
 	book        string
 	place       int
 	placeStated bool
+	placeGiven  bool   // place is the one the import's assignment gives the file
 	rel         string // the rendered destination before any part number
 }
 
@@ -482,6 +537,9 @@ func (s *Service) classify(ctx context.Context, req Request, path string) *stage
 	// the target library when no route picks one by kind) and route to the matching managed
 	// library, so a book lands in the audiobook root and a track in the music root.
 	kind := req.ForceKind
+	if req.Assign != nil {
+		kind = model.KindBook
+	}
 	if kind == "" {
 		var target *model.Library
 		if req.Route == nil {
@@ -496,9 +554,25 @@ func (s *Service) classify(ctx context.Context, req Request, path string) *stage
 	if kind == model.KindTrack {
 		meta.DisplayFallbacks(&fm.Tags, root, path, fm.TitleFromName)
 	} else {
+		own, ownPlace := assignedTags(req.Assign, &fm.Tags, root, path)
 		meta.PromoteBookFields(&fm.Tags)
 		st.book = scan.BookIdentityKey(fm.Tags)
 		st.place, st.placeStated = scan.PartPosition(&fm.Tags, root, path)
+		if asg := req.Assign; asg != nil {
+			// Tags that name another book, if any, say nothing of this one's identity.
+			fm.Tags.ASIN, fm.Tags.ISBN, fm.Tags.Edition, fm.Tags.MBReleaseID = "", "", "", ""
+			st.book = cmp.Or(asg.Key, scan.BookIdentityKey(fm.Tags))
+			place, numbered := asg.Places[path]
+			if numbered {
+				st.place, st.placeStated, st.placeGiven = place, true, true
+			}
+			if own != st.book || numbered && ownPlace != place || asg.Parts > 0 && st.raw.TrackTotal != asg.Parts {
+				a.Assign = &scan.Assignment{BookPID: asg.BookPID, Title: asg.Title, Author: asg.Author, Total: asg.Parts}
+				if numbered {
+					a.Assign.Position = &place
+				}
+			}
+		}
 		a.Position = st.place
 	}
 	st.tags = fm.Tags
@@ -837,7 +911,10 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	if err := placeFile(sp, a.Src, a.Dst, plan.Copy); err != nil {
 		return 0, outcome, err
 	}
-	outcome.Path = a.Dst
+	outcome.Path, outcome.Assigned = a.Dst, a.Assign != nil
+	// The file is in the library now, so it is cataloged and described however the caller
+	// has given up on the batch; a canceled import stops between files.
+	settled := context.WithoutCancel(ctx)
 	// The file's own companions land beside it before it is cataloged, so the scan reads
 	// the file as the next one would: a cue sheet carves the rip it describes, and lyrics
 	// and per-track art come in with the audio rather than at the next scan.
@@ -850,17 +927,14 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 		forced = a.Kind
 	}
 	// The staging folder's cover is placed after the batch's audio (placeCovers).
-	opts := scan.FileOptions{Kind: forced, Album: a.Album, CoverPending: !plan.Acquired, PlaceholderCover: a.PlaceholderCover}
+	opts := scan.FileOptions{Kind: forced, Album: a.Album, CoverPending: !plan.Acquired, PlaceholderCover: a.PlaceholderCover, Assign: a.Assign}
 	if a.Kind == model.KindBook {
 		opts.Position = &a.Position
 	}
-	res, out, err := s.cataloger.ScanFileWith(ctx, lib, a.Dst, opts)
+	res, out, err := s.cataloger.ScanFileWith(settled, lib, a.Dst, opts)
 	if err != nil {
 		return sidecars, outcome, err
 	}
-	// The put committed, so the file is imported: what follows describes that and runs
-	// to the end whether or not the caller has given up on the batch.
-	settled := context.WithoutCancel(ctx)
 	var made []model.PID
 	if out != nil {
 		outcome.ItemPID, outcome.AttachedAsCopy, outcome.filePID = out.ItemPID, out.AttachedAsCopy, out.FilePID

@@ -378,10 +378,10 @@ func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind mod
 	}
 	keepField := `field IN ('genre', 'year', 'art', 'acquisition') OR field LIKE 'tag.%' OR field LIKE 'art.%'`
 	keepOwed := `tag_key IN ('genre', 'year', 'art', 'acquisition') OR tag_key LIKE 'tag.%'`
-	// Leaving a book takes its chapters, entering one a track's lyrics.
-	shed := "DELETE FROM lyrics WHERE item_id = ?"
+	// Leaving a book takes its chapters and assignments, entering one a track's lyrics.
+	shed := []string{"DELETE FROM lyrics WHERE item_id = ?"}
 	if from == string(model.KindBook) {
-		shed = "DELETE FROM chapter WHERE book_item_id = ?"
+		shed = []string{"DELETE FROM chapter WHERE book_item_id = ?", "DELETE FROM assigned_part WHERE item_id = ?"}
 	}
 	stmts := []struct {
 		q    string
@@ -395,7 +395,12 @@ func rekindItemForFileTx(ctx context.Context, tx *sql.Tx, fileID int64, kind mod
 		{`DELETE FROM file_diagnostic WHERE origin = 'edit' AND code = 'tag_write_owed' AND NOT (` + keepOwed + `)
 			AND file_id IN (SELECT file_id FROM item_file WHERE item_id = ?)`, []any{itemID}},
 		{"UPDATE playable_item SET kind = ?, identity_key = ?, updated_at = ? WHERE id = ?", []any{string(kind), key, now, itemID}},
-		{shed, []any{itemID}},
+	}
+	for _, q := range shed {
+		stmts = append(stmts, struct {
+			q    string
+			args []any
+		}{q, []any{itemID}})
 	}
 	for _, st := range stmts {
 		if _, err := tx.ExecContext(ctx, st.q, st.args...); err != nil {

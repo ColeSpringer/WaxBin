@@ -50,9 +50,12 @@ func (s *Store) ReleaseLease(ctx context.Context, scope, owner string) error {
 	})
 }
 
-// CreateJob inserts a new job row, assigning its ID and PID.
+// CreateJob inserts a new job row, assigning its ID, and its PID when it has none.
 func (s *Store) CreateJob(ctx context.Context, j *model.Job) error {
-	pid := model.NewPID()
+	pid := j.PID
+	if pid == "" {
+		pid = model.NewPID()
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		r, err := tx.ExecContext(ctx,
 			`INSERT INTO job(pid, kind, scope, state, owner, progress, message, error, target_type, target_pid,

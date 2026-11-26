@@ -367,3 +367,40 @@ func TestDBVerifyFixSaysCursorsMoveOnlyWhenAKeyDid(t *testing.T) {
 		})
 	}
 }
+
+// TestDBVerifyReportsAndReclaimsStrandedAssignments: a book part assignment left on an item
+// that is no book is reported as reclaimable without failing the check, and --fix deletes
+// it.
+func TestDBVerifyReportsAndReclaimsStrandedAssignments(t *testing.T) {
+	t.Parallel()
+	db, root, pid := creditCLIFixture(t)
+	raw, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(`INSERT INTO assigned_part(essence_hash, item_id, position)
+		SELECT 'stranded', id, 1 FROM playable_item WHERE pid = ? AND kind = 'track'`, string(pid)); err != nil {
+		t.Fatalf("strand an assignment by hand: %v", err)
+	}
+	_ = raw.Close()
+	verify := func(args ...string) (int, error) {
+		t.Helper()
+		out, err := runCLIJSON(t, db, root, append([]string{"db", "verify"}, args...)...)
+		var env struct {
+			Data struct {
+				StrandedAssignments int `json:"strandedAssignments"`
+			} `json:"data"`
+		}
+		if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
+			t.Fatalf("db verify %v printed %q: %v", args, out, jerr)
+		}
+		return env.Data.StrandedAssignments, err
+	}
+	if n, err := verify(); n != 1 || err != nil {
+		t.Fatalf("db verify = %d stranded (err %v), want 1 and success", n, err)
+	}
+	if n, err := verify("--fix"); n != 0 || err != nil {
+		t.Fatalf("db verify --fix = %d stranded (err %v), want 0 and success", n, err)
+	}
+}

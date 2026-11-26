@@ -281,7 +281,9 @@ func (w *Watcher) notify(trigger string, changed bool) {
 }
 
 // rescan runs one Engine.Rescan, mapping a busy (held-lease) result to a skip and any
-// other error to a warning, so a transient failure never stops the watcher.
+// other error to a warning, so a transient failure never stops the watcher. A rescan that
+// stopped early, canceled or failed, reports what it changed before it stopped, so the
+// schedulers still run for that.
 func (w *Watcher) rescan(ctx context.Context, libPID model.PID, subPath string, force bool) (bool, error) {
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -296,10 +298,10 @@ func (w *Watcher) rescan(ctx context.Context, libPID model.PID, subPath string, 
 		w.log.Debug("watch: rescan skipped, filesystem mutator busy", "library", libPID, "sub", subPath)
 		return false, nil
 	case waxerr.Is(err, waxerr.CodeCanceled):
-		return false, err
+		return changed, err
 	default:
 		w.log.Warn("watch: rescan error", "library", libPID, "sub", subPath, "err", err)
-		return false, err
+		return changed, err
 	}
 }
 

@@ -1105,3 +1105,34 @@ func TestAStoppedWatchSaysNothingOfItsRoots(t *testing.T) {
 		t.Errorf("a stopped watch spoke of its roots (degraded %v):\n%s", w.Degraded(), logs.buf.String())
 	}
 }
+
+// TestARescanThatStoppedEarlyStillRunsAnalyze: a rescan that changed the catalog and then
+// stopped, canceled on request or failed, still has the analyze pass run for its changes.
+func TestARescanThatStoppedEarlyStillRunsAnalyze(t *testing.T) {
+	for _, stop := range []error{
+		waxerr.New(waxerr.CodeCanceled, "jobs.Run", "canceled on request").WithReason(jobs.ReasonCancelRequested),
+		waxerr.New(waxerr.CodeIO, "scan.Scan", "disk gone"),
+	} {
+		eng := &mockEngine{changed: true, rescanErr: stop}
+		w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{Interval: time.Hour, FullRescanInterval: -1, Analyze: true})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- w.Run(ctx) }()
+		deadline := time.After(5 * time.Second)
+		for {
+			eng.mu.Lock()
+			n := eng.analyzes
+			eng.mu.Unlock()
+			if n > 0 {
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("no analyze after a rescan that changed the catalog and ended with %v", stop)
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		cancel()
+		<-done
+	}
+}
