@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -129,57 +128,65 @@ func TestKqueueReportsUnderALinkedRoot(t *testing.T) {
 	expect(t, src, event(link, fsnotify.Write))
 }
 
-// openDescriptors counts the process's open descriptors through /dev/fd, which lists
-// them on macOS (and on FreeBSD with fdescfs mounted).
-func openDescriptors(t *testing.T) int {
+// descriptorsOn counts the process's descriptors open on the files and folders paths
+// name, matched by device and inode, so one another test's goroutine opens meanwhile is
+// not counted. Descriptors are handed out lowest first, so a test process holds none past
+// the first 65536, where the scan stops.
+func descriptorsOn(t *testing.T, paths []string) int {
 	t.Helper()
-	f, err := os.Open(os.DevNull)
-	if err != nil {
+	type id struct{ dev, ino uint64 }
+	ids := map[id]bool{}
+	for _, p := range paths {
+		var st unix.Stat_t
+		if err := unix.Stat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		ids[id{uint64(st.Dev), uint64(st.Ino)}] = true
+	}
+	var lim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &lim); err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	entries, err := os.ReadDir("/dev/fd")
-	if err != nil {
-		t.Skipf("no /dev/fd here: %v", err)
+	open := 0
+	for fd := range min(uint64(lim.Cur), 1<<16) {
+		var st unix.Stat_t
+		if unix.Fstat(int(fd), &st) == nil && ids[id{uint64(st.Dev), uint64(st.Ino)}] {
+			open++
+		}
 	}
-	listed := false
-	for _, e := range entries {
-		listed = listed || e.Name() == strconv.Itoa(int(f.Fd()))
-	}
-	if !listed {
-		t.Skip("/dev/fd does not list this process's descriptors here")
-	}
-	return len(entries) - 1
+	return open
 }
 
 // TestKqueueHoldsADescriptorAFolder: a watched folder of 200 files costs one descriptor,
-// where fsnotify's kqueue backend held 201, and Close gives every one back. Not
-// parallel: it counts the whole process's descriptors.
+// where fsnotify's kqueue backend held one for each file as well, and Close gives every
+// one back.
 func TestKqueueHoldsADescriptorAFolder(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	album := filepath.Join(root, "Album")
 	mkdirs(t, album)
+	tree := []string{root, album}
 	for i := range 200 {
-		writeFile(t, filepath.Join(album, fmt.Sprintf("%03d.flac", i)))
+		file := filepath.Join(album, fmt.Sprintf("%03d.flac", i))
+		writeFile(t, file)
+		tree = append(tree, file)
 	}
-	before := openDescriptors(t)
 	src, err := newSource()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	queue := openDescriptors(t) - before // the kernel queue and its wake pipe
 	lw := &liveWatch{src: src, log: quietLog}
 	added, exhausted := lw.addTree(root, true)
 	if added != 2 || exhausted {
 		t.Fatalf("armed %d folders (exhausted %v), want the root and the album", added, exhausted)
 	}
-	if held := openDescriptors(t) - before - queue; held != added {
-		t.Errorf("%d descriptors held for %d folders", held, added)
+	if held := descriptorsOn(t, tree); held != added {
+		t.Errorf("%d descriptors open on the tree for %d folders", held, added)
 	}
 	src.Close()
-	if after := openDescriptors(t); after != before {
-		t.Errorf("%d descriptors open after Close, %d before the source", after, before)
+	if held := descriptorsOn(t, tree); held != 0 {
+		t.Errorf("%d descriptors left open on the tree after Close", held)
 	}
 }
 
