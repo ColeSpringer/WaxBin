@@ -206,8 +206,10 @@ jobs:
         run: |
           base="$RUNNER_TEMP/waxbin-apfs"
           mkdir -p "$base/a" "$base/b"
-          hdiutil create -size 256m -fs APFS -volname waxbina "$RUNNER_TEMP/waxbin-apfs.dmg"
-          hdiutil attach -nobrowse -mountpoint "$base/a" "$RUNNER_TEMP/waxbin-apfs.dmg"
+          # APFS sets how many volumes a container can hold when it is made, one for
+          # each 512M, so the image is 2G; sparse, it takes on disk only what is written.
+          hdiutil create -size 2g -type SPARSE -fs APFS -volname waxbina "$RUNNER_TEMP/waxbin-apfs.sparseimage"
+          hdiutil attach -nobrowse -mountpoint "$base/a" "$RUNNER_TEMP/waxbin-apfs.sparseimage"
           # The volume is diskNsM, and its container diskN.
           volume="$(df "$base/a" | awk 'NR == 2 { print $1 }')"
           container="${volume#/dev/}"
