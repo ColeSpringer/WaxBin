@@ -5,6 +5,7 @@ package watch
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,6 +46,12 @@ func newSource() (source, error) {
 // watchCap is 0 here: the folders below a root ride its one watch, so there is nothing
 // to cap.
 func watchCap(int) int { return 0 }
+
+// folderWrites is false: a watch reports each entry that changes.
+const folderWrites = false
+
+// fileID is 0 here, where the folder source never runs.
+func fileID(fs.FileInfo) uint64 { return 0 }
 
 // notifyBuffer is the most ReadDirectoryChangesW accepts over a network share.
 const notifyBuffer = 64 << 10
@@ -117,6 +124,10 @@ func (s *recursiveSource) Remove(dir string) error {
 
 func (s *recursiveSource) Events() <-chan fsnotify.Event { return s.events }
 func (s *recursiveSource) Errors() <-chan error          { return s.errs }
+
+// Dropped names nothing: a root whose watch ends is reported, and the folders below it
+// hold no watch of their own.
+func (s *recursiveSource) Dropped([]string) []string { return nil }
 
 // Close ends the streams and releases every root with its handle, then the port.
 func (s *recursiveSource) Close() error {

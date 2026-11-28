@@ -969,37 +969,209 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 }
 
 // volumes is what the preflight asks of the filesystem: the room left under a folder,
-// and the volume a folder is on.
+// the device a folder is on, the pool of space a folder draws on, the folders apt to
+// report that pool's room (fsx.PoolPeers), and the pool's own report of it (fsx.PoolRoom).
 type volumes struct {
-	free func(dir string) (int64, error)
-	of   func(dir string) (id string, ok bool)
+	free  func(dir string) (int64, error)
+	of    func(dir string) (id string, ok bool)
+	pool  func(dir string) (id string, ok bool)
+	peers func(dir string) []string
+	room  func(dir string) (int64, bool)
 }
 
-var osVolumes = volumes{free: diskfree.Available, of: fsx.Volume}
+var osVolumes = volumes{free: diskfree.Available, of: fsx.Volume, pool: fsx.Pool, peers: fsx.PoolPeers, room: fsx.PoolRoom}
 
-// demand is what an import asks of one volume.
-type demand struct {
-	dir    string // the folder probed for the volume's room
-	arrive int64  // bytes copied in, or moved in from another volume
-	within int64  // the largest file moved within the volume
+// deviceDemand is what an import asks of one device: the folder probed for its room,
+// whether files land on it, the bytes that arrive from another device (or are copied),
+// and the largest file moved within it.
+type deviceDemand struct {
+	dir    string
+	dest   bool
+	arrive int64
+	within int64
 }
 
-// preflightPlan refuses an import a destination volume has no room for with the reserve
-// kept free. A file lands on the volume of the deepest folder there is above its
-// destination, which a volume mounted below a root makes another than the root's. A move
-// within one volume takes no room once done, but where the rename is refused (two mounts
-// of one filesystem, two shares of one disk) the file is copied first, so the volume has
-// to take the largest such file. Where no volume can be read each root answers alone for
-// every byte it is sent. Sidecars and covers are not counted: which of them a move copies
-// depends on the order the audio leaves its folders, which the run works out as it goes,
-// and the reserve is their room.
+// poolDemand is what an import asks of one pool of space: the bytes that arrive from
+// outside it, the largest file moved inside it, and its devices the plan touches.
+type poolDemand struct {
+	arrive, within int64
+	devices        map[string]*deviceDemand
+	// members is devices in the order the check reads them: the destinations (the first
+	// dests) by folder, then the source folders.
+	members []*deviceDemand
+	dests   int
+}
+
+func (p *poolDemand) sort() {
+	p.members = slices.SortedFunc(maps.Values(p.devices), func(a, b *deviceDemand) int {
+		if a.dest != b.dest {
+			if a.dest {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(a.dir, b.dir)
+	})
+	p.dests = 0
+	for _, d := range p.members {
+		if d.dest {
+			p.dests++
+		}
+	}
+}
+
+func (p *poolDemand) first() *deviceDemand { return p.members[0] }
+
+// addPeers reads the room under each of dirs as well, as members nothing lands on.
+func (p *poolDemand) addPeers(dirs []string) {
+	added := false
+	for _, dir := range dirs {
+		if !slices.ContainsFunc(p.members, func(d *deviceDemand) bool { return d.dir == dir }) {
+			p.devices["\x00peer "+dir] = &deviceDemand{dir: dir}
+			added = true
+		}
+	}
+	if added {
+		p.sort()
+	}
+}
+
+// shortfall is one check a pool's rooms failed, the pool's own or one destination's
+// under a limit of its own: where it is, and the bytes needed and found.
+type shortfall struct {
+	where      string
+	need, have int64
+}
+
+// check reads the pool's rooms and refuses the import when two reads running show a
+// shortfall (preflightPlan), naming the second's. The two need not agree on what is
+// short: a pool filling between them can turn a destination short under its quota into
+// the member with the most room left, and the pool short. Where the platform cannot
+// report free space, the import proceeds.
+func (p *poolDemand) check(vol volumes, reserve int64) error {
+	const op = "inbox.preflight"
+	if diskfree.Need(p.arrive+p.within, reserve) == 0 {
+		return nil
+	}
+	// read returns each member's room, and the most room anything nothing lands on shows:
+	// a source folder, a peer, or, where two destinations share the pool and those show
+	// less than the destinations do, the pool's own report (vol.room).
+	read := func() ([]int64, int64, error) {
+		rooms := make([]int64, len(p.members))
+		destRoom, otherRoom := int64(-1), int64(-1)
+		for i, d := range p.members {
+			n, err := vol.free(d.dir)
+			switch {
+			case err == nil:
+				rooms[i] = n
+			case !d.dest:
+				rooms[i] = -1 // a source folder is only a second look at the pool's room
+			default:
+				return nil, 0, err
+			}
+			if d.dest {
+				destRoom = max(destRoom, rooms[i])
+			} else {
+				otherRoom = max(otherRoom, rooms[i])
+			}
+		}
+		if p.dests > 1 && otherRoom < destRoom {
+			if n, ok := vol.room(p.first().dir); ok {
+				otherRoom = max(otherRoom, n)
+			}
+		}
+		return rooms, otherRoom, nil
+	}
+	shortfalls := func(rooms []int64, otherRoom int64) []shortfall {
+		// The pool's room is known when something nothing lands on reports at least what
+		// any destination does, or when the destinations report alike, as two under no
+		// quota do. Destinations alone that disagree are under quotas of their own, the
+		// largest no measure of the pool, and each then answers for its own bytes only.
+		destRoom, alike := int64(-1), true
+		for i := range p.members[:p.dests] {
+			destRoom = max(destRoom, rooms[i])
+			alike = alike && rooms[i] == rooms[0]
+		}
+		known := otherRoom >= destRoom || alike
+		room := max(destRoom, otherRoom)
+		var out []shortfall
+		if need := diskfree.Need(p.arrive+p.within, reserve); known && room < need {
+			dirs := make([]string, p.dests)
+			for i := range dirs {
+				dirs[i] = p.members[i].dir
+			}
+			out = append(out, shortfall{where: joinDirs(dirs), need: need, have: room})
+		}
+		for i, d := range p.members[:p.dests] {
+			if known && rooms[i] >= room {
+				continue // it reports the pool's room, which the pool's check covers
+			}
+			if need := diskfree.Need(d.arrive+d.within, reserve); rooms[i] < need {
+				out = append(out, shortfall{where: d.dir, need: need, have: rooms[i]})
+			}
+		}
+		return out
+	}
+	var short []shortfall
+	for range 2 {
+		rooms, otherRoom, err := read()
+		if errors.Is(err, diskfree.ErrUnsupported) {
+			return nil
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if short = shortfalls(rooms, otherRoom); len(short) == 0 {
+			return nil
+		}
+	}
+	return waxerr.New(waxerr.CodeIO, op, "insufficient free space under "+short[0].where+
+		" for import (need "+itoa(short[0].need)+" bytes, have "+itoa(short[0].have)+")")
+}
+
+// joinDirs names the destinations of one pool for a refusal.
+func joinDirs(dirs []string) string {
+	if len(dirs) == 1 {
+		return dirs[0]
+	}
+	return strings.Join(dirs[:len(dirs)-1], ", ") + " and " + dirs[len(dirs)-1] + " (one pool)"
+}
+
+// preflightPlan refuses an import a destination has no room for with the reserve kept
+// free. A file lands on the device of the deepest folder there is above its destination,
+// which a disk mounted below a root makes another than the root's. Devices that draw on
+// one pool (btrfs subvolumes, ZFS datasets, the volumes of an APFS container) fill each
+// other's room, so bytes are counted per pool: those from outside it arrive, and a move
+// inside it, across devices or not, needs room for its largest file. A rename takes no
+// room, and where it is refused (another device, two mounts of one filesystem, two shares
+// of one disk) the file is copied and its source removed before the next. A filesystem
+// that shares nothing is a pool of one device; where no device can be read, each root
+// answers alone for every byte it is sent.
+//
+// A pool's room is the most that anything read for it reports: its destinations, a source
+// folder inside it, its other mounted datasets or volumes (fsx.PoolPeers), and, where two
+// destinations share it and those show less than the destinations, the pool's own report
+// (fsx.PoolRoom). A destination reporting less than the pool is held under a limit of its
+// own (a quota) that every byte landing on it counts against. With no tool to report the
+// pool, destinations that disagree are under quotas and none measures the pool, so each
+// answers for its own bytes; ones reporting alike are taken for the pool's room, as two
+// under no quota would be. The rooms are read back to back, and an import is refused
+// only when a second read shows a shortfall too, so a write between two reads is not
+// taken for a quota.
+//
+// A move inside a pool is charged its largest file by choice: a wrong refusal has no way
+// round it and a wrong pass fails one file at a time. The cost is a snapshot that keeps
+// the moved files' blocks. statfs cannot see a quota on a dataset above two destinations.
+// Sidecars and covers are not counted: which of them a move copies depends on the order
+// the audio leaves its folders, which the run works out as it goes, and the reserve is
+// their room.
 func preflightPlan(plan *Plan, vol volumes) error {
 	type answer struct {
 		id string
 		ok bool
 	}
 	asked := map[string]answer{}
-	volumeOf := func(dir string) (string, bool) {
+	deviceOf := func(dir string) (string, bool) {
 		v, hit := asked[dir]
 		if !hit {
 			v.id, v.ok = vol.of(dir)
@@ -1007,8 +1179,35 @@ func preflightPlan(plan *Plan, vol volumes) error {
 		}
 		return v.id, v.ok
 	}
-	type place struct{ volume, root string }
-	demands := map[place]*demand{}
+	poolIDs := map[string]string{}
+	poolOf := func(device, dir string) string {
+		id, hit := poolIDs[device]
+		if !hit {
+			var ok bool
+			if id, ok = vol.pool(dir); !ok {
+				id = device
+			}
+			poolIDs[device] = id
+		}
+		return id
+	}
+	pools := map[string]*poolDemand{}
+	member := func(pool, device, dir string, dest bool) (*poolDemand, *deviceDemand) {
+		p := pools[pool]
+		if p == nil {
+			p = &poolDemand{devices: map[string]*deviceDemand{}}
+			pools[pool] = p
+		}
+		d := p.devices[device]
+		if d == nil {
+			d = &deviceDemand{dir: dir}
+			p.devices[device] = d
+		}
+		if dest && !d.dest {
+			d.dir, d.dest = dir, true
+		}
+		return p, d
+	}
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.Outcome != OutcomeImport {
@@ -1023,37 +1222,56 @@ func preflightPlan(plan *Plan, vol volumes) error {
 		if a.Dst != "" {
 			dir = filepath.Dir(a.Dst)
 		}
-		id, known := volumeOf(dir)
+		id, known := deviceOf(dir)
 		for !known && len(dir) > len(root) && filepath.Dir(dir) != dir {
 			dir = filepath.Dir(dir)
-			id, known = volumeOf(dir)
+			id, known = deviceOf(dir)
 		}
-		at := place{root: root}
-		if known {
-			at = place{volume: id}
-			if rootID, ok := volumeOf(root); ok && rootID == id {
-				dir = root
-			}
+		if !known {
+			// No device ids start with a NUL, so a root that answers alone is apart from all.
+			p, d := member("\x00"+root, "\x00"+root, root, true)
+			p.arrive += a.Size
+			d.arrive += a.Size
+			continue
 		}
-		d := demands[at]
-		if d == nil {
-			d = &demand{dir: dir}
-			demands[at] = d
+		if rootID, ok := deviceOf(root); ok && rootID == id {
+			dir = root
 		}
-		if from, ok := volumeOf(filepath.Dir(a.Src)); !plan.Copy && known && ok && from == id {
+		pool := poolOf(id, dir)
+		p, d := member(pool, id, dir, true)
+		srcDir := filepath.Dir(a.Src)
+		from, fromKnown := deviceOf(srcDir)
+		switch {
+		case plan.Copy || !fromKnown:
+			p.arrive += a.Size
+			d.arrive += a.Size
+		case from == id:
+			p.within = max(p.within, a.Size)
 			d.within = max(d.within, a.Size)
-		} else {
+		case poolOf(from, srcDir) == pool:
+			member(pool, from, srcDir, false)
+			p.within = max(p.within, a.Size)
+			d.arrive += a.Size
+		default:
+			p.arrive += a.Size
 			d.arrive += a.Size
 		}
 	}
-	byDir := func(a, b *demand) int { return cmp.Compare(a.dir, b.dir) }
-	for _, d := range slices.SortedFunc(maps.Values(demands), byDir) {
-		if err := preflight(vol, d.dir, d.arrive+d.within, plan.Reserve); err != nil {
+	for key, p := range pools {
+		p.sort()
+		if !strings.HasPrefix(key, "\x00") {
+			p.addPeers(vol.peers(p.first().dir))
+		}
+	}
+	ordered := slices.Collect(maps.Values(pools))
+	slices.SortFunc(ordered, func(a, b *poolDemand) int { return cmp.Compare(a.first().dir, b.first().dir) })
+	for _, p := range ordered {
+		if err := p.check(vol, plan.Reserve); err != nil {
 			return err
 		}
 	}
 	// An import that brings nothing still answers for the reserve on its default root.
-	if len(demands) == 0 && plan.Library != nil {
+	if len(pools) == 0 && plan.Library != nil {
 		return preflight(vol, string(plan.Library.Root), 0, plan.Reserve)
 	}
 	return nil

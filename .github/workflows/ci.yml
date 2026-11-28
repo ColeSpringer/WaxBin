@@ -141,12 +141,12 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     strategy:
-      # Let each leg report on its own; a Windows-only failure is a real signal
-      # (chmod, flock, and clock semantics all differ there), not a reason to
-      # cancel the Linux run.
+      # Let each leg report on its own; a Windows- or macOS-only failure is a real
+      # signal (chmod, flock, clock, and filesystem semantics all differ there), not
+      # a reason to cancel the Linux run.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -160,6 +160,65 @@ jobs:
           go-download-base-url: https://go.dev/dl
           token: ""
 
+      - name: Filesystem fixtures (Linux)
+        # btrfs subvolumes and ZFS datasets for the tests of devices that share one
+        # pool of space (internal/fsx, inbox). The tests read the layouts these
+        # variables name, skip where one is unset, and fail where it is set and broken.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q btrfs-progs zfsutils-linux
+          base="$RUNNER_TEMP/waxbin-fs"
+          mkdir -p "$base/btrfs/top" "$base/btrfs/b"
+
+          # btrfs on a loop device: subvolumes a and b at the top level, and b mounted
+          # again on its own, the usual layout.
+          truncate -s 256M "$base/btrfs.img"
+          loop="$(sudo losetup --find --show "$base/btrfs.img")"
+          sudo mkfs.btrfs -q "$loop"
+          sudo mount "$loop" "$base/btrfs/top"
+          sudo btrfs subvolume create "$base/btrfs/top/a"
+          sudo btrfs subvolume create "$base/btrfs/top/b"
+          sudo mount -o subvol=b "$loop" "$base/btrfs/b"
+          echo "WAXBIN_TEST_BTRFS=$base/btrfs" >> "$GITHUB_ENV"
+
+          # ZFS, which takes a file as a vdev: pool waxbina with datasets a, b, and held and
+          # held2 (each under a quota); a second pool, waxbinb; and waxbinc, whose top
+          # dataset is not mounted, holding x and y under like quotas. ZFS keeps at least
+          # 128M of a pool back, so the pools imports are tried on are 1G (sparse).
+          sudo modprobe zfs
+          truncate -s 1G "$base/waxbina.img" "$base/waxbinc.img"
+          truncate -s 128M "$base/waxbinb.img"
+          sudo zpool create -m "$base/zfs/waxbina" waxbina "$base/waxbina.img"
+          sudo zfs create waxbina/a
+          sudo zfs create waxbina/b
+          sudo zfs create -o quota=64M waxbina/held
+          sudo zfs create -o quota=64M waxbina/held2
+          sudo zpool create -m "$base/zfs/waxbinb" waxbinb "$base/waxbinb.img"
+          sudo zpool create -O canmount=off -m "$base/zfs/waxbinc" waxbinc "$base/waxbinc.img"
+          sudo zfs create -o quota=64M waxbinc/x
+          sudo zfs create -o quota=64M waxbinc/y
+          echo "WAXBIN_TEST_ZFS=$base/zfs" >> "$GITHUB_ENV"
+
+      - name: Filesystem fixture (macOS)
+        # Two APFS volumes of one container on a disk image, for the same tests.
+        if: runner.os == 'macOS'
+        run: |
+          base="$RUNNER_TEMP/waxbin-apfs"
+          mkdir -p "$base/a" "$base/b"
+          hdiutil create -size 256m -fs APFS -volname waxbina "$RUNNER_TEMP/waxbin-apfs.dmg"
+          hdiutil attach -nobrowse -mountpoint "$base/a" "$RUNNER_TEMP/waxbin-apfs.dmg"
+          # The volume is diskNsM, and its container diskN.
+          volume="$(df "$base/a" | awk 'NR == 2 { print $1 }')"
+          container="${volume#/dev/}"
+          container="${container%s*}"
+          sudo diskutil apfs addVolume "$container" APFS waxbinb -mountpoint "$base/b"
+          # Spotlight writing to a volume between two reads of its room would fail the
+          # check that both report the container's; where it cannot be turned off it is
+          # left on.
+          sudo mdutil -i off "$base/a" "$base/b" || true
+          echo "WAXBIN_TEST_APFS=$base" >> "$GITHUB_ENV"
+
       - name: Test (race)
         # The race detector needs cgo; scope it to the test toolchain only so the
         # shipped binaries stay pure no-CGO. -count=1 because the restored build
@@ -170,6 +229,29 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -count=1 -gcflags='modernc.org/...=-d=checkptr=0' ./...
+
+      - name: The filesystem tests ran
+        # Plain go test prints nothing for a skipped test, so a fixture that stopped
+        # being made, or a variable misspelled, would leave these skipping unseen.
+        if: runner.os != 'Windows'
+        run: |
+          # Each test is named, so one renamed out of the pattern is missed loudly.
+          case "$RUNNER_OS" in
+            Linux) tests="TestPoolOnBtrfs TestPoolOnZFS TestPreflightPlanOnBtrfs TestPreflightPlanOnZFS" ;;
+            macOS) tests="TestPoolOnAPFS TestKqueueReportsChanges TestKqueueReportsUnderALinkedRoot
+              TestKqueueHoldsADescriptorAFolder TestKqueueEndsTheSessionWhenDescriptorsRunOut
+              TestKqueueReportsAnEjectedVolumeOnce" ;;
+          esac
+          go test -count=1 -v -run 'OnBtrfs$|OnZFS$|OnAPFS$|^TestKqueue' \
+            ./internal/fsx/ ./inbox/ ./watch/ | tee "$RUNNER_TEMP/fstests.txt"
+          if grep -- '--- SKIP' "$RUNNER_TEMP/fstests.txt"; then
+            echo "A filesystem test skipped"; exit 1
+          fi
+          for test in $tests; do
+            if ! grep -q -- "^--- PASS: $test (" "$RUNNER_TEMP/fstests.txt"; then
+              echo "$test did not pass"; exit 1
+            fi
+          done
 
   govulncheck:
     runs-on: ubuntu-latest

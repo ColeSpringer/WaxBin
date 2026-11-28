@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -113,32 +114,9 @@ func TestAddTreeEndsLiveWatchingWhenItsWalkRunsOut(t *testing.T) {
 	}
 }
 
-// TestHandleEventLooksForASpareDescriptor: fsnotify's kqueue backend opens a descriptor for
-// each entry that arrives in a watched folder and drops the error when it cannot, so an
-// arrival that finds the process with none to spare closes the source. The folder's
-// rescan is still scheduled.
-func TestHandleEventLooksForASpareDescriptor(t *testing.T) {
-	t.Parallel()
-	for _, spare := range []bool{true, false} {
-		root, at := spentTree(t)
-		src := newFakeSource()
-		lw := &liveWatch{src: src, log: quietLog, spare: func() bool { return spare }}
-		deb := newDebouncer(time.Hour, func(string) {})
-		w := New(&mockEngine{}, []Root{{LibraryPID: "L1", Path: root}}, Options{}, quietLog)
-		w.handleEvent(lw, deb, fsnotify.Event{Name: filepath.Join(at("a"), "x.mp3"), Op: fsnotify.Create})
-		if src.closed() == spare {
-			t.Errorf("spare=%v: closed=%v, want the source closed only with none to spare", spare, src.closed())
-		}
-		if dirs := pending(deb); !slices.Equal(dirs, []string{at("a")}) {
-			t.Errorf("spare=%v: rescans scheduled for %v, want the file's folder", spare, dirs)
-		}
-		deb.stop()
-	}
-}
-
-// TestServeLiveEndsOnASpentSourceError: fsnotify reports some of the opens it makes itself
-// on its error channel. One that failed for want of a descriptor ends the session like a
-// failed add, said once.
+// TestServeLiveEndsOnASpentSourceError: a source reports on its error channel a shortage
+// it met on its own, as the folder source does for a listing that could not open its
+// folder. It ends the session like a failed add, said once.
 func TestServeLiveEndsOnASpentSourceError(t *testing.T) {
 	t.Parallel()
 	root, _ := spentTree(t)
@@ -149,7 +127,7 @@ func TestServeLiveEndsOnASpentSourceError(t *testing.T) {
 	go func() { spent <- w.serveLive(context.Background(), src, make(chan rescanReq, 8), nil) }()
 	waitFor(t, "the root was never armed", func() bool { return src.told(root, false) == 1 })
 	select {
-	case src.errs <- fmt.Errorf("fsnotify.dirChange: %w", syscall.ENFILE):
+	case src.errs <- &fs.PathError{Op: "open", Path: root, Err: syscall.ENFILE}:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the live layer never read the error")
 	}
@@ -346,7 +324,7 @@ func TestWatchHintNamesThePlatformLimit(t *testing.T) {
 	}
 	for _, goos := range []string{"darwin", "ios", "dragonfly", "freebsd", "netbsd", "openbsd"} {
 		got := hintFor(goos)
-		for _, want := range []string{"--max-watch-dirs", "MaxWatchDirs", "kern.maxfilesperproc", "kern.maxfiles"} {
+		for _, want := range []string{"ulimit -n", "kern.maxfilesperproc", "kern.maxfiles"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("%s hint = %q, want it to name %s", goos, got, want)
 			}
@@ -355,6 +333,30 @@ func TestWatchHintNamesThePlatformLimit(t *testing.T) {
 	for _, goos := range []string{"windows", "illumos", "solaris"} {
 		if got := hintFor(goos); got != "" {
 			t.Errorf("%s hint = %q, want none", goos, got)
+		}
+	}
+}
+
+// TestDescriptorBudget: where a watched folder holds a descriptor, the walk stops within
+// three quarters of the open-file limit, or sooner at a cap asked for.
+func TestDescriptorBudget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		limit       uint64
+		asked, want int
+	}{
+		{limit: 256, want: 192},
+		{limit: 256, asked: 100, want: 100},
+		{limit: 256, asked: 500, want: 192},
+		{limit: 61440, want: 46080},
+		{limit: 1, want: 1},
+		{limit: math.MaxUint64, want: math.MaxInt},
+		{limit: 0, asked: 50, want: 50}, // a limit that could not be read
+		{limit: 0, want: 0},
+	}
+	for _, tc := range tests {
+		if got := descriptorBudget(tc.limit, tc.asked); got != tc.want {
+			t.Errorf("descriptorBudget(%d, %d) = %d, want %d", tc.limit, tc.asked, got, tc.want)
 		}
 	}
 }

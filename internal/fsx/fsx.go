@@ -41,10 +41,10 @@ func RootUnreachable(root string) error {
 	return nil
 }
 
-// Volume names the filesystem holding path, following a link, so that two paths with one
-// answer draw on the same free space. Two answers can draw on one pool as well: btrfs
-// subvolumes, ZFS datasets and the volumes of an APFS container each report a device of
-// their own. ok is false when path is not there or the platform cannot say.
+// Volume names the device holding path, following a link, so that two paths with one
+// answer draw on the same free space and a rename between them can stay a rename. Two
+// answers can still draw on one pool, which Pool names. ok is false when path is not
+// there or the platform cannot say.
 func Volume(path string) (id string, ok bool) { return volume(path) }
 
 // MoveOrCopy moves src to dst, or copies it (leaving src in place) when asCopy is

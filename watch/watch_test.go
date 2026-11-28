@@ -667,17 +667,41 @@ type fakeSource struct {
 	mu     sync.Mutex
 	adds   []string
 	drops  []string
+	lost   map[string]bool // watches let go without a word, until added again
 }
 
 func newFakeSource() *fakeSource {
-	return &fakeSource{events: make(chan fsnotify.Event), errs: make(chan error)}
+	return &fakeSource{events: make(chan fsnotify.Event), errs: make(chan error), lost: map[string]bool{}}
 }
 
 func (f *fakeSource) Add(dir string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.adds = append(f.adds, dir)
+	delete(f.lost, dir)
 	return nil
+}
+
+func (f *fakeSource) Dropped(dirs []string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, d := range dirs {
+		if f.lost[d] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// lose lets the watches on dirs go without a word, as inotify does when the filesystem
+// under them is unmounted.
+func (f *fakeSource) lose(dirs ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range dirs {
+		f.lost[d] = true
+	}
 }
 
 func (f *fakeSource) Remove(dir string) error {

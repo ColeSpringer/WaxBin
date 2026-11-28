@@ -19,6 +19,23 @@ func Vol() string {
 	return filepath.VolumeName(wd)
 }
 
+// Fixture is the folder the environment variable env names, joined with parts, for a test
+// that needs a filesystem only some machines have (CI builds them). It skips where env is
+// unset and fails where it is set and the folder is not there, so a fixture that broke
+// cannot pass for one that was never made.
+func Fixture(tb testing.TB, env string, parts ...string) string {
+	tb.Helper()
+	base := os.Getenv(env)
+	if base == "" {
+		tb.Skipf("%s is not set", env)
+	}
+	dir := filepath.Join(append([]string{base}, parts...)...)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		tb.Fatalf("%s names %s, where %s is not a folder (%v)", env, base, dir, err)
+	}
+	return dir
+}
+
 // Symlink makes link point at target, skipping the test where links cannot be made
 // (Windows without the privilege or developer mode).
 func Symlink(tb testing.TB, target, link string) {

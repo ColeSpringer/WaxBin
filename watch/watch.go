@@ -3,9 +3,10 @@
 // first-class mechanism: filesystem events are unreliable on the target
 // filesystems (WSL2, NFS, SMB, bind mounts) and the incremental fast-path is blind
 // to a same-size, mtime-preserving change, so a periodic full-content rescan is the
-// backstop. An optional live layer (fsnotify, or one recursive watch per root on
-// Windows) coalesces filesystem events into targeted directory rescans on top,
-// degrading cleanly to scheduled-only when it cannot arm.
+// backstop. An optional live layer (fsnotify on Linux, one descriptor a folder over
+// kqueue on macOS and the BSDs, one recursive watch per root on Windows) coalesces
+// filesystem events into targeted directory rescans on top, degrading cleanly to
+// scheduled-only when it cannot arm.
 package watch
 
 import (
@@ -39,12 +40,14 @@ type Options struct {
 	// inotify exhaustion is detected and degrades gracefully). A positive value bounds
 	// watch consumption on a very large library. The unwatched remainder stays covered
 	// by scheduled rescans, and the watcher reports Degraded. On macOS and the BSDs a
-	// watched folder holds a descriptor open for itself and for each file in it. When
-	// the watcher finds the process out of them (at a watch it adds, at an arrival in a
-	// watched folder, or in an error its source reports) it closes the source and tries
-	// again a few times after a wait, so a cap is how a library too large for the limit
-	// keeps some live watching. On Windows one watch covers each root whole, so the cap
-	// has nothing to count and is ignored.
+	// watched folder holds one descriptor open, and the walk stops within three
+	// quarters of the open-file limit whatever the cap, leaving the catalog the rest.
+	// Should the process run out all the same (another part of it, or the whole system,
+	// short of them), the watcher closes its source and tries again a few times after a
+	// wait. Live events there come for a folder, not its files, so a pending rescan waits
+	// for the folder's files to stop changing before it runs; a file rewritten in place
+	// after that is the scheduled rescan's to find. On Windows one watch covers each
+	// root whole, so the cap has nothing to count and is ignored.
 	MaxWatchDirs int
 	// WriteSettle is how long a directory must be event-quiet before a live rescan
 	// fires, so a multi-file album drop coalesces into one directory rescan (default 2s).

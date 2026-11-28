@@ -2,10 +2,13 @@ package watch
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,26 +35,17 @@ func hint(args ...any) []any {
 var watchHint = hintFor(runtime.GOOS)
 
 // hintFor names the usual cause of a failed arm on goos. inotify counts watches against a
-// per-user limit, and kqueue spends the process's descriptors. The rest have no such
-// limit to name: on Windows a root's one watch is not a resource that runs out.
+// per-user limit, and a kqueue watch spends one of the process's descriptors. The rest
+// have no such limit to name: on Windows a root's one watch is not a resource that runs
+// out.
 func hintFor(goos string) string {
-	switch {
-	case goos == "linux" || goos == "android":
+	switch goos {
+	case "linux", "android":
 		return "on Linux, raise fs.inotify.max_user_watches (sysctl) if this is watch exhaustion"
-	case kqueueWatches(goos):
-		return "each watched folder and each file in one holds a descriptor open here: cap the watched folders (MaxWatchDirs, --max-watch-dirs), or raise the open-file limits (the hard ulimit -n, kern.maxfilesperproc, and kern.maxfiles for the whole system)"
+	case "darwin", "ios", "dragonfly", "freebsd", "netbsd", "openbsd":
+		return "each watched folder holds a descriptor open here and live watching takes at most three quarters of the open-file limit: raise the hard ulimit -n and kern.maxfilesperproc to watch more folders, and kern.maxfiles where the whole system ran out"
 	}
 	return ""
-}
-
-// kqueueWatches reports whether a folder watch on goos is kqueue's, which holds a
-// descriptor open for the folder and for each file in it.
-func kqueueWatches(goos string) bool {
-	switch goos {
-	case "darwin", "ios", "dragonfly", "freebsd", "netbsd", "openbsd":
-		return true
-	}
-	return false
 }
 
 // descriptorsSpent reports the failure of a source that holds a descriptor per watch
@@ -60,14 +54,18 @@ func descriptorsSpent(err error) bool {
 	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE)
 }
 
-// descriptorSpare reports whether the process can open one more file.
-func descriptorSpare() bool {
-	f, err := os.Open(os.DevNull)
-	if err != nil {
-		return !descriptorsSpent(err)
+// descriptorBudget is the cap on watched folders where each holds a descriptor open: the
+// cap asked for (0 for none) within three quarters of the open-file limit, which leaves
+// the catalog the rest. A limit of 0 is one that could not be read.
+func descriptorBudget(limit uint64, asked int) int {
+	if limit == 0 {
+		return asked
 	}
-	f.Close()
-	return true
+	budget := max(min(limit/4*3, math.MaxInt), 1)
+	if asked > 0 && uint64(asked) < budget {
+		return asked
+	}
+	return int(budget)
 }
 
 // liveEventBuffer bounds the internal queue between the read loop and the event
@@ -132,10 +130,9 @@ var errCoverageLost = errors.New("watch: live coverage lost")
 func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, sets <-chan []Root) (spent bool) {
 	defer src.Close()
 
-	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs), check: w.rootCheck}
-	if kqueueWatches(runtime.GOOS) {
-		lw.spare = descriptorSpare
-	}
+	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs), check: w.rootCheck, byFolder: folderWrites}
+	// Read before the arm, so a volume mounted while it runs is still news to the first tick.
+	lw.mounted = lw.readMounts()
 	exhausted := false
 	for _, r := range w.rootSet() {
 		if _, ex := lw.armRoot(ctx, r.Path); ex {
@@ -177,6 +174,9 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 		case <-ctx.Done():
 		}
 	})
+	if lw.byFolder {
+		deb.look = folderLook
+	}
 	defer deb.stop()
 
 	// Decouple the event read from the potentially-blocking os.Stat + tree walk in
@@ -232,12 +232,10 @@ loop:
 			select {
 			case events <- ev:
 			default:
-				// Worker backed up on slow I/O: the rules that need no look at the disk
-				// still apply, then the directory is scheduled directly, so the reader never
-				// blocks. A brand-new subtree arriving under this overload may not get live
-				// watches until the next scheduled full rescan.
-				if !lw.settle(deb, ev) {
-					deb.schedule(filepath.Dir(ev.Name))
+				// The worker is backed up on slow I/O, so the event is taken here with no
+				// look at the disk, and what needs one waits for the next tick (spill).
+				if lw.spill(deb, ev) {
+					w.degraded.Store(true)
 				}
 			}
 		case ferr, ok := <-src.Errors():
@@ -246,7 +244,7 @@ loop:
 			}
 			switch {
 			case descriptorsSpent(ferr):
-				// fsnotify reports here some of the opens its kqueue backend makes itself.
+				// A source reports here a shortage it met on its own, as a listing does.
 				lw.stop("err", ferr)
 				break loop
 			case errors.Is(ferr, errCoverageLost):
@@ -288,20 +286,20 @@ loop:
 // handleEvent coalesces an event to its containing directory and schedules a
 // debounced rescan. A newly created directory is also added to the watch set (and
 // itself rescanned) so a moved-in subtree stays covered; a created link is not, since
-// the scan follows no link below a root, and its parent's rescan counts it. It runs on
-// the event worker goroutine, off the read loop, so its os.Lstat / addTree walk cannot
-// stall event reading.
+// the scan follows no link below a root, and its parent's rescan counts it. A watched
+// folder reported removed that still stands lost its watch and not its folder, as the
+// folder source reports a volume ejected from under it; the next tick arms it again as
+// it stands, unless a Create for a folder made there anew has. It runs on the event
+// worker goroutine, off the read loop, so its os.Lstat / addTree walk cannot stall
+// event reading.
 func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) {
 	if lw.settle(deb, ev) {
+		if ev.Has(fsnotify.Remove) && (lw.isRoot(ev.Name) || isFolder(ev.Name)) && lw.recheckLater(ev.Name, recheckArm|recheckVolume) {
+			w.degraded.Store(true)
+		}
 		return
 	}
 	if ev.Has(fsnotify.Create) {
-		// fsnotify's kqueue backend opens a descriptor for each entry that arrives in a
-		// watched folder and drops the error when it cannot, so an arrival is the time
-		// to look.
-		if lw.spare != nil && !lw.spare() {
-			lw.stop("path", ev.Name)
-		}
 		if info, err := os.Lstat(ev.Name); err == nil && info.IsDir() {
 			if _, ex := lw.addTree(ev.Name, false); ex {
 				w.degraded.Store(true)
@@ -319,7 +317,8 @@ func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) 
 // nothing new. A renamed folder is only forgotten: its old and new paths are
 // reconciled together by the parent's rescan, as one move, where rescanning each alone
 // would read its files as missing and then as new. A write Windows reports on a folder
-// whose entries changed says nothing the entry's own event does not.
+// whose entries changed says nothing the entry's own event does not; the folder source
+// reports nothing finer, so there the folder is rescanned.
 func (lw *liveWatch) settle(deb *debouncer, ev fsnotify.Event) bool {
 	switch {
 	case ev.Has(fsnotify.Remove):
@@ -330,18 +329,48 @@ func (lw *liveWatch) settle(deb *debouncer, ev fsnotify.Event) bool {
 	case ev.Has(fsnotify.Rename):
 		lw.forget(ev.Name)
 	case ev.Has(fsnotify.Write):
-		return lw.watched(ev.Name)
+		if !lw.watched(ev.Name) {
+			return false
+		}
+		if lw.byFolder {
+			deb.schedule(ev.Name)
+		}
+		return true
 	}
 	return false
 }
 
+// spill takes an event the worker had no room for. The rules that need no look at the
+// disk apply and its folder is scheduled, and what does need a look waits for the next
+// tick: a watched folder reported removed, which may stand still, and the folder an entry
+// arrived in, which may hold a new folder (one look for a folder however many files
+// arrive). It reports whether that was more than a tick takes, which leaves live coverage
+// partial.
+func (lw *liveWatch) spill(deb *debouncer, ev fsnotify.Event) bool {
+	if lw.settle(deb, ev) {
+		return ev.Has(fsnotify.Remove) && lw.recheckLater(ev.Name, recheckArm|recheckVolume)
+	}
+	deb.schedule(filepath.Dir(ev.Name))
+	return ev.Has(fsnotify.Create) && lw.recheckLater(filepath.Dir(ev.Name), recheckKids)
+}
+
+func isFolder(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir()
+}
+
 // source delivers filesystem events for the folders it is told about. fsnotify watches
-// one folder per Add everywhere but Windows, where each watch holds a handle open and
-// NTFS refuses to rename a folder with an open handle below it; there one recursive
-// watch per root is the source, and an Add under a watched root has nothing to do.
+// one folder per Add on Linux. On macOS and the BSDs the folder source does
+// (live_folder.go), holding one descriptor a folder where fsnotify's kqueue backend holds
+// one for each file too. On Windows each watch holds a handle open and NTFS refuses to
+// rename a folder with an open handle below it, so one recursive watch per root is the
+// source, and an Add under a watched root has nothing to do. Dropped names the folders of
+// dirs the source holds no watch on, which it can let go without a word (inotify does on
+// an unmount).
 type source interface {
 	Add(dir string) error
 	Remove(dir string) error
+	Dropped(dirs []string) []string
 	Events() <-chan fsnotify.Event
 	Errors() <-chan error
 	Close() error
@@ -366,13 +395,23 @@ type liveWatch struct {
 	unreachable map[string]bool
 	reaches     map[string]string
 	check       fsx.RootChecker
+	// byFolder says the source reports a folder written in place of its files' events.
+	byFolder bool
+	// rearmed holds the folders armed again as they stood after their watch went, with
+	// the volume each was on then, so one mounted there later is armed in its turn.
+	// recheck holds the folders an event left for the next tick (recheckWant).
+	rearmed map[string]string
+	recheck map[string]recheckWant
+	// mounted is the mount table as last read (nil before it is), so a tick sees a volume
+	// mounted below a root since. Only the worker reads it once the session runs.
+	mounted map[string]bool
 	// spent says the source ran the process out of descriptors and was closed for it.
 	spent bool
-	// spare reports whether the process can open one more file, where the source spends
-	// descriptors the watcher cannot count (kqueue). It is nil elsewhere.
-	spare func() bool
-	// walk replaces the walk of a folder's tree in a test.
-	walk func(root string, fn fs.WalkDirFunc) error
+	// walk and volume replace the walk of a folder's tree and the read of its volume in a
+	// test.
+	walk   func(root string, fn fs.WalkDirFunc) error
+	volume func(dir string) (string, bool)
+	mounts func() ([]string, bool)
 }
 
 // armRoot arms a root's tree unless the root is still armed, and remembers it as a root.
@@ -474,13 +513,225 @@ func (lw *liveWatch) follow(ctx context.Context, set []Root) bool {
 	for _, root := range gone {
 		lw.release(root)
 	}
-	exhausted := false
+	exhausted := lw.recover(ctx)
 	for _, r := range set {
 		if _, ex := lw.armRoot(ctx, r.Path); ex {
 			exhausted = true
 		}
 	}
 	return exhausted
+}
+
+// recover arms again the folders the source let go without a word, those events left to
+// this tick, those a volume was mounted on since the last (the mount table says so), and
+// those armed again after a lost watch that stand on another volume now, reporting
+// whether an arm hit a ceiling.
+func (lw *liveWatch) recover(ctx context.Context) bool {
+	lw.mu.Lock()
+	armed := slices.Sorted(maps.Keys(lw.armed))
+	lw.mu.Unlock()
+	exhausted := false
+	var tops []string
+	for _, dir := range lw.src.Dropped(armed) {
+		// Sorted, so a folder below one let go comes after it, and the arm of that one
+		// covers it. Names such as "Vault 2" sort between "Vault" and "Vault/Album", so it
+		// is every earlier top that is asked.
+		if slices.ContainsFunc(tops, func(top string) bool { return underRoot(top, dir) }) {
+			continue
+		}
+		tops = append(tops, dir)
+		if lw.rearm(ctx, dir, true) {
+			exhausted = true
+		}
+	}
+	lw.mu.Lock()
+	recheck := lw.recheck
+	lw.recheck = nil
+	lw.mu.Unlock()
+	// Sorted, so a walk from a folder arms those below it before they are asked, and the
+	// folders that lost a watch come before the looks for new ones, which would arm them
+	// with no volume noted. One under no root now was in a library released since, whose
+	// watches went with it.
+	dirs := slices.Sorted(maps.Keys(recheck))
+	for _, dir := range dirs {
+		want := recheck[dir]
+		if want&recheckArm != 0 && !lw.watched(dir) && lw.inARoot(dir) && lw.rearm(ctx, dir, want&recheckVolume != 0) {
+			exhausted = true
+		}
+	}
+	for _, dir := range dirs {
+		if recheck[dir]&recheckKids != 0 && lw.watched(dir) && lw.armKids(ctx, dir) {
+			exhausted = true
+		}
+	}
+	if now := lw.readMounts(); now != nil {
+		if lw.mounted != nil {
+			for _, point := range slices.Sorted(maps.Keys(now)) {
+				if lw.mounted[point] {
+					continue
+				}
+				for _, dir := range lw.spellings(point) {
+					if lw.watched(dir) && lw.rearm(ctx, dir, false) {
+						exhausted = true
+					}
+				}
+			}
+		}
+		lw.mounted = now
+	}
+	lw.mu.Lock()
+	rearmed := maps.Clone(lw.rearmed)
+	lw.mu.Unlock()
+	for dir, was := range rearmed {
+		if now, ok := lw.volumeOf(ctx, dir); ok && now != was && lw.rearm(ctx, dir, false) {
+			exhausted = true
+		}
+	}
+	return exhausted
+}
+
+// rearm arms dir again after its watch went, a root through armRoot and any other folder
+// as it stands, and reports whether the arm hit a ceiling. A folder that is gone is left
+// as it is, so the Remove on its way still finds it watched and rescans it rather than
+// the folder above. With remember, the volume it stands on is noted for recover.
+func (lw *liveWatch) rearm(ctx context.Context, dir string, remember bool) bool {
+	// The volume is read before the arm, so one mounted while the arm runs is a change
+	// the next tick sees rather than the volume taken for the one armed.
+	var vol string
+	var known bool
+	if remember {
+		vol, known = lw.volumeOf(ctx, dir)
+	}
+	exhausted := false
+	switch {
+	case lw.isRoot(dir):
+		lw.forget(dir)
+		_, exhausted = lw.armRoot(ctx, dir)
+	case lw.check.Check(ctx, dir) == nil:
+		lw.forget(dir)
+		_, exhausted = lw.addTree(dir, false)
+	default:
+		return false
+	}
+	if known && lw.watched(dir) {
+		lw.mu.Lock()
+		if lw.rearmed == nil {
+			lw.rearmed = map[string]string{}
+		}
+		lw.rearmed[dir] = vol
+		lw.mu.Unlock()
+	}
+	return exhausted
+}
+
+// readMounts reads the mount table as a set, or nil where it cannot be read.
+func (lw *liveWatch) readMounts() map[string]bool {
+	list := fsx.MountPoints
+	if lw.mounts != nil {
+		list = lw.mounts
+	}
+	points, ok := list()
+	if !ok {
+		return nil
+	}
+	set := make(map[string]bool, len(points))
+	for _, p := range points {
+		set[p] = true
+	}
+	return set
+}
+
+// spellings names point, a folder as the mount table spells it with every link resolved,
+// under each root it lies in, as the watch spells it.
+func (lw *liveWatch) spellings(point string) []string {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	var out []string
+	for root := range lw.roots {
+		reached := root
+		if r, ok := lw.reaches[root]; ok {
+			reached = r
+		}
+		if rel, err := filepath.Rel(reached, point); err == nil && underRoot(reached, point) {
+			out = append(out, filepath.Join(root, rel))
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// inARoot reports whether dir is a root or lies below one.
+func (lw *liveWatch) inARoot(dir string) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	for root := range lw.roots {
+		if underRoot(root, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+func (lw *liveWatch) isRoot(dir string) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.roots[dir]
+}
+
+// recheckWant is what the next tick is to do with a folder an event left it.
+type recheckWant uint8
+
+const (
+	recheckArm    recheckWant = 1 << iota // arm it, if it stands unwatched
+	recheckVolume                         // note the volume it stands on as it is armed
+	recheckKids                           // arm the folders in it that are not
+)
+
+// recheckLater leaves dir for the next tick (recover). It reports whether the set was
+// full, at the most events the worker buffers, so a folder may go unarmed.
+func (lw *liveWatch) recheckLater(dir string, want recheckWant) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if _, held := lw.recheck[dir]; !held && len(lw.recheck) >= liveEventBuffer {
+		return true
+	}
+	if lw.recheck == nil {
+		lw.recheck = map[string]recheckWant{}
+	}
+	lw.recheck[dir] |= want
+	return false
+}
+
+// armKids arms the folders in dir that have no watch, which an overload kept the worker
+// from seeing arrive, and reports whether an arm hit a ceiling.
+func (lw *liveWatch) armKids(ctx context.Context, dir string) bool {
+	if lw.check.Check(ctx, dir) != nil {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	exhausted := false
+	for _, e := range entries {
+		if kid := filepath.Join(dir, e.Name()); e.IsDir() && !lw.watched(kid) {
+			if _, ex := lw.addTree(kid, false); ex {
+				exhausted = true
+			}
+		}
+	}
+	return exhausted
+}
+
+// volumeOf reads the volume dir stands on, once a bounded stat finds it there.
+func (lw *liveWatch) volumeOf(ctx context.Context, dir string) (string, bool) {
+	if lw.check.Check(ctx, dir) != nil {
+		return "", false
+	}
+	if lw.volume != nil {
+		return lw.volume(dir)
+	}
+	return fsx.Volume(dir)
 }
 
 // release drops a root that left the watched set and every watched folder below it, so
@@ -522,6 +773,7 @@ func (lw *liveWatch) drop(dir string, gone []string) []string {
 	}
 	delete(lw.below, dir)
 	delete(lw.armed, dir)
+	delete(lw.rearmed, dir)
 	return append(gone, dir)
 }
 
@@ -563,9 +815,8 @@ func (lw *liveWatch) watched(dir string) bool {
 // inotify exhaustion surfaces as ENOSPC), returning how many it armed and whether it
 // hit either ceiling. Stopping on ENOSPC avoids a per-directory warning storm when the
 // rest of the walk would fail the same way, and it lets the caller fall back to
-// scheduled-only coverage for the remainder. A source that runs the process out of
-// descriptors, as kqueue does, ends the session instead (stop), and no walk arms
-// anything after.
+// scheduled-only coverage for the remainder. A source that finds the process out of
+// descriptors ends the session instead (stop), and no walk arms anything after.
 func (lw *liveWatch) addTree(dir string, root bool) (added int, exhausted bool) {
 	dir = filepath.Clean(dir)
 	if lw.stopped() {
@@ -636,11 +887,11 @@ func (lw *liveWatch) addTree(dir string, root bool) (added int, exhausted bool) 
 	return added, exhausted
 }
 
-// stop ends the session once its source has run the process out of descriptors, saying
-// so once with where it showed. A catalog that cannot open a file is worse off than one
-// that waits for its scheduled rescans, and the descriptors come back only as the source
-// closes: taking a folder's watch back would have the folder above report it as new and
-// arm it again. Closing the source ends the read loop.
+// stop ends the session once the process is out of descriptors, saying so once with
+// where it showed. The walk stops at descriptorBudget before the source can take them
+// all, so a shortage here is mostly another's, and a catalog that cannot open a file is
+// worse off than one that waits for its scheduled rescans. Closing the source gives back
+// what it holds and ends the read loop.
 func (lw *liveWatch) stop(where ...any) {
 	lw.mu.Lock()
 	already := lw.spent
@@ -669,9 +920,15 @@ func (lw *liveWatch) stopped() bool {
 // This closes the reschedule race a plain Timer.Reset has: a timer that already
 // fired but whose callback had not yet taken the lock would otherwise be rescheduled
 // and fire a duplicate. Filtering by generation makes exactly the newest timer fire.
+//
+// With look set (a source that reports folders, not files) a pending folder is looked at
+// every half settle and fires once two looks in a row agree, so a file still being
+// copied in holds its folder open; a quiet one fires at the settle as before. The look
+// runs on the timer's goroutine.
 type debouncer struct {
 	settle  time.Duration
 	fn      func(string)
+	look    func(dir string) uint64
 	mu      sync.Mutex
 	timers  map[string]*time.Timer
 	gen     map[string]uint64
@@ -692,8 +949,33 @@ func (d *debouncer) schedule(dir string) {
 		t.Stop() // best-effort; a late fire is filtered by the generation check below
 	}
 	d.gen[dir]++
-	g := d.gen[dir]
-	d.timers[dir] = time.AfterFunc(d.settle, func() {
+	d.arm(dir, d.gen[dir], 0, false)
+}
+
+// arm sets dir's timer for generation g, under the lock; last is the look before, when
+// looked says there was one.
+func (d *debouncer) arm(dir string, g, last uint64, looked bool) {
+	wait := d.settle
+	if d.look != nil {
+		wait /= 2
+	}
+	d.timers[dir] = time.AfterFunc(wait, func() {
+		if d.look != nil {
+			d.mu.Lock()
+			current := !d.stopped && d.gen[dir] == g
+			d.mu.Unlock()
+			if !current {
+				return
+			}
+			if now := d.look(dir); !looked || now != last {
+				d.mu.Lock()
+				if !d.stopped && d.gen[dir] == g {
+					d.arm(dir, g, now, true)
+				}
+				d.mu.Unlock()
+				return
+			}
+		}
 		d.mu.Lock()
 		latest := !d.stopped && d.gen[dir] == g
 		if latest {
@@ -705,6 +987,27 @@ func (d *debouncer) schedule(dir string) {
 			d.fn(dir)
 		}
 	})
+}
+
+// folderLook fingerprints a folder's entries by name, size and modification time.
+func folderLook(dir string) uint64 {
+	h := fnv.New64a()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		h.Write([]byte(err.Error()))
+		return h.Sum64()
+	}
+	var b [16]byte
+	for _, e := range entries {
+		h.Write([]byte(e.Name()))
+		h.Write([]byte{0})
+		if info, err := e.Info(); err == nil {
+			binary.LittleEndian.PutUint64(b[:8], uint64(info.Size()))
+			binary.LittleEndian.PutUint64(b[8:], uint64(info.ModTime().UnixNano()))
+			h.Write(b[:])
+		}
+	}
+	return h.Sum64()
 }
 
 // flush fires every pending rescan now rather than at its settle.
