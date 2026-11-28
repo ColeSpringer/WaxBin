@@ -23,7 +23,3 @@ func (s fsnotifySource) Close() error                  { return s.w.Close() }
 
 // watchCap is the cap on watched folders, each of which holds a watch here.
 func watchCap(n int) int { return n }
-
-// watchHint points at the usual cause of a failed watch arm on Linux, the per-user
-// inotify watch limit, so a degraded warning is actionable.
-const watchHint = "on Linux, raise fs.inotify.max_user_watches (sysctl) if this is watch exhaustion"

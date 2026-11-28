@@ -98,8 +98,8 @@ type Config struct {
 	Profiles []ProfileDef `json:"profiles,omitempty"`
 	// Inbox folders are staging directories imported into a managed library.
 	Inbox []string `json:"inbox,omitempty"`
-	// FreeSpaceReserveBytes is the headroom an import preflight keeps free on the
-	// destination volume (0 disables the check).
+	// FreeSpaceReserveBytes is the headroom an import or a podcast download keeps free
+	// on the volume it writes to. At 0 each still needs room for its own bytes.
 	FreeSpaceReserveBytes int64 `json:"free_space_reserve_bytes,omitempty"`
 
 	// WriteReplayGainTags, when true, makes the analyze pass write computed

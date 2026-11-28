@@ -10,8 +10,10 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
@@ -758,9 +760,8 @@ func DestinationHold(ls *fsx.Lister, a *Action, occ []model.FileOccupant) (HoldC
 func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	const op = "inbox.Execute"
 	// A plan can span managed roots (a book to the audiobook root, a track to the
-	// music root), so preflight each distinct destination volume for the bytes it
-	// receives rather than the whole plan against one root.
-	if err := preflightPlan(plan); err != nil {
+	// music root), so each destination volume is checked for what it receives.
+	if err := preflightPlan(plan, osVolumes); err != nil {
 		return nil, err
 	}
 
@@ -967,10 +968,47 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 	return sidecars, outcome, nil
 }
 
-// preflightPlan refuses an import that would leave any destination volume below its
-// reserve, summing each importable action's bytes against the library root it targets.
-func preflightPlan(plan *Plan) error {
-	byRoot := map[string]int64{}
+// volumes is what the preflight asks of the filesystem: the room left under a folder,
+// and the volume a folder is on.
+type volumes struct {
+	free func(dir string) (int64, error)
+	of   func(dir string) (id string, ok bool)
+}
+
+var osVolumes = volumes{free: diskfree.Available, of: fsx.Volume}
+
+// demand is what an import asks of one volume.
+type demand struct {
+	dir    string // the folder probed for the volume's room
+	arrive int64  // bytes copied in, or moved in from another volume
+	within int64  // the largest file moved within the volume
+}
+
+// preflightPlan refuses an import a destination volume has no room for with the reserve
+// kept free. A file lands on the volume of the deepest folder there is above its
+// destination, which a volume mounted below a root makes another than the root's. A move
+// within one volume takes no room once done, but where the rename is refused (two mounts
+// of one filesystem, two shares of one disk) the file is copied first, so the volume has
+// to take the largest such file. Where no volume can be read each root answers alone for
+// every byte it is sent. Sidecars and covers are not counted: which of them a move copies
+// depends on the order the audio leaves its folders, which the run works out as it goes,
+// and the reserve is their room.
+func preflightPlan(plan *Plan, vol volumes) error {
+	type answer struct {
+		id string
+		ok bool
+	}
+	asked := map[string]answer{}
+	volumeOf := func(dir string) (string, bool) {
+		v, hit := asked[dir]
+		if !hit {
+			v.id, v.ok = vol.of(dir)
+			asked[dir] = v
+		}
+		return v.id, v.ok
+	}
+	type place struct{ volume, root string }
+	demands := map[place]*demand{}
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.Outcome != OutcomeImport {
@@ -980,17 +1018,43 @@ func preflightPlan(plan *Plan) error {
 		if lib == nil {
 			lib = plan.Library
 		}
-		byRoot[string(lib.Root)] += a.Size
+		root := string(lib.Root)
+		dir := root
+		if a.Dst != "" {
+			dir = filepath.Dir(a.Dst)
+		}
+		id, known := volumeOf(dir)
+		for !known && len(dir) > len(root) && filepath.Dir(dir) != dir {
+			dir = filepath.Dir(dir)
+			id, known = volumeOf(dir)
+		}
+		at := place{root: root}
+		if known {
+			at = place{volume: id}
+			if rootID, ok := volumeOf(root); ok && rootID == id {
+				dir = root
+			}
+		}
+		d := demands[at]
+		if d == nil {
+			d = &demand{dir: dir}
+			demands[at] = d
+		}
+		if from, ok := volumeOf(filepath.Dir(a.Src)); !plan.Copy && known && ok && from == id {
+			d.within = max(d.within, a.Size)
+		} else {
+			d.arrive += a.Size
+		}
 	}
-	for root, need := range byRoot {
-		if err := preflight(root, need, plan.Reserve); err != nil {
+	byDir := func(a, b *demand) int { return cmp.Compare(a.dir, b.dir) }
+	for _, d := range slices.SortedFunc(maps.Values(demands), byDir) {
+		if err := preflight(vol, d.dir, d.arrive+d.within, plan.Reserve); err != nil {
 			return err
 		}
 	}
-	// No importable actions but a reserve is set: still check the default root so an
-	// empty import on a full disk is reported consistently with the prior behavior.
-	if len(byRoot) == 0 && plan.Reserve > 0 && plan.Library != nil {
-		return preflight(string(plan.Library.Root), 0, plan.Reserve)
+	// An import that brings nothing still answers for the reserve on its default root.
+	if len(demands) == 0 && plan.Library != nil {
+		return preflight(vol, string(plan.Library.Root), 0, plan.Reserve)
 	}
 	return nil
 }
@@ -1028,22 +1092,24 @@ func (s *Service) finalize(ctx context.Context, batch *model.ImportBatch, rep *R
 	}
 }
 
-// preflight refuses an import that would leave the destination volume below its
-// reserve. If the platform cannot report free space, the import proceeds.
-func preflight(root string, need, reserve int64) error {
-	if need <= 0 && reserve <= 0 {
+// preflight refuses an import the volume holding dir has no room for with the reserve
+// kept free. Where the platform cannot report free space, the import proceeds.
+func preflight(vol volumes, dir string, size, reserve int64) error {
+	const op = "inbox.preflight"
+	need := diskfree.Need(size, reserve)
+	if need == 0 {
 		return nil
 	}
-	avail, err := diskfree.Available(root)
-	if err != nil {
-		if errors.Is(err, diskfree.ErrUnsupported) {
-			return nil
-		}
-		return waxerr.Wrap(waxerr.CodeIO, "inbox.preflight", err)
+	avail, err := vol.free(dir)
+	if errors.Is(err, diskfree.ErrUnsupported) {
+		return nil
 	}
-	if int64(avail) < need+reserve {
-		return waxerr.New(waxerr.CodeIO, "inbox.preflight",
-			"insufficient free space for import (need "+itoa(need+reserve)+" bytes, have "+itoa(int64(avail))+")")
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if avail < need {
+		return waxerr.New(waxerr.CodeIO, op,
+			"insufficient free space under "+dir+" for import (need "+itoa(need)+" bytes, have "+itoa(avail)+")")
 	}
 	return nil
 }

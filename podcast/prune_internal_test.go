@@ -17,8 +17,8 @@ import (
 )
 
 // TestDownloadSurvivesAPruneOfItsShowFolder: a download prepares outside the podcast
-// lease, where an unfetch's prune can take the show folder; the space check reads the
-// download folder, and the fetch makes the show folder again.
+// lease, where an unfetch's prune can take the show folder; the space check then reads
+// the download folder, and the fetch makes the show folder again.
 func TestDownloadSurvivesAPruneOfItsShowFolder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -35,7 +35,7 @@ func TestDownloadSurvivesAPruneOfItsShowFolder(t *testing.T) {
 	dir := t.TempDir()
 	svc := New(st, meta.NewReader(), Config{Dir: dir, ReserveBytes: 1, Providers: []source.Provider{yt}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	svc.freeSpace = func(path string) (uint64, error) {
+	svc.freeSpace = func(path string) (int64, error) {
 		entries, _ := os.ReadDir(dir)
 		for _, e := range entries {
 			_ = os.Remove(filepath.Join(dir, e.Name()))

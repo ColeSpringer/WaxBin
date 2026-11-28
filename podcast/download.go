@@ -74,9 +74,7 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	if err := os.MkdirAll(pathx.Long(folder), 0o755); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// Measured on the download folder, which no prune removes: an unfetch can prune the
-	// show folder before the fetch, which makes it again.
-	if err := s.preflightSpace(s.cfg.Dir, ep.EnclosureSize); err != nil {
+	if err := s.preflightSpace(folder, ep.EnclosureSize); err != nil {
 		return nil, err
 	}
 
@@ -635,30 +633,30 @@ func (s *Service) ApplyRetentionAll(ctx context.Context) (*RetentionResult, erro
 	return total, err
 }
 
-// preflightSpace refuses a download when the destination volume lacks room for the
-// (declared) enclosure size plus the configured reserve. An unknown/negative size
-// checks only the reserve; an unsupported probe (non-Unix) skips the check.
-func (s *Service) preflightSpace(dir string, enclosureSize int64) error {
+// preflightSpace refuses a download when the volume holding the show folder lacks room
+// for the enclosure size the feed declares plus the configured reserve. An unknown size
+// checks only the reserve, and a platform with no probe skips the check. The show folder
+// is measured because a show can sit on a disk of its own, mounted or linked there. An
+// unfetch can prune that folder before the fetch makes it again, and then the download
+// folder above it, which no prune removes, answers.
+func (s *Service) preflightSpace(folder string, enclosureSize int64) error {
 	const op = "podcast.Download"
-	reserve := max(s.cfg.ReserveBytes, 0)
-	// A hostile feed can declare a huge (or negative) enclosure length; clamp it and
-	// use a saturating add so an overflow never wraps negative and skips the check.
-	size := max(enclosureSize, 0)
-	need := reserve + size
-	if need < reserve { // int64 overflow: treat as "definitely too big"
-		return waxerr.New(waxerr.CodeIO, op, "declared enclosure size exceeds addressable space")
-	}
-	if need <= 0 {
+	// A hostile feed can declare any length, which Need holds within an int64.
+	need := diskfree.Need(enclosureSize, s.cfg.ReserveBytes)
+	if need == 0 {
 		return nil
 	}
-	avail, err := s.freeSpace(dir)
+	avail, err := s.freeSpace(folder)
+	if errors.Is(err, fs.ErrNotExist) {
+		avail, err = s.freeSpace(s.cfg.Dir)
+	}
 	if errors.Is(err, diskfree.ErrUnsupported) {
 		return nil
 	}
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if int64(avail) < need {
+	if avail < need {
 		return waxerr.New(waxerr.CodeIO, op, "insufficient free space for download")
 	}
 	return nil

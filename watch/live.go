@@ -5,8 +5,11 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -26,6 +29,47 @@ func hint(args ...any) []any {
 	return args
 }
 
+var watchHint = hintFor(runtime.GOOS)
+
+// hintFor names the usual cause of a failed arm on goos. inotify counts watches against a
+// per-user limit, and kqueue spends the process's descriptors. The rest have no such
+// limit to name: on Windows a root's one watch is not a resource that runs out.
+func hintFor(goos string) string {
+	switch {
+	case goos == "linux" || goos == "android":
+		return "on Linux, raise fs.inotify.max_user_watches (sysctl) if this is watch exhaustion"
+	case kqueueWatches(goos):
+		return "each watched folder and each file in one holds a descriptor open here: cap the watched folders (MaxWatchDirs, --max-watch-dirs), or raise the open-file limits (the hard ulimit -n, kern.maxfilesperproc, and kern.maxfiles for the whole system)"
+	}
+	return ""
+}
+
+// kqueueWatches reports whether a folder watch on goos is kqueue's, which holds a
+// descriptor open for the folder and for each file in it.
+func kqueueWatches(goos string) bool {
+	switch goos {
+	case "darwin", "ios", "dragonfly", "freebsd", "netbsd", "openbsd":
+		return true
+	}
+	return false
+}
+
+// descriptorsSpent reports the failure of a source that holds a descriptor per watch
+// once the process, or the system, has none left.
+func descriptorsSpent(err error) bool {
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE)
+}
+
+// descriptorSpare reports whether the process can open one more file.
+func descriptorSpare() bool {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return !descriptorsSpent(err)
+	}
+	f.Close()
+	return true
+}
+
 // liveEventBuffer bounds the internal queue between the read loop and the event
 // worker. It is generous so a burst (an album drop, a big move) is absorbed without
 // the reader ever blocking on the worker's os.Stat / tree walk; on overflow the reader
@@ -43,26 +87,55 @@ func underRoot(root, path string) bool { return pathx.UnderRoot(root, path) }
 // sidesteps the "a .lrc path is not an audio path" problem: a directory rescan
 // picks up whatever landed. If no watch can be armed (ENOSPC, unsupported fs), it
 // marks the watcher degraded and returns, leaving scheduled rescans as the mechanism.
+// A session that ended for want of descriptors is tried again on a new source.
 // sets carries the root set each tick reads, which the event worker follows.
 func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, sets <-chan []Root) {
-	src, err := w.openSource()
-	if err != nil {
-		w.degraded.Store(true)
-		w.log.Warn("watch: live events unavailable, scheduled rescans only", hint("err", err)...)
-		return
+	for failed := 0; ; failed++ {
+		src, err := w.openSource()
+		if err != nil {
+			w.degraded.Store(true)
+			w.log.Warn("watch: live events unavailable, scheduled rescans only", hint("err", err)...)
+			return
+		}
+		began := time.Now()
+		if !w.serveLive(ctx, src, reqs, sets) {
+			return
+		}
+		// The source ran the process out of descriptors and was closed. A shortage that
+		// was another's, or that passed, costs one wait. A library that needs more than
+		// the process may hold fails every try the same way, and each try takes the
+		// process to its limit again, so they are few.
+		if time.Since(began) >= w.liveSteady {
+			failed = 0
+		}
+		if failed == len(w.liveRetry) {
+			w.log.Warn("watch: live events stay off; the open-file limit was reached at each try", hint()...)
+			return
+		}
+		w.log.Info("watch: trying live events again", "in", w.liveRetry[failed])
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(w.liveRetry[failed]):
+		}
+		w.degraded.Store(false)
 	}
-	w.serveLive(ctx, src, reqs, sets)
 }
 
 // errCoverageLost is what a source sends when its watch on a root ended for good, with
 // the root and the cause; the scheduled rescans cover the root from then on.
 var errCoverageLost = errors.New("watch: live coverage lost")
 
-// serveLive arms the roots on src and services its events until ctx ends.
-func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, sets <-chan []Root) {
+// serveLive arms the roots on src and services its events until ctx ends or the source
+// does. It reports whether it ended because the source ran the process out of
+// descriptors, which is the one ending worth another try.
+func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, sets <-chan []Root) (spent bool) {
 	defer src.Close()
 
 	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs), check: w.rootCheck}
+	if kqueueWatches(runtime.GOOS) {
+		lw.spare = descriptorSpare
+	}
 	exhausted := false
 	for _, r := range w.rootSet() {
 		if _, ex := lw.armRoot(ctx, r.Path); ex {
@@ -70,16 +143,19 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 		}
 	}
 	if ctx.Err() != nil {
-		return
+		return false
 	}
 	switch {
+	case lw.stopped():
+		w.degraded.Store(true)
+		return true
 	case lw.total() == 0 && lw.outOfReach():
 		// Every root is out of reach, so no watch failed: each is armed when a tick finds
 		// it back.
 	case lw.total() == 0:
 		w.degraded.Store(true)
 		w.log.Warn("watch: no filesystem watches could be armed, scheduled rescans only", hint()...)
-		return
+		return false
 	case exhausted:
 		// Some subtrees are unwatched (watch cap or kernel inotify limit). Mark degraded
 		// so this is not a SILENT partial coverage; scheduled rescans still cover the
@@ -114,7 +190,9 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 	// its folder (moved away, or replaced) is armed again, and one no longer in the set
 	// (removed, or relocated) gives its watches up.
 	events := make(chan fsnotify.Event, liveEventBuffer)
+	worked := make(chan struct{})
 	go func() {
+		defer close(worked)
 		for {
 			select {
 			case ev, ok := <-events:
@@ -123,7 +201,8 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 				}
 				w.handleEvent(lw, deb, ev)
 			case set := <-sets:
-				if lw.follow(ctx, set) {
+				// A stopped session arms nothing, and the next one reads the set itself.
+				if !lw.stopped() && lw.follow(ctx, set) {
 					w.degraded.Store(true)
 				}
 			}
@@ -166,6 +245,10 @@ loop:
 				break loop
 			}
 			switch {
+			case descriptorsSpent(ferr):
+				// fsnotify reports here some of the opens its kqueue backend makes itself.
+				lw.stop("err", ferr)
+				break loop
 			case errors.Is(ferr, errCoverageLost):
 				w.degraded.Store(true)
 			case errors.Is(ferr, fsnotify.ErrEventOverflow):
@@ -178,15 +261,28 @@ loop:
 			w.log.Warn("watch: filesystem events error", "err", ferr)
 		}
 	}
-	// Stop the worker. We do not wait for it: on a hung mount its in-flight stat/walk
-	// could block, and shutdown (Ctrl-C) must stay responsive. The goroutine exits once
+	// Stop the worker. A shutdown does not wait for it: on a hung mount its in-flight
+	// stat/walk could block, and Ctrl-C must stay responsive. The goroutine exits once
 	// that call returns and it observes the closed channel.
 	close(events)
-	if ctx.Err() == nil {
-		// The source ended on its own, and nothing live is left behind it.
-		w.degraded.Store(true)
-		w.log.Warn("watch: live events ended, scheduled rescans only")
+	if ctx.Err() != nil {
+		return false
 	}
+	// The source ended on its own, and nothing live is left behind it. The worker's last
+	// events still get their rescans, asked for now, since no later event would settle
+	// them.
+	w.degraded.Store(true)
+	select {
+	case <-worked:
+	case <-ctx.Done():
+		return false
+	}
+	deb.flush()
+	if lw.stopped() {
+		return true
+	}
+	w.log.Warn("watch: live events ended, scheduled rescans only")
+	return false
 }
 
 // handleEvent coalesces an event to its containing directory and schedules a
@@ -200,6 +296,12 @@ func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) 
 		return
 	}
 	if ev.Has(fsnotify.Create) {
+		// fsnotify's kqueue backend opens a descriptor for each entry that arrives in a
+		// watched folder and drops the error when it cannot, so an arrival is the time
+		// to look.
+		if lw.spare != nil && !lw.spare() {
+			lw.stop("path", ev.Name)
+		}
 		if info, err := os.Lstat(ev.Name); err == nil && info.IsDir() {
 			if _, ex := lw.addTree(ev.Name, false); ex {
 				w.degraded.Store(true)
@@ -250,7 +352,7 @@ type source interface {
 type liveWatch struct {
 	src   source
 	log   *slog.Logger
-	max   int // 0 = unlimited (kernel limit still applies, detected via ENOSPC)
+	max   int // 0 = unlimited (the kernel's own limit still applies and is detected)
 	mu    sync.Mutex
 	armed map[string]bool
 	// below holds the watched folders directly under each, so forgetting a folder
@@ -264,6 +366,13 @@ type liveWatch struct {
 	unreachable map[string]bool
 	reaches     map[string]string
 	check       fsx.RootChecker
+	// spent says the source ran the process out of descriptors and was closed for it.
+	spent bool
+	// spare reports whether the process can open one more file, where the source spends
+	// descriptors the watcher cannot count (kqueue). It is nil elsewhere.
+	spare func() bool
+	// walk replaces the walk of a folder's tree in a test.
+	walk func(root string, fn fs.WalkDirFunc) error
 }
 
 // armRoot arms a root's tree unless the root is still armed, and remembers it as a root.
@@ -454,14 +563,27 @@ func (lw *liveWatch) watched(dir string) bool {
 // inotify exhaustion surfaces as ENOSPC), returning how many it armed and whether it
 // hit either ceiling. Stopping on ENOSPC avoids a per-directory warning storm when the
 // rest of the walk would fail the same way, and it lets the caller fall back to
-// scheduled-only coverage for the remainder.
+// scheduled-only coverage for the remainder. A source that runs the process out of
+// descriptors, as kqueue does, ends the session instead (stop), and no walk arms
+// anything after.
 func (lw *liveWatch) addTree(dir string, root bool) (added int, exhausted bool) {
 	dir = filepath.Clean(dir)
+	if lw.stopped() {
+		return 0, true
+	}
 	walk := filepath.WalkDir
 	if root {
 		walk = fsx.WalkRoot
 	}
+	if lw.walk != nil {
+		walk = lw.walk
+	}
 	_ = walk(dir, func(path string, d fs.DirEntry, err error) error {
+		if descriptorsSpent(err) {
+			lw.stop("dir", path)
+			added, exhausted = 0, true
+			return fs.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
@@ -481,13 +603,18 @@ func (lw *liveWatch) addTree(dir string, root bool) (added int, exhausted bool) 
 		if aerr := lw.src.Add(path); aerr != nil {
 			// A resource-limit failure means further adds will also fail: stop and signal
 			// degradation rather than warn once per remaining directory.
-			if errors.Is(aerr, syscall.ENOSPC) {
+			switch {
+			case errors.Is(aerr, syscall.ENOSPC):
 				lw.log.Warn("watch: inotify watch limit reached", hint("dir", path)...)
-				exhausted = true
-				return fs.SkipAll
+			case descriptorsSpent(aerr):
+				lw.stop("dir", path)
+				added = 0
+			default:
+				lw.log.Warn("watch: could not add directory watch", "dir", path, "err", aerr)
+				return nil
 			}
-			lw.log.Warn("watch: could not add directory watch", "dir", path, "err", aerr)
-			return nil
+			exhausted = true
+			return fs.SkipAll
 		}
 		lw.mu.Lock()
 		if !lw.armed[path] {
@@ -507,6 +634,30 @@ func (lw *liveWatch) addTree(dir string, root bool) (added int, exhausted bool) 
 		return nil
 	})
 	return added, exhausted
+}
+
+// stop ends the session once its source has run the process out of descriptors, saying
+// so once with where it showed. A catalog that cannot open a file is worse off than one
+// that waits for its scheduled rescans, and the descriptors come back only as the source
+// closes: taking a folder's watch back would have the folder above report it as new and
+// arm it again. Closing the source ends the read loop.
+func (lw *liveWatch) stop(where ...any) {
+	lw.mu.Lock()
+	already := lw.spent
+	lw.spent = true
+	lw.armed, lw.below = nil, nil
+	lw.mu.Unlock()
+	if already {
+		return
+	}
+	lw.log.Warn("watch: open-file limit reached; live events stop and scheduled rescans cover the library", hint(where...)...)
+	_ = lw.src.Close()
+}
+
+func (lw *liveWatch) stopped() bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.spent
 }
 
 // debouncer coalesces bursts of schedule(dir) calls into one fn(dir) invocation per
@@ -554,6 +705,21 @@ func (d *debouncer) schedule(dir string) {
 			d.fn(dir)
 		}
 	})
+}
+
+// flush fires every pending rescan now rather than at its settle.
+func (d *debouncer) flush() {
+	d.mu.Lock()
+	dirs := slices.Sorted(maps.Keys(d.timers))
+	for _, t := range d.timers {
+		t.Stop()
+	}
+	d.timers = map[string]*time.Timer{}
+	d.gen = map[string]uint64{}
+	d.mu.Unlock()
+	for _, dir := range dirs {
+		d.fn(dir)
+	}
 }
 
 func (d *debouncer) stop() {

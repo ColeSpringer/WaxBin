@@ -46,9 +46,6 @@ func newSource() (source, error) {
 // to cap.
 func watchCap(int) int { return 0 }
 
-// watchHint is empty here: a root's one watch is not a resource that runs out.
-const watchHint = ""
-
 // notifyBuffer is the most ReadDirectoryChangesW accepts over a network share.
 const notifyBuffer = 64 << 10
 

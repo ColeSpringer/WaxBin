@@ -131,7 +131,7 @@ type Service struct {
 	providers map[model.SourceType]source.Provider
 	builtin   source.Provider // the netsafe rss provider, whose parser bounds its feeds
 	now       func() time.Time
-	freeSpace func(dir string) (uint64, error)
+	freeSpace func(dir string) (int64, error)
 
 	libMu sync.Mutex
 	libID int64 // cached internal podcast-library id (0 = unresolved)

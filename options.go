@@ -41,7 +41,8 @@ type Options struct {
 	// Inbox folders are staging directories importable into a managed library. Open
 	// refuses one that overlaps a root.
 	Inbox []string
-	// FreeSpaceReserveBytes is headroom an import preflight keeps free.
+	// FreeSpaceReserveBytes is headroom an import or a podcast download keeps free on
+	// the volume it writes to.
 	FreeSpaceReserveBytes int64
 	// WriteReplayGainTags mirrors computed ReplayGain into files after analyze (off
 	// by default; the catalog stays authoritative).

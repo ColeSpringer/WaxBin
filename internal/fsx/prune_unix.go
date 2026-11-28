@@ -5,6 +5,8 @@ package fsx
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"strconv"
 	"syscall"
 )
 
@@ -14,6 +16,15 @@ func device(info fs.FileInfo) (uint64, bool) {
 		return 0, false
 	}
 	return uint64(st.Dev), true
+}
+
+func volume(path string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	dev, ok := device(info)
+	return strconv.FormatUint(dev, 10), ok
 }
 
 func inUse(err error) bool { return errors.Is(err, syscall.EBUSY) }

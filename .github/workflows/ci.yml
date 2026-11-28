@@ -95,6 +95,17 @@ jobs:
             GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./cmd/waxbin
           done
 
+      - name: Vet and build the BSDs
+        # Nothing ships for these and no test runs on them, so this is all that keeps a
+        # host's BSD build compiling. One architecture each: the files that differ are
+        # per OS. modernc.org/sqlite builds on all three.
+        run: |
+          for target in freebsd/amd64 openbsd/amd64 netbsd/amd64; do
+            echo "$target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./cmd/waxbin
+          done
+
       - name: Vet the memory audit harness
         # store/sqlite/memaudit_test.go builds only under libc.memgrind, which nothing
         # else here compiles, so a libc bump that renames the calls it makes would

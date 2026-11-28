@@ -38,8 +38,13 @@ type Options struct {
 	// watches. 0 means unlimited, though the kernel's own limit still applies (an
 	// inotify exhaustion is detected and degrades gracefully). A positive value bounds
 	// watch consumption on a very large library. The unwatched remainder stays covered
-	// by scheduled rescans, and the watcher reports Degraded. On Windows one watch
-	// covers each root whole, so the cap has nothing to count and is ignored.
+	// by scheduled rescans, and the watcher reports Degraded. On macOS and the BSDs a
+	// watched folder holds a descriptor open for itself and for each file in it. When
+	// the watcher finds the process out of them (at a watch it adds, at an arrival in a
+	// watched folder, or in an error its source reports) it closes the source and tries
+	// again a few times after a wait, so a cap is how a library too large for the limit
+	// keeps some live watching. On Windows one watch covers each root whole, so the cap
+	// has nothing to count and is ignored.
 	MaxWatchDirs int
 	// WriteSettle is how long a directory must be event-quiet before a live rescan
 	// fires, so a multi-file album drop coalesces into one directory rescan (default 2s).
@@ -113,6 +118,11 @@ type Watcher struct {
 	openSource func() (source, error)
 	// rootCheck asks whether a root answers; tests swap in a stat they hold.
 	rootCheck fsx.RootChecker
+	// liveRetry is the wait before each new try at live events after their source ran
+	// the process out of descriptors, and liveSteady how long a session has to hold for
+	// the tries to start over.
+	liveRetry  []time.Duration
+	liveSteady time.Duration
 }
 
 // New builds a watcher over an engine and roots.
@@ -121,7 +131,8 @@ func New(engine Engine, roots []Root, opts Options, log *slog.Logger) *Watcher {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Watcher{engine: engine, roots: roots, opts: opts, log: log, openSource: newSource}
+	return &Watcher{engine: engine, roots: roots, opts: opts, log: log, openSource: newSource,
+		liveRetry: []time.Duration{time.Minute, 10 * time.Minute, time.Hour}, liveSteady: time.Hour}
 }
 
 // Degraded reports whether the live filesystem-event layer failed to arm (so the

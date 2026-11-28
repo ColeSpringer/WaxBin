@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -91,5 +92,58 @@ func TestARenameAcrossVolumesIsCrossDevice(t *testing.T) {
 	t.Parallel()
 	if !crossDevice(&os.LinkError{Op: "rename", Old: `C:\a`, New: `D:\a`, Err: windows.ERROR_NOT_SAME_DEVICE}) {
 		t.Error("ERROR_NOT_SAME_DEVICE is not read as a move across filesystems")
+	}
+}
+
+// TestVolumeTellsDrivesApart: a local volume is named by its GUID, and the folder the
+// tests run in is on another volume than the temp folder wherever the two are on two
+// drives, as they are on the CI runner.
+func TestVolumeTellsDrivesApart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	here, ok := Volume(dir)
+	if !ok || !strings.HasPrefix(here, `\\?\Volume{`) || !strings.HasSuffix(here, "}") {
+		t.Fatalf("Volume(%q) = %q, %v, want the volume's GUID name", dir, here, ok)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.EqualFold(filepath.VolumeName(wd), filepath.VolumeName(dir)) {
+		t.Skip("the working folder and the temp folder are on one drive")
+	}
+	if there, ok := Volume(wd); !ok || there == here {
+		t.Errorf("Volume(%q) = %q, %v, the same as the temp folder's on another drive", wd, there, ok)
+	}
+}
+
+// TestVolumeNamesAShareByItsServer: a folder reached through a share has no volume GUID,
+// and is named by the server beside the serial number, so two servers reporting one
+// serial are two volumes. The runner's own administrative share stands in for a server,
+// where it answers.
+func TestVolumeNamesAShareByItsServer(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	drive := filepath.VolumeName(dir)
+	if len(drive) != 2 || drive[1] != ':' {
+		t.Skipf("the temp folder is not on a lettered drive: %s", dir)
+	}
+	shared := `\\localhost\` + drive[:1] + `$` + dir[2:]
+	if _, err := os.Stat(shared); err != nil {
+		t.Skipf("no administrative share here: %v", err)
+	}
+	sub := filepath.Join(shared, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, ok := Volume(shared)
+	if !ok {
+		t.Fatalf("Volume(%q) names no volume", shared)
+	}
+	if !strings.HasPrefix(id, `\\?\Volume{`) && !strings.HasPrefix(id, `\\localhost#`) {
+		t.Errorf("Volume(%q) = %q, want it to name the server", shared, id)
+	}
+	if below, ok := Volume(sub); !ok || below != id {
+		t.Errorf("Volume(%q) = %q, %v, want %q as for the folder above it", sub, below, ok, id)
 	}
 }
